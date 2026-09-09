@@ -35,18 +35,36 @@ namespace duckdo {
 const vector<ModelInfo> &ModelCatalog() {
 	static const vector<ModelInfo> catalog = [] {
 		vector<ModelInfo> models;
+		ModelInfo causalpfn;
+		causalpfn.kind = ModelKind::CAUSALPFN;
+		causalpfn.id = "causalpfn";
+		causalpfn.setting = "backdoor (ignorability)";
+		causalpfn.license = "Apache-2.0";
+		causalpfn.source = "https://github.com/vdblm/CausalPFN";
+		causalpfn.commercial = true;
+		causalpfn.attribution_required = false;
+		causalpfn.max_covariates = 99;
+		causalpfn.num_buckets = 0;
+		causalpfn.max_context = 4096;
+		causalpfn.weights_file = "causalpfn.weights.bin";
+		causalpfn.graph_pattern = "causalpfn.onnx";
+		causalpfn.manifest_file = "causalpfn.manifest.json";
+		models.push_back(std::move(causalpfn));
+
 		ModelInfo dopfn;
+		dopfn.kind = ModelKind::DOPFN;
 		dopfn.id = "do_pfn";
 		dopfn.setting = "non-identifiable prior";
 		dopfn.license = "CC BY 4.0";
 		dopfn.source = "https://github.com/jr2021/Do-PFN";
 		dopfn.commercial = true;
 		dopfn.attribution_required = true;
-		dopfn.max_features = 6;
+		dopfn.max_covariates = 5;
 		dopfn.num_buckets = 100;
 		dopfn.context_ladder = {128, 512, 1024, 2048};
 		dopfn.weights_file = "dopfn.weights.bin";
 		dopfn.graph_pattern = "dopfn_ctx%llu.onnx";
+		dopfn.manifest_file = "dopfn.manifest.json";
 		models.push_back(std::move(dopfn));
 		return models;
 	}();
@@ -110,6 +128,9 @@ static bool FileExists(const string &path) {
 }
 
 static string GraphPath(const string &dir, const ModelInfo &model, idx_t rung) {
+	if (model.context_ladder.empty()) {
+		return dir + "/" + model.graph_pattern;
+	}
 	return dir + "/" + StringUtil::Format(model.graph_pattern, static_cast<unsigned long long>(rung));
 }
 
@@ -119,12 +140,23 @@ bool ModelArtifactsPresent(ClientContext &context, const ModelInfo &model, strin
 		missing = model.weights_file;
 		return false;
 	}
-	for (auto rung : model.context_ladder) {
-		const string path = GraphPath(dir, model, rung);
-		if (!FileExists(path)) {
-			missing = StringUtil::Format(model.graph_pattern, static_cast<unsigned long long>(rung));
+	if (model.context_ladder.empty()) {
+		if (!FileExists(dir + "/" + model.graph_pattern)) {
+			missing = model.graph_pattern;
 			return false;
 		}
+	} else {
+		for (auto rung : model.context_ladder) {
+			const string path = GraphPath(dir, model, rung);
+			if (!FileExists(path)) {
+				missing = StringUtil::Format(model.graph_pattern, static_cast<unsigned long long>(rung));
+				return false;
+			}
+		}
+	}
+	if (!model.manifest_file.empty() && !FileExists(dir + "/" + model.manifest_file)) {
+		missing = model.manifest_file;
+		return false;
 	}
 	missing.clear();
 	return true;
@@ -142,9 +174,9 @@ struct BarDistribution {
 
 //! Minimal extraction of the borders array from the manifest, so the runtime
 //! does not need a JSON dependency for one well-known field.
-BarDistribution LoadBorders(const string &dir) {
+BarDistribution LoadBorders(const string &dir, const string &manifest) {
 	BarDistribution out;
-	std::ifstream file((dir + "/dopfn.manifest.json").c_str());
+	std::ifstream file((dir + "/" + manifest).c_str());
 	if (!file.good()) {
 		return out;
 	}
@@ -294,24 +326,42 @@ Ort::Session &AcquireSession(const string &path, idx_t threads) {
 
 } // namespace
 
-CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
-                          const ModelInfo &model) {
-	CfmResult result;
-	const string dir = ModelDir(context);
-	string missing;
-	if (!ModelArtifactsPresent(context, model, missing)) {
-		throw BinderException("duckdo: model '%s' is not available: '%s' is missing from %s. Export it with "
-		                      "`python scripts/export/export_dopfn.py --repo <Do-PFN checkout> --out %s`",
-		                      model.id, missing, dir, dir);
+namespace {
+
+//! Shared preparation: pick features, sample a context, and report what was done.
+struct Prepared {
+	vector<idx_t> features;
+	vector<idx_t> context_rows;
+	vector<string> warnings;
+};
+
+Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model,
+                       idx_t context_size) {
+	Prepared out;
+	out.features = SelectFeatures(frame, model.max_covariates);
+	if (frame.X.cols > model.max_covariates) {
+		out.warnings.push_back(StringUtil::Format(
+		    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu",
+		    model.id.c_str(), static_cast<unsigned long long>(model.max_covariates),
+		    static_cast<unsigned long long>(out.features.size()),
+		    static_cast<unsigned long long>(frame.X.cols)));
 	}
-	auto bars = LoadBorders(dir);
+	out.context_rows = SampleContext(frame, context_size, spec.seed);
+	return out;
+}
+
+//! Do-PFN: treatment is column 0 of a single X tensor, the output is logits over
+//! a bar distribution, and the context length is fixed by the exported graph.
+CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
+                   const ModelInfo &model, const string &dir) {
+	CfmResult result;
+	auto bars = LoadBorders(dir, model.manifest_file);
 	if (!bars.loaded || bars.centres.size() != model.num_buckets) {
-		throw BinderException("duckdo: could not read the bar-distribution borders from %s/dopfn.manifest.json. "
-		                      "Re-run the export script to regenerate it",
-		                      dir);
+		throw BinderException("duckdo: could not read the bar-distribution borders from %s/%s. Re-run the export "
+		                      "script to regenerate it",
+		                      dir, model.manifest_file);
 	}
 
-	// Pick the largest rung whose context fits, leaving at least one row over.
 	idx_t rung = 0;
 	for (auto candidate : model.context_ladder) {
 		if (candidate < frame.n && candidate > rung) {
@@ -320,25 +370,19 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 	}
 	if (rung == 0) {
 		throw BinderException("duckdo: %llu rows is below the smallest context this model was exported for (%llu). "
-		                      "Use a classical estimator on a table this small",
+		                      "Use a classical estimator on a table this small, or model := 'causalpfn', whose "
+		                      "context length is not fixed",
 		                      static_cast<unsigned long long>(frame.n),
 		                      static_cast<unsigned long long>(model.context_ladder.front()));
 	}
 	result.ladder_rung = rung;
 
-	const idx_t budget = model.max_features - 1; // column 0 is the treatment
-	auto features = SelectFeatures(frame, budget);
-	for (auto j : features) {
+	auto prepared = PrepareCommon(frame, spec, model, rung);
+	result.warnings = prepared.warnings;
+	for (auto j : prepared.features) {
 		result.features_used.push_back(frame.features[j].name);
 	}
-	if (frame.X.cols > budget) {
-		result.warnings.push_back(StringUtil::Format(
-		    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu",
-		    model.id.c_str(), static_cast<unsigned long long>(budget), static_cast<unsigned long long>(features.size()),
-		    static_cast<unsigned long long>(frame.X.cols)));
-	}
-
-	auto context_rows = SampleContext(frame, rung, spec.seed);
+	const auto &context_rows = prepared.context_rows;
 	if (context_rows.size() != rung) {
 		throw BinderException("duckdo: could not assemble a context of %llu rows from this table",
 		                      static_cast<unsigned long long>(rung));
@@ -360,27 +404,25 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 	}
 	const double y_sd = std::max(std::sqrt(y_var / static_cast<double>(context_rows.size() - 1)), 1e-12);
 
-	const idx_t width = model.max_features;
+	const idx_t width = model.max_covariates + 1; // column 0 is the treatment
 	std::vector<float> context_x(rung * width, 0.0f);
 	std::vector<float> context_y(rung, 0.0f);
 	for (idx_t i = 0; i < rung; i++) {
 		const idx_t r = context_rows[i];
 		context_x[i * width] = static_cast<float>(frame.t[r]);
-		for (idx_t j = 0; j < features.size(); j++) {
-			context_x[i * width + 1 + j] = static_cast<float>(frame.X.At(r, features[j]));
+		for (idx_t j = 0; j < prepared.features.size(); j++) {
+			context_x[i * width + 1 + j] = static_cast<float>(frame.X.At(r, prepared.features[j]));
 		}
 		context_y[i] = static_cast<float>((frame.y[r] - y_mean) / y_sd);
 	}
 
-	auto &session = AcquireSession(GraphPath(dir, model, rung),
-	                               GetSettingIdx(context, "duckdo_threads", 4));
+	auto &session = AcquireSession(GraphPath(dir, model, rung), GetSettingIdx(context, "duckdo_threads", 4));
 	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 	const std::array<int64_t, 3> context_shape {static_cast<int64_t>(rung), 1, static_cast<int64_t>(width)};
 	const std::array<int64_t, 2> context_y_shape {static_cast<int64_t>(rung), 1};
 	const char *input_names[] = {"context_x", "context_y", "query_x"};
 	const char *output_names[] = {"logits"};
 
-	// Query in chunks so a wide table does not allocate one enormous tensor.
 	const idx_t chunk = std::max<idx_t>(GetSettingIdx(context, "duckdo_query_chunk", 512), 1);
 	result.cate.assign(frame.n, 0.0);
 
@@ -388,17 +430,16 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 		const idx_t count = std::min(chunk, frame.n - start);
 		std::vector<float> query(count * width, 0.0f);
 		for (idx_t i = 0; i < count; i++) {
-			for (idx_t j = 0; j < features.size(); j++) {
-				query[i * width + 1 + j] = static_cast<float>(frame.X.At(start + i, features[j]));
+			for (idx_t j = 0; j < prepared.features.size(); j++) {
+				query[i * width + 1 + j] = static_cast<float>(frame.X.At(start + i, prepared.features[j]));
 			}
 		}
 		const std::array<int64_t, 3> query_shape {static_cast<int64_t>(count), 1, static_cast<int64_t>(width)};
 
-		double arm_means[2];
 		std::vector<double> per_row[2];
 		for (int arm = 0; arm < 2; arm++) {
 			// do(T = arm): force column 0 for every query row. This is the
-			// intervention - it is not a filter on rows where T happened to be arm.
+			// intervention - not a filter on rows where T happened to be arm.
 			for (idx_t i = 0; i < count; i++) {
 				query[i * width] = static_cast<float>(arm);
 			}
@@ -409,8 +450,8 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 			                                    context_y_shape.size()),
 			    Ort::Value::CreateTensor<float>(memory, query.data(), query.size(), query_shape.data(),
 			                                    query_shape.size())};
-			auto outputs = session.Run(Ort::RunOptions {nullptr}, input_names, inputs.data(), inputs.size(),
-			                           output_names, 1);
+			auto outputs =
+			    session.Run(Ort::RunOptions {nullptr}, input_names, inputs.data(), inputs.size(), output_names, 1);
 			const float *logits = outputs[0].GetTensorData<float>();
 			const auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
 			if (shape.size() != 3 || static_cast<idx_t>(shape[0]) != count ||
@@ -435,14 +476,126 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 				}
 				per_row[arm][i] = total > 0.0 ? weighted / total : 0.0;
 			}
-			arm_means[arm] = 0.0;
 		}
-		(void)arm_means;
 		for (idx_t i = 0; i < count; i++) {
 			// Back to the outcome's own scale. The centring cancels in the
 			// difference; the scale does not.
 			result.cate[start + i] = (per_row[1][i] - per_row[0][i]) * y_sd;
 		}
+	}
+	return result;
+}
+
+//! CausalPFN: the treatment is its own tensor, the graph returns the conditional
+//! expected potential outcome directly, and both lengths are dynamic - so there
+//! is no ladder, no bar distribution and no outcome rescaling to undo. The model
+//! standardises the outcome per arm internally.
+CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
+                       const ModelInfo &model, const string &dir) {
+	CfmResult result;
+	const idx_t context_size = std::min(frame.n, model.max_context);
+	auto prepared = PrepareCommon(frame, spec, model, context_size);
+	result.warnings = prepared.warnings;
+	for (auto j : prepared.features) {
+		result.features_used.push_back(frame.features[j].name);
+	}
+	const auto &context_rows = prepared.context_rows;
+	result.context_used = context_rows.size();
+	result.ladder_rung = 0; // dynamic
+
+	const idx_t width = model.max_covariates;
+	const idx_t ctx = context_rows.size();
+	std::vector<float> context_x(ctx * width, 0.0f);
+	std::vector<float> context_t(ctx, 0.0f);
+	std::vector<float> context_y(ctx, 0.0f);
+	for (idx_t i = 0; i < ctx; i++) {
+		const idx_t r = context_rows[i];
+		for (idx_t j = 0; j < prepared.features.size(); j++) {
+			context_x[i * width + j] = static_cast<float>(frame.X.At(r, prepared.features[j]));
+		}
+		context_t[i] = static_cast<float>(frame.t[r]);
+		context_y[i] = static_cast<float>(frame.y[r]);
+	}
+
+	auto &session = AcquireSession(GraphPath(dir, model, 0), GetSettingIdx(context, "duckdo_threads", 4));
+	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+	const std::array<int64_t, 3> context_shape {1, static_cast<int64_t>(ctx), static_cast<int64_t>(width)};
+	const std::array<int64_t, 2> context_1d {1, static_cast<int64_t>(ctx)};
+	const char *input_names[] = {"X_context", "t_context", "y_context", "X_query", "t_query"};
+	const char *output_names[] = {"mu"};
+
+	const idx_t chunk = std::max<idx_t>(GetSettingIdx(context, "duckdo_query_chunk", 512), 1);
+	result.cate.assign(frame.n, 0.0);
+
+	for (idx_t start = 0; start < frame.n; start += chunk) {
+		const idx_t count = std::min(chunk, frame.n - start);
+		std::vector<float> query_x(count * width, 0.0f);
+		for (idx_t i = 0; i < count; i++) {
+			for (idx_t j = 0; j < prepared.features.size(); j++) {
+				query_x[i * width + j] = static_cast<float>(frame.X.At(start + i, prepared.features[j]));
+			}
+		}
+		const std::array<int64_t, 3> query_shape {1, static_cast<int64_t>(count), static_cast<int64_t>(width)};
+		const std::array<int64_t, 2> query_1d {1, static_cast<int64_t>(count)};
+
+		std::vector<double> per_row[2];
+		for (int arm = 0; arm < 2; arm++) {
+			// do(T = arm) for every query row.
+			std::vector<float> query_t(count, static_cast<float>(arm));
+			std::array<Ort::Value, 5> inputs {
+			    Ort::Value::CreateTensor<float>(memory, context_x.data(), context_x.size(), context_shape.data(),
+			                                    context_shape.size()),
+			    Ort::Value::CreateTensor<float>(memory, context_t.data(), context_t.size(), context_1d.data(),
+			                                    context_1d.size()),
+			    Ort::Value::CreateTensor<float>(memory, context_y.data(), context_y.size(), context_1d.data(),
+			                                    context_1d.size()),
+			    Ort::Value::CreateTensor<float>(memory, query_x.data(), query_x.size(), query_shape.data(),
+			                                    query_shape.size()),
+			    Ort::Value::CreateTensor<float>(memory, query_t.data(), query_t.size(), query_1d.data(),
+			                                    query_1d.size())};
+			auto outputs =
+			    session.Run(Ort::RunOptions {nullptr}, input_names, inputs.data(), inputs.size(), output_names, 1);
+			const float *mu = outputs[0].GetTensorData<float>();
+			const auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+			idx_t produced = 1;
+			for (auto dim : shape) {
+				produced *= static_cast<idx_t>(dim);
+			}
+			if (produced != count) {
+				throw BinderException("duckdo: model '%s' returned %llu values for %llu query rows; the graph and "
+				                      "the catalog entry disagree. Re-run the export script",
+				                      model.id, static_cast<unsigned long long>(produced),
+				                      static_cast<unsigned long long>(count));
+			}
+			per_row[arm].assign(count, 0.0);
+			for (idx_t i = 0; i < count; i++) {
+				per_row[arm][i] = static_cast<double>(mu[i]);
+			}
+		}
+		for (idx_t i = 0; i < count; i++) {
+			result.cate[start + i] = per_row[1][i] - per_row[0][i];
+		}
+	}
+	return result;
+}
+
+} // namespace
+
+CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
+                          const ModelInfo &model) {
+	const string dir = ModelDir(context);
+	string missing;
+	if (!ModelArtifactsPresent(context, model, missing)) {
+		const char *script = model.kind == ModelKind::CAUSALPFN ? "export_causalpfn.py --out %s"
+		                                                        : "export_dopfn.py --repo <Do-PFN checkout> --out %s";
+		throw BinderException("duckdo: model '%s' is not available: '%s' is missing from %s. Export it with "
+		                      "`python scripts/export/%s`",
+		                      model.id, missing, dir, StringUtil::Format(script, dir));
+	}
+	auto result = model.kind == ModelKind::CAUSALPFN ? RunCausalPfn(context, frame, spec, model, dir)
+	                                                 : RunDoPfn(context, frame, spec, model, dir);
+	if (model.attribution_required) {
+		result.warnings.push_back(model.id + " is " + model.license + "; attribution is required downstream");
 	}
 	return result;
 }
@@ -482,7 +635,7 @@ void EmitRows(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBindInput &,
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	names = {"model", "setting", "license", "commercial", "attribution_required",
-	         "max_features", "context_ladder", "available", "detail"};
+	         "max_covariates", "context_ladder", "available", "detail"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BIGINT,
 	                LogicalType::LIST(LogicalType::BIGINT), LogicalType::BOOLEAN, LogicalType::VARCHAR};
@@ -509,7 +662,7 @@ unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBin
 		}
 		bind->rows.push_back({Value(model.id), Value(model.setting), Value(model.license),
 		                      Value::BOOLEAN(model.commercial), Value::BOOLEAN(model.attribution_required),
-		                      Value::BIGINT(static_cast<int64_t>(model.max_features)),
+		                      Value::BIGINT(static_cast<int64_t>(model.max_covariates)),
 		                      Value::LIST(LogicalType::BIGINT, std::move(ladder)), Value::BOOLEAN(available),
 		                      Value(detail)});
 	}

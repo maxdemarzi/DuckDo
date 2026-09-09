@@ -37,7 +37,7 @@ SELECT i AS customer_id, x1, x2,
 FROM p;
 
 query I
-SELECT available FROM do_list_models() WHERE model = 'do_pfn';
+SELECT bool_and(available) FROM do_list_models();
 ----
 true
 
@@ -96,5 +96,51 @@ SELECT corr(c.cate, 3.0 + 2.0*h.x1) > 0.9
 FROM do_cate('het', treatment := 't', outcome := 'y', exclude := ['id'], id := 'id',
              model := 'do_pfn') c
 JOIN het h ON h.id = c.id::BIGINT;
+----
+true
+
+# --- CausalPFN ---------------------------------------------------------------
+#
+# CausalPFN targets the backdoor setting directly rather than hedging under a
+# non-identifiable prior, and in these benchmarks it does not shrink: it lands
+# where AIPW does. So its tolerance is the tight one.
+
+query I
+SELECT abs(estimate - 3.0) < 0.25
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'causalpfn');
+----
+true
+
+query II
+SELECT estimator, variance_method FROM do_ate('customers', treatment := 'discount',
+       outcome := 'revenue', exclude := ['customer_id'], model := 'causalpfn');
+----
+causalpfn	effect dispersion (no model uncertainty)
+
+# Apache-2.0 carries no attribution obligation, so no such warning is attached.
+query I
+SELECT NOT list_contains(warnings, 'causalpfn is Apache-2.0; attribution is required downstream')
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'causalpfn');
+----
+true
+
+query I
+SELECT corr(c.cate, 3.0 + 2.0*h.x1) > 0.95
+FROM do_cate('het', treatment := 't', outcome := 'y', exclude := ['id'], id := 'id',
+             model := 'causalpfn') c
+JOIN het h ON h.id = c.id::BIGINT;
+----
+true
+
+# The two models disagree in the documented direction: Do-PFN shrinks the
+# population effect, CausalPFN does not. This asserts the finding, so a future
+# change that silently alters it fails the suite.
+query I
+SELECT (SELECT estimate FROM do_ate('het', treatment := 't', outcome := 'y', exclude := ['id'],
+                                    model := 'causalpfn'))
+     > (SELECT estimate FROM do_ate('het', treatment := 't', outcome := 'y', exclude := ['id'],
+                                    model := 'do_pfn'));
 ----
 true

@@ -11,14 +11,33 @@ require duckdo
 # The catalog is static and always visible: you can find out what exists, and
 # under what licence, before downloading or building anything.
 query I
-SELECT count(*) >= 1 FROM do_list_models();
+SELECT count(*) >= 2 FROM do_list_models();
 ----
 true
 
+# Two families, and the licence difference between them is the first thing a
+# user needs: Apache-2.0 carries no downstream obligation, CC BY 4.0 does.
 query IIII
-SELECT model, license, attribution_required, max_features FROM do_list_models() WHERE model = 'do_pfn';
+SELECT model, license, attribution_required, max_covariates FROM do_list_models() WHERE model = 'do_pfn';
 ----
-do_pfn	CC BY 4.0	true	6
+do_pfn	CC BY 4.0	true	5
+
+query IIII
+SELECT model, license, attribution_required, max_covariates FROM do_list_models() WHERE model = 'causalpfn';
+----
+causalpfn	Apache-2.0	false	99
+
+query II
+SELECT model, setting FROM do_list_models() ORDER BY model;
+----
+causalpfn	backdoor (ignorability)
+do_pfn	non-identifiable prior
+
+# CausalPFN's context length is dynamic, so it has no ladder.
+query I
+SELECT len(context_ladder) = 0 FROM do_list_models() WHERE model = 'causalpfn';
+----
+true
 
 # The licence obligation is surfaced, not buried.
 query I
@@ -52,9 +71,9 @@ SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x
 unknown model
 
 statement error
-SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x'], model := 'causalpfn');
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x'], model := 'not_a_pfn');
 ----
-Available: do_pfn
+Available: causalpfn, do_pfn
 
 # Pointing at an empty directory must fail loudly, never fall back to a
 # classical estimator while still claiming to be the model.

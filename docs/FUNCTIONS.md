@@ -249,9 +249,14 @@ falling back to a classical estimator while still claiming to be the model.
 `model, setting, license, commercial, attribution_required, max_features, context_ladder,
 available, detail`. `detail` says why a model is unavailable and what to do about it.
 
-| model | setting | licence | inputs | context ladder |
+| model | setting | licence | covariates | context |
 |---|---|---|---|---|
-| `do_pfn` | non-identifiable prior | CC BY 4.0 (attribution required) | 6 (treatment + 5 covariates) | 128 / 512 / 1024 / 2048 |
+| `causalpfn` | backdoor (ignorability) | Apache-2.0 | 99 | dynamic, to 4096 |
+| `do_pfn` | non-identifiable prior | CC BY 4.0 (attribution required) | 5 | fixed ladder: 128 / 512 / 1024 / 2048 |
+
+**Start with `causalpfn`.** It targets the backdoor setting directly, accepts twenty times the
+covariates, has no fixed context ladder, carries no licence obligation, and does not shrink the
+population effect the way `do_pfn` does.
 
 ### `do_devices()`
 
@@ -271,29 +276,41 @@ FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model :=
 
 What the runtime does, and reports in `warnings`:
 
-- **Feature budget.** Do-PFN takes six columns and the first is the treatment, so the five
+- **Covariate budget.** Where the model's budget binds (5 for `do_pfn`, 99 for `causalpfn`), the
   covariates most correlated with the outcome are kept and the rest named as dropped.
-- **Context selection.** The largest ladder rung below the row count is chosen, and the context is
-  sampled down to it — seeded, and stratified to preserve the treatment proportions.
-- **Outcome scaling.** The model's bar distribution lives in standardised outcome space, so the
-  context outcome is standardised and the resulting effect scaled back.
-- **The intervention.** Query rows are run twice with column 0 forced to 1 and to 0. That is
+- **Context selection.** `causalpfn` takes up to 4096 rows directly; `do_pfn` uses the largest
+  ladder rung below the row count. Either way the context is sampled seeded and stratified, so the
+  treatment proportions are preserved and a repeat run feeds the model identical rows.
+- **Outcome scaling.** `do_pfn`'s bar distribution lives in standardised outcome space, so the
+  context outcome is standardised and the effect scaled back. `causalpfn` standardises per arm
+  internally and returns the outcome on its own scale.
+- **The intervention.** Query rows are run twice, forced to treated and to control. That is
   `do(T = t)` for every row, not a filter on rows where `T` happened to equal `t`.
 
 `do_ate` with a model reports `variance_method = 'effect dispersion (no model uncertainty)'`, and
 `do_cate` returns `cate_low = cate_high = cate`. Neither is a calibrated interval, and both say so.
+
+Measured on a heterogeneous DGP with true ATE 2.9806: `aipw` 3.0628, `causalpfn` 3.0610,
+`do_pfn` 2.6307. Do-PFN's shrinkage is a documented property of its model class, not a bug in the
+plumbing — but it is why `causalpfn` is the one to reach for.
 
 ### Exporting the graphs
 
 The extension ships no weights. Produce them yourself:
 
 ```sh
-git clone https://github.com/jr2021/Do-PFN
+pip install causalpfn
+python scripts/export/export_causalpfn.py --out ~/.cache/duckdo
+
+git clone https://github.com/jr2021/Do-PFN            # optional, second model
 python scripts/export/export_dopfn.py --repo ./Do-PFN --out ~/.cache/duckdo
 ```
 
-This writes four weight-free graphs plus one shared weight blob and a manifest, and fails unless
-every graph reproduces PyTorch to within 1e-4 at two different query lengths.
+Do-PFN writes four weight-free graphs plus one shared weight blob, and fails unless every graph
+reproduces PyTorch to within 1e-4 at two different query lengths. CausalPFN writes one graph with
+both axes dynamic, and is gated on the estimand instead — the ATE must agree with PyTorch to 0.01
+with a CATE correlation above 0.999 — because attention-kernel differences cost ~1e-2 of
+logit-level agreement without moving the number anyone reads.
 
 ---
 

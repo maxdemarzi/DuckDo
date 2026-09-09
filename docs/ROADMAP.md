@@ -2,12 +2,11 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase through 9 is implemented, built and tested.** 107 assertions in the
-> dependency-free build and 120 with the foundation-model path enabled, against DuckDB v1.5.4, plus
-> an EconML/DoWhy cross-check on IHDP and a PyTorch parity gate on the exported ONNX graphs.
-> Do-PFN runs end to end inside DuckDB. Phase 10 remains future work, and several phase-6 refinements
-> (interval calibration, shrinkage correction, CausalPFN/CausalFM export) are outstanding — see
-> section 9.
+> **Progress: every phase through 9 is implemented, built and tested.** 116 assertions in the
+> dependency-free build and 135 with the foundation-model path enabled, against DuckDB v1.5.4, plus
+> an EconML/DoWhy cross-check on IHDP and PyTorch parity gates on the exported ONNX graphs.
+> **CausalPFN and Do-PFN both run end to end inside DuckDB.** Phase 10 remains future work; see
+> section 9 for what is still open.
 
 ---
 
@@ -230,7 +229,7 @@ src/
 | 3 | Diagnostics and refutation | 0.3.0 | yes | **DONE** — balance, overlap, diagnose, 5 refuters, E-value + robustness value |
 | 4 | Graphs and identification | 0.4.0 | yes | **DONE** — d-separation, backdoor/front-door/IV, covariate grading |
 | 5 | Inference runtime | 0.5.0 | yes (models opt-in) | **DONE** — ONNX Runtime linked behind a build flag, model catalog, session cache, and a parity gate the export refuses to pass below 1e-4 (measured 4.3e-06 to 8.1e-06) |
-| 6 | CFM estimators | 0.6.0 | opt-in | **DONE for Do-PFN** — `model := 'do_pfn'` runs in SQL; CATE correlates 0.98 with truth. Shrinkage on the ATE is reproduced and reported, not corrected. CausalPFN/CausalFM not exported |
+| 6 | CFM estimators | 0.6.0 | opt-in | **DONE for CausalPFN and Do-PFN** — CausalPFN matches AIPW (3.061 vs 3.063, truth 2.981) with CATE correlation 0.9995 and no shrinkage; Do-PFN shrinks to 2.631, reproduced and reported. CausalFM not exported |
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **PARTIAL** — `do_ate_by` segmented estimation landed; parallelism, spill and the 1M-row target are outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
@@ -254,8 +253,19 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 - **Starting with Do-PFN was the right call.** At 7.3M parameters it exported in one afternoon of
   iteration; the two obstacles (an unsupported `aten::nansum`, a data-dependent debug assert) were
   both small and both fixable without changing model semantics.
-- **The foundation model lost to AIPW on the ATE and won on ranking.** That is reported in the
-  README rather than buried, which is what design principle 5 requires.
+- **The two foundation models behaved very differently, and that is the finding.** Do-PFN shrinks
+  the population effect badly (2.631 against a truth of 2.981); CausalPFN does not (3.061, beside
+  AIPW's 3.063). The plan treated "CFM" as one thing; it is not. Both results are in the README as
+  a table rather than buried, which is what design principle 5 requires.
+- **CausalPFN's export was easier in the way that mattered.** Its context length comes from a
+  tensor shape rather than a Python int, so both axes stayed dynamic and no ladder was needed. It
+  needed its own accommodation instead — an in-place `&=` with no opset-17 equivalent — and its
+  logit-level parity is ~1e-2 because PyTorch fuses attention where ONNX Runtime decomposes it.
+  Gating on the estimand (ATE agrees to 0.00087) rather than the logits is the defensible test.
+- **`do_cate`'s interval was measurably wrong and is now measurably better.** Coverage was 0.896
+  against a nominal 0.95 under strong confounding, because the doubly-robust pseudo-outcome's
+  variance scales with `1/e(x)` and the interval assumed it constant. An HC1 sandwich took the
+  worst case to 0.945. `scripts/coverage_check.py` keeps it honest.
 
 ---
 
@@ -663,25 +673,25 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 
 Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in order:
 
-1. **Correct or calibrate Do-PFN's shrinkage.** Measured on a heterogeneous DGP: true ATE 2.915,
-   `aipw` 2.912, `do_pfn` 2.493 — while per-row CATE correlates 0.984 with truth. The model ranks
-   well and averages badly, exactly as the CFM literature reports. Today DuckDo reports this rather
-   than correcting it; a calibration layer fitted on held-out synthetic DGPs is the next step.
-2. **Give the CFM path an interval.** It currently returns point estimates, and `do_ate` labels its
-   variance method `effect dispersion (no model uncertainty)` so nobody mistakes it for one.
-3. **Export CausalPFN and CausalFM.** Do-PFN proved the pipeline; CausalPFN is Apache-2.0 and
-   targets the backdoor setting directly, which suits `do_ate` better than a non-identifiable prior.
-4. **Lift the six-feature ceiling.** Do-PFN accepts five covariates; DuckDo picks the five most
-   outcome-correlated. Ensembling over feature subsets would use the rest.
-5. **Statically link ONNX Runtime** so the community build can ship the model path at all.
-6. **Fix `do_cate` interval coverage** — measured ~0.90 against a nominal 0.95, because the
-   pseudo-outcome regression does not propagate nuisance-model uncertainty.
-7. **Finish Phase 8**: parallelise cross-fitting folds and bootstrap replicates through DuckDB's
+1. **Give the CFM path an interval.** Both models return point estimates today, and `do_ate` labels
+   its variance method `effect dispersion (no model uncertainty)` so nobody mistakes one for a
+   calibrated interval. CausalPFN's own package ships a calibration routine that DuckDo does not
+   yet reimplement.
+2. **Export CausalFM.** Two of the three models from section 1 now run; CausalFM adds front-door
+   and instrumental-variable settings, which `do_identify` can already recommend but nothing can
+   yet estimate.
+3. **Statically link ONNX Runtime** so the community build can ship the model path at all.
+4. **Consider retiring or demoting Do-PFN.** CausalPFN is better on every axis measured here —
+   licence, covariate budget, dynamic context, and no shrinkage. Do-PFN remains interesting only
+   for its explicit treatment of unobserved confounding, which DuckDo does not currently exploit.
+5. **Ensemble over covariate subsets** where a model's budget binds, instead of keeping only the
+   most outcome-correlated.
+6. **Finish Phase 8**: parallelise cross-fitting folds and bootstrap replicates through DuckDB's
    task scheduler, add a chunked scan path to lift `duckdo_max_rows` above 100k, and spill past
    `duckdo_max_memory`.
-8. **Persist graphs** somewhere better than a process-global registry (open question 3).
-9. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
+7. **Persist graphs** somewhere better than a process-global registry (open question 3).
+8. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
    the current gate covers one IHDP replication plus two synthetic scenarios.
-10. **Host the exported graphs** so `do_download` can fetch them, rather than requiring every user to
-    run the export script.
-11. **Submit** the `description.yml` PR to `duckdb/community-extensions`.
+9. **Host the exported graphs** so `do_download` can fetch them, rather than requiring every user to
+   run the export script.
+10. **Submit** the `description.yml` PR to `duckdb/community-extensions`.

@@ -18,8 +18,8 @@ FROM do_ate('customers',
 
 > **Status: every roadmap phase through 9 is implemented.** Estimators, diagnostics, graph
 > identification, the `do()` surface and segmented estimation are cross-checked against EconML and
-> DoWhy. **Causal foundation models run too**: Do-PFN executes inside DuckDB on ONNX Runtime. That
-> path is opt-in at build time (`-DDUCKDO_ONNXRUNTIME_ROOT`) so the default build keeps zero
+> DoWhy. **Two causal foundation models run inside DuckDB** on ONNX Runtime — CausalPFN and Do-PFN.
+> That path is opt-in at build time (`-DDUCKDO_ONNXRUNTIME_ROOT`) so the default build keeps zero
 > dependencies and needs no downloads.
 
 Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
@@ -87,36 +87,51 @@ Also `do_graphs()`, `do_graph_drop()`.
 ### Causal foundation models
 
 ```sql
-SELECT * FROM do_list_models();
--- do_pfn | non-identifiable prior | CC BY 4.0 | ready in ~/.cache/duckdo; attribution required
+SELECT model, setting, license, max_covariates, available FROM do_list_models();
+-- causalpfn | backdoor (ignorability) | Apache-2.0 | 99 | true
+-- do_pfn    | non-identifiable prior  | CC BY 4.0  |  5 | true
 
 -- Same SQL, different engine. The result names the model, not a classical estimator.
 SELECT estimator, estimate, variance_method
-FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model := 'do_pfn');
--- do_pfn | 3.183 | effect dispersion (no model uncertainty)
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model := 'causalpfn');
+-- causalpfn | 3.061 | effect dispersion (no model uncertainty)
 ```
 
-[Do-PFN](https://github.com/jr2021/Do-PFN) is a 7.3M-parameter transformer pretrained on synthetic
-structural causal models. It reads your labelled rows as context and returns the interventional
-outcome distribution under `do(T=1)` and `do(T=0)` — one forward pass each.
+| | [CausalPFN](https://github.com/vdblm/CausalPFN) | [Do-PFN](https://github.com/jr2021/Do-PFN) |
+|---|---|---|
+| Parameters | 18.8M | 7.3M |
+| Identification setting | backdoor (ignorability) | non-identifiable prior |
+| Licence | Apache-2.0, no obligation | CC BY 4.0, **attribution required** |
+| Covariates accepted | 99 | 5 |
+| Context length | dynamic to 4096 | fixed ladder: 128/512/1024/2048 |
+| Shrinks the ATE? | no | **yes, materially** |
 
-Getting it running takes three steps, and the extension never ships or redistributes weights:
+**Start with CausalPFN.** It targets the backdoor setting directly rather than hedging under a
+non-identifiable prior, and it does not exhibit the shrinkage Do-PFN does.
+
+Getting either running takes three steps, and the extension never ships or redistributes weights:
 
 ```sh
 # 1. build with ONNX Runtime (download a release from onnxruntime.ai)
 cmake -DDUCKDO_ONNXRUNTIME_ROOT=/path/to/onnxruntime-1.29.0 ...
 
-# 2. export the graphs yourself, from the upstream checkpoint
-git clone https://github.com/jr2021/Do-PFN
+# 2. export the graphs yourself, from the upstream checkpoints
+pip install causalpfn
+python scripts/export/export_causalpfn.py --out ~/.cache/duckdo
+
+git clone https://github.com/jr2021/Do-PFN            # optional, second model
 python scripts/export/export_dopfn.py --repo ./Do-PFN --out ~/.cache/duckdo
 
 # 3. point DuckDo at them
 SET duckdo_model_dir = '~/.cache/duckdo';
 ```
 
-The export writes four weight-free graphs (1.3 MB each, traced at context lengths 128/512/1024/2048)
-plus one shared 33 MB weight blob, and refuses to finish unless every graph reproduces PyTorch to
-within 1e-4. Measured: **4.3e-06 to 8.1e-06**.
+Both exports refuse to finish unless the graph reproduces PyTorch. Do-PFN is gated on logits, to
+**1e-4** (measured 4.3e-06 to 8.1e-06). CausalPFN is gated on the *estimand* instead, because
+PyTorch runs a fused attention kernel where ONNX Runtime decomposes it: over 12 layers and a
+1024-bin softmax that costs ~1e-2 of logit agreement in fp32, while the ATE still agrees to
+**0.00087** with a CATE correlation of **0.9994**. Gating on the number a user actually reads is
+the honest test.
 
 ### Interventions - querying a world that did not happen
 
@@ -173,19 +188,24 @@ Reproduce with `test/sql/estimators.test` and `python scripts/crosscheck_econml.
 
 Not on these data, and the honest answer is worth more than a flattering one:
 
-| DGP (1500 rows) | true ATE | `aipw` | `do_pfn` | `do_pfn` CATE correlation |
-|---|---|---|---|---|
-| linear, confounded | 3.000 | **3.069** | 3.183 | — |
-| heterogeneous `3 + 2·x1` | 2.915 | **2.912** | 2.493 | **0.984** |
+Three engines, identical SQL, 1500 rows, true ATE **2.9806**:
 
-Do-PFN **shrinks the population effect** — the documented weakness of this model class, reproduced
-here rather than hidden — while ranking individuals extremely well (0.98 correlation with the true
-per-row effect). So it is the better tool for *who to treat* and the worse one for *how much the
-programme is worth*, on data like this. AIPW, which is correctly specified for a linear DGP, wins on
-the average. Use `estimator := 'aipw'` for the ATE and `model := 'do_pfn'` for targeting, and read
-`do_sensitivity` before believing either.
+| engine | estimate | error | CATE correlation |
+|---|---|---|---|
+| `estimator := 'aipw'` | 3.0628 | +0.082 | 0.9995 |
+| `model := 'causalpfn'` | **3.0610** | **+0.080** | **0.9995** |
+| `model := 'do_pfn'` | 2.6307 | −0.350 | 0.984 |
 
-Inference cost: ~7 s for 1500 rows against a 1024-row context, single CPU.
+**CausalPFN matches AIPW.** Do-PFN **shrinks the population effect** — the documented weakness of
+that model class, reproduced here rather than hidden — while still ranking individuals well. So
+Do-PFN remains usable for *who to treat* and is the wrong tool for *what the programme is worth*;
+CausalPFN is fine for both, which is why it is the one to start with.
+
+Note that none of these beat AIPW on a linear DGP, where AIPW is correctly specified. The
+foundation models earn their keep on data whose structure you do not already know. Read
+`do_sensitivity` before believing any of them.
+
+Inference cost: ~16 s for 1500 rows across both models, single CPU.
 
 ## Settings
 
@@ -199,18 +219,21 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 
 - **Binary treatments only.** Continuous and multi-valued treatments are refused with an explicit
   error rather than silently binarised. Planned for Phase 10.
-- **`do_cate` intervals are slightly narrow.** Measured 95% coverage is about 0.90 on synthetic data,
-  because the pseudo-outcome regression does not propagate uncertainty from the nuisance models.
+- **`do_cate` intervals run a touch narrow under heavy confounding.** Measured 95% coverage is
+  0.973 / 0.935 / 0.945 across randomised, confounded and strongly-confounded DGPs
+  (`scripts/coverage_check.py`). The interval uses an HC1 sandwich, because the doubly-robust
+  pseudo-outcome's variance scales with `1/e(x)` — assuming it constant gave 0.896. The residual
+  gap is nuisance-estimation uncertainty, second-order under cross-fitting.
 - **Base learners are regularised GLMs.** Strongly non-linear confounding will not be fully removed.
   Gradient-boosted base learners are a Phase 2 follow-up.
 - **Graphs live in process memory**, not the DuckDB catalog, so they do not survive a restart.
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
   not visible to an estimation call.
-- **Foundation models are opt-in and constrained.** Do-PFN accepts **6 input columns total** — the
-  treatment plus five covariates — so DuckDo keeps the five most outcome-correlated and says which
-  in `warnings`. Its context length is fixed per exported graph (see the ladder), it returns point
-  estimates with no interval, and it shrinks population effects. `model := 'causalpfn'` and
-  `'causalfm'` are not exported yet.
+- **Foundation models are opt-in and return point estimates.** Neither model produces a calibrated
+  interval, and `do_ate` labels its variance method `effect dispersion (no model uncertainty)` so
+  nobody mistakes one for the other. Do-PFN additionally accepts only five covariates and a fixed
+  context ladder, and shrinks population effects. Where a covariate budget binds, DuckDo keeps the
+  most outcome-correlated and names the rest in `warnings`. `model := 'causalfm'` is not exported.
 - **ONNX Runtime links dynamically.** The community build ships without it; a build that enables it
   needs `onnxruntime.dll`/`.so` alongside the binary. Static linking is not done.
 
@@ -225,9 +248,16 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-107 assertions in the dependency-free build, 120 with the foundation-model path enabled, across
+116 assertions in the dependency-free build, 135 with the foundation-model path enabled, across
 estimator recovery, diagnostics, error paths, graph identification, the `do()` surface and
-end-to-end Do-PFN inference.
+end-to-end inference for both models.
+
+Two further dev-only harnesses, neither shipped:
+
+```sh
+python scripts/crosscheck_econml.py    # grades the estimators against EconML and DoWhy on IHDP
+python scripts/coverage_check.py       # measures do_cate's empirical interval coverage
+```
 
 ## Submitting to community extensions
 

@@ -188,6 +188,106 @@ LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<i
 	return model;
 }
 
+//! Accumulate the penalised Gram matrix A = X'X + lambda*I (intercept
+//! unpenalised) and, optionally, the meat B = sum r_i^2 x_i x_i'.
+static void BuildGram(const Matrix &X, const vector<idx_t> &rows, double lambda, const vector<double> *residuals,
+                      vector<double> &gram, vector<double> &meat) {
+	const idx_t p = X.cols + 1;
+	gram.assign(p * p, 0.0);
+	if (residuals) {
+		meat.assign(p * p, 0.0);
+	}
+	vector<double> row(p);
+	for (idx_t idx = 0; idx < rows.size(); idx++) {
+		const idx_t r = rows[idx];
+		row[0] = 1.0;
+		const double *src = X.Row(r);
+		for (idx_t j = 0; j < X.cols; j++) {
+			row[j + 1] = src[j];
+		}
+		const double weight = residuals ? (*residuals)[idx] * (*residuals)[idx] : 0.0;
+		for (idx_t a = 0; a < p; a++) {
+			for (idx_t b = 0; b < p; b++) {
+				gram[a * p + b] += row[a] * row[b];
+				if (residuals) {
+					meat[a * p + b] += weight * row[a] * row[b];
+				}
+			}
+		}
+	}
+	for (idx_t j = 1; j < p; j++) {
+		gram[j * p + j] += lambda;
+	}
+}
+
+//! Invert a symmetric positive definite matrix column by column. Returns false
+//! if it is singular, in which case the caller reports no interval rather than
+//! a wrong one.
+static bool InvertSpd(const vector<double> &matrix, idx_t p, vector<double> &inverse) {
+	inverse.assign(p * p, 0.0);
+	for (idx_t c = 0; c < p; c++) {
+		vector<double> rhs(p, 0.0);
+		rhs[c] = 1.0;
+		vector<double> column;
+		vector<double> work = matrix;
+		if (!CholeskySolve(work, p, rhs, column)) {
+			inverse.assign(p * p, 0.0);
+			return false;
+		}
+		for (idx_t r = 0; r < p; r++) {
+			inverse[r * p + c] = column[r];
+		}
+	}
+	return true;
+}
+
+RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda) {
+	RidgeFit out;
+	const idx_t p = X.cols + 1;
+	out.dim = p;
+	out.model = FitRidge(X, y, rows, {}, lambda);
+	out.cov.assign(p * p, 0.0);
+	if (rows.size() <= p) {
+		return out;
+	}
+
+	vector<double> residuals(rows.size(), 0.0);
+	for (idx_t idx = 0; idx < rows.size(); idx++) {
+		const idx_t r = rows[idx];
+		residuals[idx] = y[r] - out.model.Eta(X.Row(r), X.cols);
+	}
+
+	vector<double> gram, meat;
+	BuildGram(X, rows, lambda, &residuals, gram, meat);
+	vector<double> inverse;
+	if (!InvertSpd(gram, p, inverse)) {
+		return out;
+	}
+
+	// V = A^-1 B A^-1, with the HC1 small-sample correction.
+	const double hc1 = static_cast<double>(rows.size()) / static_cast<double>(rows.size() - p);
+	vector<double> temp(p * p, 0.0);
+	for (idx_t a = 0; a < p; a++) {
+		for (idx_t b = 0; b < p; b++) {
+			double acc = 0.0;
+			for (idx_t k = 0; k < p; k++) {
+				acc += inverse[a * p + k] * meat[k * p + b];
+			}
+			temp[a * p + b] = acc;
+		}
+	}
+	for (idx_t a = 0; a < p; a++) {
+		for (idx_t b = 0; b < p; b++) {
+			double acc = 0.0;
+			for (idx_t k = 0; k < p; k++) {
+				acc += temp[a * p + k] * inverse[k * p + b];
+			}
+			out.cov[a * p + b] = hc1 * acc;
+		}
+	}
+	return out;
+}
+
 RidgeFit FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda) {
 	RidgeFit out;
 	const idx_t p = X.cols + 1;

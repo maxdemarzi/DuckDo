@@ -115,9 +115,6 @@ EffectResult CfmEffect(ClientContext &context, const CausalFrame &frame, const C
 	    "%s ran with a %llu-row context (ladder rung %llu); the interval carries sampling spread only",
 	    model.id.c_str(), static_cast<unsigned long long>(cfm.context_used),
 	    static_cast<unsigned long long>(cfm.ladder_rung)));
-	if (model.attribution_required) {
-		result.warnings.push_back(model.id + " is " + model.license + "; attribution is required downstream");
-	}
 	for (auto &w : cfm.warnings) {
 		result.warnings.push_back(w);
 	}

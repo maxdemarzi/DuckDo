@@ -42,9 +42,10 @@ SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x
 unknown estimator
 
 # The model surface has moved to models.test; here we only confirm that an
-# unknown model id is rejected rather than silently ignored.
+# unknown model id is rejected rather than silently ignored. ('causalpfn' is a
+# real model now, so this uses an id that genuinely does not exist.)
 statement error
-SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', model := 'causalpfn');
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', model := 'gpt_causal_9000');
 ----
 unknown model
 

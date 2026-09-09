@@ -79,6 +79,12 @@ struct RidgeFit {
 
 RidgeFit FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda);
 
+//! The same fit with a heteroskedasticity-robust (sandwich) covariance,
+//! A^-1 B A^-1 with HC1 correction. Use this whenever the residual variance
+//! varies across rows - which it does badly for a doubly-robust pseudo-outcome,
+//! whose variance scales with 1/e(x) and 1/(1-e(x)).
+RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda);
+
 //! Logistic regression by iteratively reweighted least squares, with the same
 //! ridge and intercept conventions as FitRidge.
 LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,

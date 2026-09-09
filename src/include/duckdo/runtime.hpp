@@ -18,8 +18,20 @@
 namespace duckdb {
 namespace duckdo {
 
+//! How a model's graph is laid out. The two families differ enough that they
+//! need separate marshalling, but nothing above this layer has to care.
+enum class ModelKind : uint8_t {
+	//! Treatment is column 0 of a single X tensor; output is logits over a bar
+	//! distribution; the context length is fixed per exported graph.
+	DOPFN,
+	//! Treatment is its own tensor; output is the conditional expected potential
+	//! outcome directly; both context and query lengths are dynamic.
+	CAUSALPFN
+};
+
 //! One entry in the built-in model catalog.
 struct ModelInfo {
+	ModelKind kind = ModelKind::DOPFN;
 	string id;
 	string setting;
 	string license;
@@ -27,13 +39,18 @@ struct ModelInfo {
 	//! CC BY 4.0 is commercially usable but obliges attribution downstream.
 	bool commercial = true;
 	bool attribution_required = false;
-	//! Total input columns the graph accepts, treatment included.
-	idx_t max_features = 0;
+	//! Covariates the graph accepts, treatment excluded.
+	idx_t max_covariates = 0;
+	//! Bar-distribution buckets. Zero when the model returns a mean directly.
 	idx_t num_buckets = 0;
+	//! Largest context the model accepts. Zero means "see context_ladder".
+	idx_t max_context = 0;
 	//! Fixed context sizes the exported graphs were traced at, ascending.
 	vector<idx_t> context_ladder;
 	string weights_file;
+	//! printf pattern for a ladder graph, or a plain filename when there is one.
 	string graph_pattern;
+	string manifest_file;
 };
 
 //! The catalog. Static: adding a model means shipping a new graph.

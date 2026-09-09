@@ -416,7 +416,11 @@ CateResult EstimateCate(const CausalFrame &frame, const CausalSpec &spec) {
 	// conditional mean is the CATE, and the regression gives real intervals.
 	out.learner = "dr_learner";
 	auto psi = AipwPseudoOutcome(frame, fit);
-	auto model = FitRidgeWithCovariance(frame.X, psi, fit.rows, lambda);
+	// Sandwich, not homoskedastic: the pseudo-outcome's variance scales with
+	// 1/e(x) and 1/(1-e(x)), so it varies by orders of magnitude across rows
+	// whenever there is real confounding. Assuming it constant is what made the
+	// interval too narrow - measured 0.896 coverage against a nominal 0.95.
+	auto model = FitRidgeWithSandwich(frame.X, psi, fit.rows, lambda);
 	for (idx_t i = 0; i < frame.n; i++) {
 		const double *x = frame.X.Row(i);
 		const double point = model.model.Eta(x, frame.X.cols);
@@ -425,7 +429,7 @@ CateResult EstimateCate(const CausalFrame &frame, const CausalSpec &spec) {
 		out.lo[i] = point - Z95 * se;
 		out.hi[i] = point + Z95 * se;
 	}
-	out.interval_method = "pseudo-outcome regression, pointwise 95%";
+	out.interval_method = "pseudo-outcome regression, HC1 sandwich, pointwise 95%";
 	if (fit.n_trimmed > 0) {
 		out.warnings.push_back(std::to_string(fit.n_trimmed) +
 		                       " rows were outside the propensity trim and did not inform the fit");
