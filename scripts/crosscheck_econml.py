@@ -37,7 +37,7 @@ def duckdo_ate(duckdb_exe, csv_path, treatment, outcome, covariates, estimator):
     )
     proc = subprocess.run(
         [duckdb_exe, "-csv", "-noheader", "-c", sql],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf8", errors="replace",
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         raise RuntimeError("duckdo failed for %s: %s%s" % (estimator, proc.stdout, proc.stderr))
@@ -53,7 +53,7 @@ def duckdo_cate(duckdb_exe, csv_path, treatment, outcome, covariates):
            "covariates := [%s]) ORDER BY row_id;"
            % (_sql_literal(relation), treatment, outcome, cov_list))
     proc = subprocess.run([duckdb_exe, "-csv", "-noheader", "-c", sql],
-                          capture_output=True, text=True)
+                          capture_output=True, encoding="utf8", errors="replace")
     if proc.returncode != 0 or not proc.stdout.strip():
         raise RuntimeError("duckdo do_cate failed: %s%s" % (proc.stdout, proc.stderr))
     return np.array([float(line) for line in proc.stdout.strip().splitlines()])

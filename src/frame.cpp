@@ -5,6 +5,8 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -312,6 +314,48 @@ double Median(vector<double> values) {
 	return values[mid];
 }
 
+//! Refuse a frame that will not fit, before allocating it.
+//!
+//! The encoded matrix is n*p doubles and every estimator indexes it by row, so
+//! it is resident for the whole query - there is nothing here to stream. The
+//! encoder also holds one staged copy of the features while it fills the
+//! matrix, so the transient peak is close to twice the figure checked here;
+//! the budget below is deliberately a fraction of DuckDB's own limit rather
+//! than all of it, which leaves room for that and for the scan itself.
+void CheckMemoryBudget(ClientContext &context, idx_t n, idx_t features, const string &relation) {
+	const string configured = GetSettingString(context, "duckdo_max_memory", "");
+	idx_t budget;
+	if (configured.empty()) {
+		// Half of whatever DuckDB itself was told it may use. A user who raises
+		// memory_limit raises this with it, which is the behaviour that needs no
+		// explaining.
+		const idx_t db_limit = BufferManager::GetBufferManager(context).GetMaxMemory();
+		if (db_limit == DConstants::INVALID_INDEX) {
+			return;
+		}
+		budget = db_limit / 2;
+	} else {
+		budget = DBConfig::ParseMemoryLimit(configured);
+		if (budget == DConstants::INVALID_INDEX) {
+			return; // duckdo_max_memory = '-1' means no ceiling.
+		}
+	}
+
+	const idx_t bytes = n * features * sizeof(double);
+	if (bytes <= budget) {
+		return;
+	}
+	// Name the number that has to change, not just the number that is too big.
+	const idx_t affordable_rows = features > 0 ? budget / (features * sizeof(double)) : n;
+	throw BinderException(
+	    "duckdo: encoding %s would need %s for the %llu x %llu feature matrix, above duckdo_max_memory (%s). Raise "
+	    "duckdo_max_memory, pass a shorter covariates := list, or sample the input - about %llu rows fit at this "
+	    "width, e.g. '(SELECT * FROM %s USING SAMPLE %llu ROWS)'",
+	    relation, StringUtil::BytesToHumanReadableString(bytes), static_cast<unsigned long long>(n),
+	    static_cast<unsigned long long>(features), StringUtil::BytesToHumanReadableString(budget),
+	    static_cast<unsigned long long>(affordable_rows), relation, static_cast<unsigned long long>(affordable_rows));
+}
+
 } // namespace
 
 CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
@@ -607,74 +651,81 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.aux.reserve(frame.n);
 	}
 
-	ColumnDataScanState scan_state;
-	auto &collection = data->Collection();
-	collection.InitializeScan(scan_state);
-	DataChunk chunk;
-	collection.InitializeScanChunk(chunk);
-	idx_t emitted = 0;
-	while (collection.Scan(scan_state, chunk)) {
-		chunk.Flatten();
-		const idx_t count = chunk.size();
-		const auto *t_data = FlatVector::GetData<double>(chunk.data[0]);
-		const auto &t_valid = FlatVector::Validity(chunk.data[0]);
-		const auto *y_data = FlatVector::GetData<double>(chunk.data[1]);
-		for (idx_t i = 0; i < count; i++) {
-			if (!t_valid.RowIsValid(i)) {
-				// Rows outside the two treatment levels, when treated:=/control:= narrowed them.
-				continue;
-			}
-			frame.t.push_back(t_data[i]);
-			frame.y.push_back(y_data[i]);
-			frame.source_row.push_back(emitted + i);
-			if (frame.has_id) {
-				auto &id_vec = chunk.data[2];
-				if (FlatVector::Validity(id_vec).RowIsValid(i)) {
-					frame.ids.push_back(FlatVector::GetData<string_t>(id_vec)[i].GetString());
-				} else {
-					frame.ids.push_back(string());
+	// The scan state and the chunk both reference the collection, so they are
+	// scoped: `data` holds a full copy of the projection - the largest single
+	// allocation here - and releasing it before encoding starts is worth more
+	// than every other saving in this function put together.
+	{
+		ColumnDataScanState scan_state;
+		auto &collection = data->Collection();
+		collection.InitializeScan(scan_state);
+		DataChunk chunk;
+		collection.InitializeScanChunk(chunk);
+		idx_t emitted = 0;
+		while (collection.Scan(scan_state, chunk)) {
+			chunk.Flatten();
+			const idx_t count = chunk.size();
+			const auto *t_data = FlatVector::GetData<double>(chunk.data[0]);
+			const auto &t_valid = FlatVector::Validity(chunk.data[0]);
+			const auto *y_data = FlatVector::GetData<double>(chunk.data[1]);
+			for (idx_t i = 0; i < count; i++) {
+				if (!t_valid.RowIsValid(i)) {
+					// Rows outside the two treatment levels, when treated:=/control:= narrowed them.
+					continue;
 				}
-			}
-			if (frame.has_policy) {
-				auto &pol_vec = chunk.data[policy_col];
-				const bool valid = FlatVector::Validity(pol_vec).RowIsValid(i);
-				frame.policy.push_back((valid && FlatVector::GetData<bool>(pol_vec)[i]) ? 1 : 0);
-			}
-			if (frame.has_aux) {
-				auto &aux_vec = chunk.data[aux_col];
-				const bool valid = FlatVector::Validity(aux_vec).RowIsValid(i);
-				frame.aux.push_back(valid ? FlatVector::GetData<double>(aux_vec)[i] : 0.0);
-			}
-			for (idx_t c = 0; c < ncols; c++) {
-				auto &vec = chunk.data[c + cov_base];
-				const auto &valid = FlatVector::Validity(vec);
-				const bool is_null = !valid.RowIsValid(i);
-				raw_null[c].push_back(is_null ? 1 : 0);
-				if (plans[c].categorical) {
-					int32_t level = -1;
-					if (!is_null) {
-						const auto *strings = FlatVector::GetData<string_t>(vec);
-						const string value = strings[i].GetString();
-						for (idx_t l = 0; l < plans[c].levels.size(); l++) {
-							if (plans[c].levels[l] == value) {
-								level = static_cast<int32_t>(l);
-								break;
+				frame.t.push_back(t_data[i]);
+				frame.y.push_back(y_data[i]);
+				frame.source_row.push_back(emitted + i);
+				if (frame.has_id) {
+					auto &id_vec = chunk.data[2];
+					if (FlatVector::Validity(id_vec).RowIsValid(i)) {
+						frame.ids.push_back(FlatVector::GetData<string_t>(id_vec)[i].GetString());
+					} else {
+						frame.ids.push_back(string());
+					}
+				}
+				if (frame.has_policy) {
+					auto &pol_vec = chunk.data[policy_col];
+					const bool valid = FlatVector::Validity(pol_vec).RowIsValid(i);
+					frame.policy.push_back((valid && FlatVector::GetData<bool>(pol_vec)[i]) ? 1 : 0);
+				}
+				if (frame.has_aux) {
+					auto &aux_vec = chunk.data[aux_col];
+					const bool valid = FlatVector::Validity(aux_vec).RowIsValid(i);
+					frame.aux.push_back(valid ? FlatVector::GetData<double>(aux_vec)[i] : 0.0);
+				}
+				for (idx_t c = 0; c < ncols; c++) {
+					auto &vec = chunk.data[c + cov_base];
+					const auto &valid = FlatVector::Validity(vec);
+					const bool is_null = !valid.RowIsValid(i);
+					raw_null[c].push_back(is_null ? 1 : 0);
+					if (plans[c].categorical) {
+						int32_t level = -1;
+						if (!is_null) {
+							const auto *strings = FlatVector::GetData<string_t>(vec);
+							const string value = strings[i].GetString();
+							for (idx_t l = 0; l < plans[c].levels.size(); l++) {
+								if (plans[c].levels[l] == value) {
+									level = static_cast<int32_t>(l);
+									break;
+								}
 							}
 						}
-					}
-					raw_cat[c].push_back(level);
-				} else {
-					const auto *doubles = FlatVector::GetData<double>(vec);
-					const double value = is_null ? 0.0 : doubles[i];
-					raw_num[c].push_back(std::isfinite(value) ? value : 0.0);
-					if (!is_null && !std::isfinite(value)) {
-						raw_null[c].back() = 1;
+						raw_cat[c].push_back(level);
+					} else {
+						const auto *doubles = FlatVector::GetData<double>(vec);
+						const double value = is_null ? 0.0 : doubles[i];
+						raw_num[c].push_back(std::isfinite(value) ? value : 0.0);
+						if (!is_null && !std::isfinite(value)) {
+							raw_null[c].back() = 1;
+						}
 					}
 				}
 			}
+			emitted += count;
 		}
-		emitted += count;
 	}
+	data.reset();
 	frame.n = frame.t.size();
 
 	// 8. Encode. One feature per numeric column, one per non-reference level of
@@ -685,6 +736,16 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		vector<double> values;
 	};
 	vector<PendingFeature> pending;
+	// Accumulated while each column is encoded, so its raw buffers can be freed
+	// immediately afterwards rather than all of them staying live to the end.
+	vector<uint8_t> row_missing(frame.n, 0);
+	// Frees the raw buffers of column c. Called on every exit from the body
+	// below, including the one that drops an all-NULL covariate.
+	auto release_raw = [&](idx_t c) {
+		vector<double>().swap(raw_num[c]);
+		vector<int32_t>().swap(raw_cat[c]);
+		vector<char>().swap(raw_null[c]);
+	};
 
 	for (idx_t c = 0; c < ncols; c++) {
 		auto &plan = plans[c];
@@ -718,6 +779,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 			}
 			if (observed.empty()) {
 				frame.warnings.push_back("covariate '" + plan.source + "' is entirely NULL and was dropped");
+				release_raw(c);
 				continue;
 			}
 			const double fill = Median(observed);
@@ -745,24 +807,20 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		if (any_null) {
 			for (idx_t i = 0; i < frame.n; i++) {
 				if (raw_null[c][i]) {
-					frame.n_rows_with_missing++;
-					break;
+					row_missing[i] = 1;
 				}
 			}
 		}
+		release_raw(c);
 		frame.covariate_columns.push_back(plan.source);
 	}
 
-	// Count rows with any missing covariate, rather than columns with any NULL.
+	// Rows with any missing covariate, rather than columns with any NULL.
 	frame.n_rows_with_missing = 0;
 	for (idx_t i = 0; i < frame.n; i++) {
-		for (idx_t c = 0; c < ncols; c++) {
-			if (!raw_null[c].empty() && raw_null[c][i]) {
-				frame.n_rows_with_missing++;
-				break;
-			}
-		}
+		frame.n_rows_with_missing += row_missing[i];
 	}
+	vector<uint8_t>().swap(row_missing);
 
 	// Drop constant features and standardise the rest, so IRLS stays conditioned.
 	vector<PendingFeature> kept;
@@ -787,12 +845,16 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		                      static_cast<unsigned long long>(max_features));
 	}
 
+	CheckMemoryBudget(context, frame.n, kept.size(), spec.relation);
 	frame.X.Resize(frame.n, kept.size());
 	for (idx_t j = 0; j < kept.size(); j++) {
 		frame.features.push_back(kept[j].info);
 		for (idx_t i = 0; i < frame.n; i++) {
 			frame.X.At(i, j) = kept[j].values[i];
 		}
+		// Dead the moment it is in X. Freeing column by column means the staging
+		// area and the matrix are never both fully resident.
+		vector<double>().swap(kept[j].values);
 	}
 
 	if (frame.continuous_treatment) {

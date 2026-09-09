@@ -55,3 +55,68 @@ statement error
 SELECT * FROM do_ate('tiny', treatment := 'x', outcome := 'y', covariates := ['t']);
 ----
 do_ape() or do_dose_response()
+
+# --- guardrails -----------------------------------------------------------------
+#
+# Every limit is an exception that names the setting to raise, never a silent
+# truncation. That is the whole contract: a wrong answer from a quietly sampled
+# frame is worse than no answer.
+
+statement ok
+CREATE TABLE wide AS SELECT i AS id, (i % 2) AS t, i * 1.0 AS y,
+       (i % 7) * 1.0 AS a, (i % 5) * 1.0 AS b, (i % 3) * 1.0 AS c FROM range(400) r(i);
+
+statement ok
+SET duckdo_max_rows = 100;
+
+statement error
+SELECT * FROM do_ate('wide', treatment := 't', outcome := 'y', covariates := ['a']);
+----
+Raise duckdo_max_rows
+
+statement ok
+RESET duckdo_max_rows;
+
+statement ok
+SET duckdo_max_features = 2;
+
+statement error
+SELECT * FROM do_ate('wide', treatment := 't', outcome := 'y', covariates := ['a', 'b', 'c']);
+----
+above duckdo_max_features
+
+statement ok
+RESET duckdo_max_features;
+
+# The memory ceiling is on the encoded matrix, so it is a function of rows AND
+# width. 400 rows by 3 features is 9.6 kB.
+statement ok
+SET duckdo_max_memory = '4KB';
+
+statement error
+SELECT * FROM do_ate('wide', treatment := 't', outcome := 'y', covariates := ['a', 'b', 'c']);
+----
+above duckdo_max_memory
+
+# The message says how many rows would fit, and that number is usable as-is.
+statement error
+SELECT * FROM do_ate('wide', treatment := 't', outcome := 'y', covariates := ['a', 'b', 'c']);
+----
+about 166 rows fit at this width
+
+# Narrower fits where wider did not, at the same ceiling.
+query I
+SELECT count(*) FROM do_ate('wide', treatment := 't', outcome := 'y', covariates := ['a']);
+----
+1
+
+statement ok
+SET duckdo_max_memory = '-1';
+
+query I
+SELECT count(*) FROM do_ate('wide', treatment := 't', outcome := 'y', covariates := ['a', 'b', 'c']);
+----
+1
+
+statement ok
+RESET duckdo_max_memory;

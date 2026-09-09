@@ -318,25 +318,35 @@ Inference cost: ~16 s for 1500 rows across both models, single CPU.
 ## Settings
 
 `duckdo_default_estimator`, `duckdo_max_rows` (1M), `duckdo_max_features` (500),
-`duckdo_max_categorical_levels` (32), `duckdo_max_groups` (1000), `duckdo_seed` (42),
-`duckdo_bootstrap_reps` (200), `duckdo_threads` (0 = one per hardware thread). Every guardrail
-names the setting to raise when it trips.
+`duckdo_max_memory` (half of DuckDB's `memory_limit`), `duckdo_max_categorical_levels` (32),
+`duckdo_max_groups` (1000), `duckdo_seed` (42), `duckdo_bootstrap_reps` (200), `duckdo_threads`
+(0 = one per hardware thread). Every guardrail names the setting to raise when it trips, and
+the memory one also names the row count that would fit at the frame's width.
 
 ### Cost
 
 The dense accumulations that dominate every fit are split across row blocks, with a fixed reduction
-order so results stay bit-identical run to run. Timings include generating the table
+order so results stay bit-identical run to run. Each shape is generated to Parquet once, outside the
+measurement, so both columns describe the estimator rather than the table generator
 (`scripts/benchmark.py`):
 
-| rows | covariates | estimator | seconds |
-|---|---|---|---|
-| 100k | 5 | `aipw` | 0.6 |
-| 100k | 50 | `aipw` | 2.1 |
-| 1M | 5 | `aipw` | 2.3 |
-| 1M | 50 | `aipw` | 18.9 |
-| 1M | 50 | `dml` | 18.7 |
+| rows | covariates | estimator | seconds | peak MB |
+|---|---|---|---|---|
+| 100k | 5 | `aipw` | 0.3 | 35 |
+| 100k | 50 | `aipw` | 1.9 | 108 |
+| 1M | 5 | `aipw` | 1.9 | 143 |
+| 1M | 50 | `aipw` | 16.7 | 882 |
+| 1M | 50 | `dml` | 15.6 | 882 |
 
 The 1M × 50 case was 101 s single-threaded before the accumulation was parallelised.
+
+Memory is the other half of the cost, and it was worse than the timings. The encoded matrix for
+1M × 50 is 400 MB, and every estimator indexes it by row, so it stays resident for the whole
+query. The peak while building it was **1,645 MB** — four times the matrix — because the
+materialised scan result, the raw per-column buffers and the staged features all stayed live long
+after they were dead. Releasing each at the point it goes dead brings the peak to **882 MB**, with
+every estimate identical to the last digit and no change in runtime. The benchmark now gates on
+this, so a stray full copy of the frame shows up as a failure rather than as a slow laptop.
 
 ## Known limitations
 

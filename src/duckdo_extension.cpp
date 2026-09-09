@@ -21,6 +21,11 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "run. The frame is held in memory as doubles, so 1M rows by 50 covariates is "
 	                          "roughly 400 MB",
 	                          LogicalType::BIGINT, Value::BIGINT(1000000));
+	config.AddExtensionOption("duckdo_max_memory",
+	                          "Ceiling on the encoded feature matrix an estimation frame may allocate, as a memory "
+	                          "string such as '4GB'. Empty means half of DuckDB's own memory_limit; '-1' means no "
+	                          "ceiling",
+	                          LogicalType::VARCHAR, Value(""));
 	config.AddExtensionOption("duckdo_max_features",
 	                          "Maximum number of encoded features an estimation frame may contain",
 	                          LogicalType::BIGINT, Value::BIGINT(500));

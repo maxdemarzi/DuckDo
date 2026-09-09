@@ -467,8 +467,9 @@ logit-level agreement without moving the number anyone reads.
 | Setting | Default | Meaning |
 |---|---|---|
 | `duckdo_default_estimator` | `aipw` | Used when `estimator :=` is omitted |
-| `duckdo_max_rows` | 1000000 | Refuse frames larger than this. The frame is held in memory as doubles, so 1M × 50 covariates is roughly 400 MB |
+| `duckdo_max_rows` | 1000000 | Refuse frames with more rows than this |
 | `duckdo_max_features` | 500 | Refuse encodings wider than this |
+| `duckdo_max_memory` | half of `memory_limit` | Ceiling on the encoded matrix, as a memory string such as `'4GB'`. `'-1'` removes it |
 | `duckdo_max_categorical_levels` | 32 | Drop categoricals with more levels, with a warning |
 | `duckdo_max_groups` | 1000 | Cap on `do_ate_by` groups |
 | `duckdo_seed` | 42 | Global seed |
@@ -479,4 +480,17 @@ logit-level agreement without moving the number anyone reads.
 | `duckdo_ensemble_draws` | 1 | Context draws a foundation model takes; more than one funds an interval |
 
 Every guardrail names the setting to raise when it trips, rather than silently
-truncating.
+truncating. `duckdo_max_memory` also names the row count that *would* fit at the
+frame's width, so the fix can be pasted rather than derived:
+
+```
+duckdo: encoding customers would need 389.0 MiB for the 1000000 x 51 feature
+matrix, above duckdo_max_memory (95.3 MiB). Raise duckdo_max_memory, pass a
+shorter covariates := list, or sample the input - about 245098 rows fit at this
+width, e.g. '(SELECT * FROM customers USING SAMPLE 245098 ROWS)'
+```
+
+The matrix is n x p doubles and every estimator indexes it by row, so it is
+resident for the whole query — 1M rows by 50 covariates is 400 MB, and the
+measured peak while building it is 882 MB. That is why the default budget is
+half of DuckDB's `memory_limit` rather than all of it.

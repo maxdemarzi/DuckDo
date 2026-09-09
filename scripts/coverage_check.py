@@ -55,7 +55,7 @@ def run(duckdb_exe, scenario, seed, n):
     spec = SCENARIOS[scenario]
     sql = SQL.format(seed=seed, n=n, ps=spec["ps"], tau=spec["tau"])
     proc = subprocess.run([duckdb_exe, "-csv", "-noheader", "-c", sql],
-                          capture_output=True, text=True)
+                          capture_output=True, encoding="utf8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError("duckdb failed: %s%s" % (proc.stdout, proc.stderr))
     rows = [line for line in proc.stdout.strip().splitlines() if line.count(",") == 2]

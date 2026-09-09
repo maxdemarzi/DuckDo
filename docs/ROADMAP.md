@@ -318,7 +318,11 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
    - `LIST`/`STRUCT`/`MAP`: rejected with a message suggesting the user flatten them.
    - `NULL`: an explicit missingness indicator column per covariate plus median/mode fill. Never drop rows silently; report `n_rows_with_missing` in the result.
 5. **Row provenance.** Every frame row keeps its source row index so `do_cate` can return per-row output aligned to the input relation, including after filtering and sampling.
-6. **Guardrails.** `duckdo_max_rows` (default 100k for classical, tighter for CFM), `duckdo_max_features` (default 500), `duckdo_max_memory`. Exceeding a limit is an exception naming the setting to raise, not a silent truncation.
+6. **Guardrails.** `duckdo_max_rows` (default 1M), `duckdo_max_features` (default 500),
+   `duckdo_max_memory` (default: half of DuckDB's own `memory_limit`, so raising one raises the
+   other; `'-1'` removes the ceiling). Exceeding a limit is an exception naming the setting to
+   raise, not a silent truncation — and the memory message carries the row count that *would*
+   fit at the frame's width, so the fix can be pasted rather than derived.
 7. **Deterministic ordering.** Frames are materialized in a stable order regardless of DuckDB's parallel scan order, so results are reproducible run to run.
 
 ### Exit gate
@@ -539,9 +543,49 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 1. **Grouped estimation** — `do_ate_by(..., by := ['region'])` runs an independent estimation per group with shared nuisance-model infrastructure, parallelized across groups.
 2. **Parallelism** — cross-fitting folds, bootstrap replicates, and CFM ensemble draws are all embarrassingly parallel; use DuckDB's task scheduler rather than raw threads so the extension respects the engine's thread budget.
 3. **Context caching** — for CFMs, encode a fixed context once and reuse it across query chunks (`anofox_tabfm` does exactly this behind a setting).
-4. **Streaming and chunking** — bounded memory for large frames; spill encoded matrices when they exceed `duckdo_max_memory`.
+4. ~~**Streaming and chunking**~~ — **partly done, and the other part was rejected.**
+   `duckdo_max_memory` is now a real ceiling: the encoded matrix's size is computed before
+   it is allocated, and exceeding the budget raises an error naming the setting and the row
+   count that would fit. The peak was also measured and cut. What was *not* built is spilling.
+   Every estimator indexes the matrix by row, cross-fitting reads it five times over and the
+   bootstrap reads it in random row order two hundred times more; a spilled matrix would turn
+   a fast refusal into an unbounded thrash. Refusing with an actionable message is the better
+   failure, and it is also what section 6's guardrail rule already specified.
 5. **GPU flavours** — CUDA and ROCm builds in-tree, with `do_devices()` reporting availability and `duckdo_gpu_precision` controlling `fp32`/`tf32`/`bf16`. Document that reduced precision can flip signs near zero effect.
-6. **Benchmark suite in CI** — a fixed set of table sizes and estimators, tracked over time so regressions are visible.
+6. **Benchmark suite in CI** — a fixed set of table sizes and estimators, tracked over time so
+   regressions are visible. `scripts/benchmark.py` now gates on peak resident memory as well as
+   seconds, and generates each shape outside the measurement so both numbers describe the
+   estimator rather than the generator.
+
+### Measured
+
+Peak resident memory, from `scripts/benchmark.py`, which reads a pre-generated Parquet file so
+the figure describes the estimator and not the table generator. The encoded matrix for the last
+row is 400 MB.
+
+| rows x covariates | before | after |
+|---|---|---|
+| 100k x 5 | 42 MB | 35 MB |
+| 100k x 50 | 185 MB | 108 MB |
+| 1M x 5 | 220 MB | 143 MB |
+| 1M x 50 | 1,645 MB | 882 MB |
+
+Every estimate is identical to the last digit before and after, and the timings did not move.
+The 4.1x was three avoidable copies stacked on the matrix: the materialised scan result stayed
+live until the function returned, the raw per-column buffers stayed live until every column had
+been encoded, and the staged features stayed live until every one had been copied into the
+matrix. Releasing each at the point it goes dead removed all three. The benchmark gates on the
+peak now, so a reintroduced copy fails rather than being noticed.
+
+The remaining 2.2x is a floor, not an oversight. Encoding needs statistics over a whole column
+before it can write a single value of it — the median that fills NULLs, the mean and standard
+deviation that standardise — so the raw column and the encoded one are unavoidably resident
+together. Reordering the passes moves the peak around without lowering it: staging the encoded
+features costs the same as keeping the raw buffers alive to write them. The only way past it is
+to scan the source twice, once for statistics and once to fill the matrix, and that is unsafe
+here — `USING SAMPLE` and any other non-deterministic source would hand the second pass a
+different table than the first. The default budget is a *fraction* of DuckDB's limit precisely
+to leave room for the 2.2x.
 
 ### Exit gate
 
@@ -688,9 +732,11 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    for its explicit treatment of unobserved confounding, which DuckDo does not currently exploit.
 5. **Ensemble over covariate subsets** where a model's budget binds, instead of keeping only the
    most outcome-correlated.
-6. **Spill past `duckdo_max_memory`.** The frame is held in memory as doubles, so 1M rows by 50
-   covariates is roughly 400 MB. The row cap now defaults to 1M because that is fast enough, but
-   nothing yet spills, and `duckdo_max_memory` is still only advisory.
+6. ~~**Spill past `duckdo_max_memory`.**~~ **DONE, by enforcing rather than spilling.** The
+   setting is now a real ceiling with an actionable message, and the measured peak for the 1M x 50
+   frame fell from 1,645 MB to 882 MB against a 400 MB matrix. Spilling was considered and
+   rejected: see Phase 8, which also shows why the residual 2.2x is a floor rather than an
+   oversight.
 7. ~~**Persist graphs**~~ **DONE**: graphs live in a `duckdo_graphs` table, so they survive a restart and are inspectable as ordinary data. Open question 3 is answered — a plain table beat catalog integration, which would have coupled DuckDo to internals that move between DuckDB versions.
 8. **Broaden the cross-check further.** It now covers all ten IHDP replications available from the
    CEVAE mirror (mean |ATE error| 0.137, mean PEHE 2.23) and Lalonde NSW against its experimental
