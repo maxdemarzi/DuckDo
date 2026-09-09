@@ -311,6 +311,61 @@ Intervals come from a bootstrap of the whole product rather than a delta-method 
 Covariates are not used: this is the unconditional formula. The mediator must vary within both
 treatment arms, and a mediator that does not gets an explicit error rather than a silent NaN.
 
+### `do_mediate`
+
+How much of an *already identified* effect travels through the mediator. `do_frontdoor` uses a
+mediator to rescue identification; this one assumes identification and splits the effect up. Extra
+parameter: `mediator` (VARCHAR, required).
+
+```sql
+SELECT estimand, estimate, ci_low, ci_high, proportion
+FROM do_mediate('signups', treatment := 'onboarding', outcome := 'retention',
+                mediator := 'activated', covariates := ['plan', 'region']);
+-- total            | 3.131 | 3.096 | 3.166 | 0.515
+-- natural_direct   | 1.518 | 1.469 | 1.568 | 0.515
+-- natural_indirect | 1.613 | 1.568 | 1.659 | 0.515
+```
+
+Three rows, one per effect. Columns: `estimand, estimator, estimate, std_error, ci_low, ci_high,
+proportion, n, tm_interaction, mediator, warnings`. `proportion` is the proportion mediated and is
+the same on every row, so it can be read off whichever one you filter to.
+
+The decomposition is the linear case of VanderWeele's, fitting
+
+```
+M = b0 + b1*T + b2'X + e
+Y = q0 + q1*T + q2*M + q3*(T*M) + q4'X + e
+```
+
+and reading off `NDE = q1 + q3*(b0 + b2'E[X])` and `NIE = (q2 + q3)*b1`. Intervals come from a
+row-level bootstrap that redoes both fits, so the three are mutually consistent and the total
+always equals direct plus indirect exactly.
+
+**The `T*M` interaction is what makes this mediation analysis rather than Baron-Kenny with extra
+steps.** Drop `q3` and the split is only valid when the treatment's effect on the outcome does not
+depend on the mediator. On a DGP with a true `q3` of 0.6, fitting without the interaction returns a
+direct effect of 2.41 against a truth of 1.80 and an indirect effect of 2.22 against a truth of
+2.80 — a third wrong in opposite directions — while the *total* stays correct at 4.63 either way.
+A wrong split with a right total is exactly the failure that survives a sanity check, so `q3` is
+carried and reported as `tm_interaction`.
+
+`proportion` is `NULL` when the total effect is not distinguishable from zero, with a warning
+saying so: it is a ratio, and dividing by a total that straddles zero produces a number that can
+take any value. When direct and indirect have opposite signs the proportion falls outside `[0, 1]`
+and a warning names that too.
+
+Passing the mediator in `covariates :=` is an error, not a silent zero — adjusting for the mediator
+in the outcome model removes the very path being measured.
+
+Cost is bootstrap-bound: `bootstrap_reps` replicates times two ridge fits. 200k rows by 5
+covariates takes 3.7 s; 1M by 50 takes 194 s. Lower `bootstrap_reps :=` to trade interval
+precision for time — the point estimates do not depend on it.
+
+Every result carries the assumption this rests on: **sequential ignorability**. Randomising the
+treatment does not buy it. It removes confounding of treatment-outcome and treatment-mediator, and
+leaves mediator-outcome confounding entirely untouched — which is the most common error in applied
+mediation, so it is in the output rather than in a footnote.
+
 ---
 
 ## Interventions

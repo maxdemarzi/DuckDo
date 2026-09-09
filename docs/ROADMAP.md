@@ -644,7 +644,20 @@ Roughly in order of value per unit of effort:
 2. ~~**Panel data and difference-in-differences**~~ **DONE** for the core: `do_did` computes group-time effects in the Callaway–Sant'Anna sense and `do_event_study` exposes the pre-trend check. Two-way fixed effects was deliberately *not* implemented — it misweights under staggered adoption. Synthetic control and covariate-conditional (doubly-robust) DiD are still open.
 3. **Longitudinal / time-varying treatment** — g-methods, marginal structural models; the Causal Longitudinal PFN line of work as a model backend.
 4. **Survival outcomes** — time-to-event treatment effects.
-5. **Mediation analysis** — natural direct and indirect effects, building on the Phase 4 graph machinery.
+5. ~~**Mediation analysis** — natural direct and indirect effects.~~ **DONE**: `do_mediate`
+   returns the natural direct and indirect effects and the proportion mediated, with a row-level
+   bootstrap so the three intervals are mutually consistent and the total is exactly direct plus
+   indirect. It recovers a known 1.5 / 1.6 split as 1.518 / 1.613, and its total agrees with
+   `do_ate` on the same data to four decimal places through an entirely separate code path.
+
+   The treatment-mediator interaction is carried, and that is the substantive choice. On a DGP
+   with a true `q3` of 0.6, omitting it returns 2.41 / 2.22 against a truth of 1.80 / 2.80 while
+   the *total* stays correct at 4.63 — a wrong split under a right total, which is the failure
+   mode that survives a sanity check. `proportion` is refused rather than reported when the total
+   straddles zero. Sequential ignorability is stated in every result: randomisation buys the
+   treatment-outcome and treatment-mediator arms of it and leaves mediator-outcome confounding
+   untouched, which is the most common error in applied mediation. Graph-based verification that a
+   named mediator actually *is* one is still `do_validate`'s job rather than built in here.
 6. **Causal discovery** — `do_discover()` proposing a DAG from data. Deliberately last: it is the feature users most want and the one most likely to produce confident nonsense. If it ships, it ships with loud uncertainty and a required review step.
 7. **Federated / multi-table estimation** — effects across joins without materializing the join.
 

@@ -110,6 +110,28 @@ On a DGP with an unobserved confounder and a true effect of 2.0, ordinary regres
 4.903 and `do_frontdoor` gives **1.997**. Point a useless variable at `instrument :=` and the
 first-stage F comes back at 0.08 with `weak_instrument = true`.
 
+### How much of the effect goes through the mediator
+
+```sql
+SELECT estimand, estimate, ci_low, ci_high, proportion
+FROM do_mediate('signups', treatment := 'onboarding', outcome := 'retention',
+                mediator := 'activated', covariates := ['plan']);
+-- total            | 3.131 | 3.096 | 3.166 | 0.515
+-- natural_direct   | 1.518 | 1.469 | 1.568 | 0.515
+-- natural_indirect | 1.613 | 1.568 | 1.659 | 0.515
+```
+
+Natural direct and indirect effects, carrying the treatment-mediator interaction — which is what
+separates this from Baron-Kenny. On a DGP whose true split is 1.80 / 2.80, fitting without that
+interaction gives 2.41 / 2.22 while the total stays correct at 4.63. A wrong split under a right
+total is the failure that survives a sanity check, so the interaction is reported as
+`tm_interaction` rather than absorbed.
+
+`proportion` comes back `NULL`, with a warning, when the total effect straddles zero — a proportion
+mediated is a ratio, and that denominator makes it meaningless. Every row carries the assumption
+the whole thing rests on: **randomising the treatment does not buy sequential ignorability**. It
+leaves mediator-outcome confounding completely untouched.
+
 ### Causal foundation models
 
 ```sql
@@ -389,9 +411,9 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-203 assertions in the dependency-free build, 228 with the foundation-model path enabled, across
-estimator recovery, diagnostics, error paths, guardrails, graph identification, the `do()` surface
-and end-to-end inference for both models.
+234 assertions in the dependency-free build, 259 with the foundation-model path enabled, across
+estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation, the
+`do()` surface and end-to-end inference for both models.
 
 Three further dev-only harnesses, none shipped:
 

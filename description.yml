@@ -132,6 +132,14 @@ docs:
     and `do_frontdoor` applies the product formula and reports each half
     separately.
 
+    `do_mediate` asks the other question - how much of an already-identified
+    effect travels *through* the mediator - and returns the natural direct and
+    indirect effects with the treatment-mediator interaction carried. Omitting
+    that interaction leaves the total effect correct while getting the split
+    wrong by a third, which is the failure that survives a sanity check. The
+    proportion mediated is refused rather than reported when the total effect
+    straddles zero.
+
     ### Beyond the cross-section
 
     ```sql

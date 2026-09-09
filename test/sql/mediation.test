@@ -1,0 +1,205 @@
+# name: test/sql/mediation.test
+# description: natural direct and indirect effects, and the assumptions behind them
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.21);
+
+# A mediation DGP with every coefficient known.
+#   M = 0.5 + 2.0*T + 0.3*X + e        b1 = 2.0
+#   Y = 1.0 + 1.5*T + 0.8*M + 0.4*X + e    q1 = 1.5, q2 = 0.8, no interaction
+# so  NIE = q2*b1 = 1.6, NDE = q1 = 1.5, total = 3.1, proportion mediated = 0.516
+statement ok
+CREATE TABLE med AS
+WITH u AS (SELECT i,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS em,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ey,
+             (random() < 0.5)::INT AS t
+           FROM range(20000) r(i)),
+ m AS (SELECT *, 0.5 + 2.0*t + 0.3*x + em AS med FROM u)
+SELECT i AS id, x, t, med, 1.0 + 1.5*t + 0.8*med + 0.4*x + ey AS y FROM m;
+
+# Three rows, one per effect.
+query I
+SELECT count(*) FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x']);
+----
+3
+
+query I
+SELECT list_sort(list(estimand))
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x']);
+----
+[natural_direct, natural_indirect, total]
+
+query II
+SELECT abs(estimate - 1.5) < 0.1, ci_low < 1.5 AND 1.5 < ci_high
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'natural_direct';
+----
+true	true
+
+query II
+SELECT abs(estimate - 1.6) < 0.1, ci_low < 1.6 AND 1.6 < ci_high
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'natural_indirect';
+----
+true	true
+
+# The decomposition has to add up, and its total has to be the effect do_ate
+# reports without knowing about the mediator at all. That is the strongest
+# internal check available here: two different code paths, one number.
+query I
+SELECT abs(sum(CASE WHEN estimand <> 'total' THEN estimate ELSE -estimate END)) < 1e-9
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x']);
+----
+true
+
+query I
+SELECT abs(m.estimate - a.estimate) < 0.01
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x']) m,
+     do_ate('med', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'regression') a
+WHERE m.estimand = 'total';
+----
+true
+
+query I
+SELECT abs(proportion - 0.516) < 0.05
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'total';
+----
+true
+
+# --- the treatment-mediator interaction ----------------------------------------
+
+statement ok
+SELECT setseed(0.44);
+
+# Same DGP plus q3 = 0.6 on T*M, which moves the split without moving the total:
+#   NDE = q1 + q3*(b0 + b2*E[X]) = 1.5 + 0.6*0.5 = 1.8
+#   NIE = (q2 + q3)*b1           = 1.4*2.0       = 2.8
+# Fitting an outcome model without the interaction returns 2.41 and 2.22 on this
+# data - the total is still right, the split is wrong by a third. That is what
+# the interaction term is for.
+statement ok
+CREATE TABLE medx AS
+WITH u AS (SELECT i,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS em,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ey,
+             (random() < 0.5)::INT AS t
+           FROM range(20000) r(i)),
+ m AS (SELECT *, 0.5 + 2.0*t + 0.3*x + em AS med FROM u)
+SELECT i AS id, x, t, med, 1.0 + 1.5*t + 0.8*med + 0.6*t*med + 0.4*x + ey AS y FROM m;
+
+query II
+SELECT abs(estimate - 1.8) < 0.12, ci_low < 1.8 AND 1.8 < ci_high
+FROM do_mediate('medx', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'natural_direct';
+----
+true	true
+
+query II
+SELECT abs(estimate - 2.8) < 0.12, ci_low < 2.8 AND 2.8 < ci_high
+FROM do_mediate('medx', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'natural_indirect';
+----
+true	true
+
+# The interaction is reported rather than absorbed, so it can be inspected.
+query I
+SELECT abs(tm_interaction - 0.6) < 0.1
+FROM do_mediate('medx', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'total';
+----
+true
+
+# --- proportion mediated is refused when it would be meaningless ---------------
+
+statement ok
+SELECT setseed(0.66);
+
+# Direct and indirect cancel: NIE = +1.6, NDE = -1.6, total = 0. A proportion
+# mediated here is a ratio with a zero denominator wearing a percent sign.
+statement ok
+CREATE TABLE cancel AS
+WITH u AS (SELECT i,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS em,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ey,
+             (random() < 0.5)::INT AS t
+           FROM range(20000) r(i)),
+ m AS (SELECT *, 0.5 + 2.0*t + 0.3*x + em AS med FROM u)
+SELECT i AS id, x, t, med, 1.0 - 1.6*t + 0.8*med + 0.4*x + ey AS y FROM m;
+
+query I
+SELECT proportion IS NULL
+FROM do_mediate('cancel', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'total';
+----
+true
+
+query I
+SELECT list_contains(warnings, 'proportion mediated is not reported: the total effect is not distinguishable from zero, and dividing by it produces a ratio that can take any value')
+FROM do_mediate('cancel', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'total';
+----
+true
+
+# The two effects are still recovered even though their sum is zero.
+query I
+SELECT abs(estimate - 1.6) < 0.12
+FROM do_mediate('cancel', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'natural_indirect';
+----
+true
+
+# --- the assumption that cannot be checked -------------------------------------
+
+query I
+SELECT list_contains(warnings, 'mediation assumes sequential ignorability: no unmeasured confounding of treatment-outcome, treatment-mediator, or mediator-outcome. Randomising the treatment buys the first two and NOT the third, which is the most common error in applied mediation')
+FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x'])
+WHERE estimand = 'total';
+----
+true
+
+# --- error paths ----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_mediate('med', treatment := 't', outcome := 'y');
+----
+requires mediator
+
+statement error
+SELECT * FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'not_a_column');
+----
+does not exist in med
+
+statement error
+SELECT * FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 't');
+----
+must differ from the treatment and the outcome
+
+# Adjusting for the mediator in the outcome model is exactly what removes the
+# path being measured, so passing it as a covariate too is refused rather than
+# quietly returning an indirect effect of zero.
+statement error
+SELECT * FROM do_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x', 'med']);
+----
+both the mediator and a covariate
+
+statement ok
+CREATE TABLE flat AS SELECT id, x, t, 1.0 AS med, y FROM med;
+
+statement error
+SELECT * FROM do_mediate('flat', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x']);
+----
+does not vary
+
+# Both names are registered, like every other function.
+query I
+SELECT count(*) FROM duckdo_mediate('med', treatment := 't', outcome := 'y', mediator := 'med', covariates := ['x']);
+----
+3
