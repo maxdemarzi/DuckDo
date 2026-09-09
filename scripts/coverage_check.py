@@ -11,6 +11,7 @@ Dev-only. Not shipped with the extension.
 """
 
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -68,7 +69,13 @@ def run(duckdb_exe, scenario, seed, n):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--duckdb", default=os.path.join("build", "release", "duckdb.exe"))
-    parser.add_argument("--reps", type=int, default=12)
+    # Coverage per replicate is extremely variable: one replicate's rows all
+    # share the same fitted nuisance models, so a single bad draw drags its whole
+    # coverage down. At 12 replicates the reported mean moved by 0.12 between
+    # runs at different rep counts, which is enough to invent a finding that is
+    # not there. 40 is the point at which the standard error is small enough for
+    # the number to mean something.
+    parser.add_argument("--reps", type=int, default=40)
     parser.add_argument("--n", type=int, default=4000)
     args = parser.parse_args()
 
@@ -76,9 +83,11 @@ def main():
         print("duckdb binary not found at %s" % args.duckdb)
         return 2
 
-    print("%-20s %10s %10s %10s" % ("scenario", "coverage", "width", "corr"))
-    print("-" * 54)
+    print("%-20s %10s %8s %14s %10s %10s"
+          % ("scenario", "coverage", "+/- se", "range", "width", "corr"))
+    print("-" * 78)
     worst = 1.0
+    worst_scenario = ""
     for scenario in SCENARIOS:
         coverages, widths, corrs = [], [], []
         for rep in range(args.reps):
@@ -89,13 +98,26 @@ def main():
             widths.append(width)
             corrs.append(corr)
         mean_cov = sum(coverages) / len(coverages)
-        worst = min(worst, mean_cov)
-        print("%-20s %10.3f %10.3f %10.4f"
-              % (scenario, mean_cov, sum(widths) / len(widths), sum(corrs) / len(corrs)))
+        # Standard error of the mean across replicates. Replicates are the
+        # independent unit here - rows within one share its fitted models - so
+        # this is what says whether a gap from nominal is real.
+        if len(coverages) > 1:
+            var = sum((c - mean_cov) ** 2 for c in coverages) / (len(coverages) - 1)
+            se = math.sqrt(var / len(coverages))
+        else:
+            se = float("nan")
+        if mean_cov < worst:
+            worst, worst_scenario = mean_cov, scenario
+        print("%-20s %10.3f %8.3f %14s %10.3f %10.4f"
+              % (scenario, mean_cov, se, "%.2f-%.2f" % (min(coverages), max(coverages)),
+                 sum(widths) / len(widths), sum(corrs) / len(corrs)))
 
     print()
-    print("nominal 0.95; worst scenario mean coverage %.3f over %d reps of %d rows"
-          % (worst, args.reps, args.n))
+    print("nominal 0.95; worst scenario is %s at %.3f, over %d reps of %d rows"
+          % (worst_scenario, worst, args.reps, args.n))
+    print("Report coverage with its standard error. A single replicate covers between")
+    print("half and nearly all of its rows depending on where its nuisance fits land,")
+    print("so a mean quoted without one is not a measurement.")
     # Coverage this far below nominal means the interval is misleading, not merely
     # imprecise, so treat it as a failure.
     return 0 if worst >= 0.90 else 1

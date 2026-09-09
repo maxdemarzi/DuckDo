@@ -132,6 +132,25 @@ mediated is a ratio, and that denominator makes it meaningless. Every row carrie
 the whole thing rests on: **randomising the treatment does not buy sequential ignorability**. It
 leaves mediator-outcome confounding completely untouched.
 
+### When the confounder moves with the treatment
+
+```sql
+SELECT estimate, ci_low, ci_high, mean_weight, effective_n
+FROM do_msm('patient_months', unit := 'patient_id', period := 'month',
+            treatment := 'on_drug', outcome := 'bp', covariates := ['creatinine']);
+-- 2.130 | 1.962 | 2.298 | 0.989 | 6245
+```
+
+A confounder that affects treatment, affects the outcome, *and* is affected by earlier treatment
+has no correct adjustment set: leave it out and it confounds, put it in and it blocks part of the
+effect. On a DGP built that way with a true effect of 2.0 per treated period, no adjustment gives
+3.92, adjusting for every measured confounder gives 3.47 — faithfully recovering a coefficient that
+is not the causal effect — and `do_msm` gives **2.13**.
+
+`mean_weight` should sit near 1, and the result says so when it does not. `truncate :=` is off by
+default because on this data it raises effective *n* from 6,245 to 12,101 and halves the interval
+while moving the estimate from one that covers the truth to one that excludes it.
+
 ### Causal foundation models
 
 ```sql
@@ -378,11 +397,14 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   `do_dose_response`.** The binary path refuses a dose rather than silently binarising it, and says
   where to go. Multi-valued categorical treatments are still unsupported, and the dose-response
   model is quadratic in the dose, so a sharply non-monotone response will be smoothed.
-- **`do_cate` intervals run a touch narrow under heavy confounding.** Measured 95% coverage is
-  0.973 / 0.935 / 0.945 across randomised, confounded and strongly-confounded DGPs
-  (`scripts/coverage_check.py`). The interval uses an HC1 sandwich, because the doubly-robust
-  pseudo-outcome's variance scales with `1/e(x)` — assuming it constant gave 0.896. The residual
-  gap is nuisance-estimation uncertainty, second-order under cross-fitting.
+- **`do_cate` intervals are calibrated, and an earlier claim here that they were not was noise.**
+  Measured 95% coverage is 0.948 ± 0.014, 0.948 ± 0.016 and 0.944 ± 0.014 across randomised,
+  confounded and strongly-confounded DGPs — 40 replicates of 4,000 rows, standard error across
+  replicates (`scripts/coverage_check.py`). None of the three is distinguishable from nominal.
+  The interval uses an HC1 sandwich; without it the same measurement gives 0.948 / 0.937 / 0.909,
+  degrading exactly as confounding strengthens, which is the signature of the heteroskedasticity
+  it corrects. A single replicate covers anywhere between 0.56 and 1.00 of its rows, so coverage
+  quoted without a standard error is not a measurement — this README previously quoted one.
 - **Base learners are regularised GLMs.** Strongly non-linear confounding will not be fully removed.
   Gradient-boosted base learners are a Phase 2 follow-up.
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
@@ -411,9 +433,9 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-234 assertions in the dependency-free build, 259 with the foundation-model path enabled, across
-estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation, the
-`do()` surface and end-to-end inference for both models.
+264 assertions in the dependency-free build, 289 with the foundation-model path enabled, across
+estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
+time-varying treatment, the `do()` surface and end-to-end inference for both models.
 
 Three further dev-only harnesses, none shipped:
 

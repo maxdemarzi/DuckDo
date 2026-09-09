@@ -262,10 +262,19 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
   needed its own accommodation instead — an in-place `&=` with no opset-17 equivalent — and its
   logit-level parity is ~1e-2 because PyTorch fuses attention where ONNX Runtime decomposes it.
   Gating on the estimand (ATE agrees to 0.00087) rather than the logits is the defensible test.
-- **`do_cate`'s interval was measurably wrong and is now measurably better.** Coverage was 0.896
-  against a nominal 0.95 under strong confounding, because the doubly-robust pseudo-outcome's
-  variance scales with `1/e(x)` and the interval assumed it constant. An HC1 sandwich took the
-  worst case to 0.945. `scripts/coverage_check.py` keeps it honest.
+- **`do_cate`'s interval was measurably wrong and is now measurably better — but the first
+  measurement of it was noise.** The doubly-robust pseudo-outcome's variance scales with `1/e(x)`,
+  so assuming it constant undercovers. Properly measured at 40 replicates, coverage runs
+  0.948 / 0.937 / 0.909 (± ~0.015) across randomised, confounded and strongly-confounded DGPs
+  without the sandwich, and 0.948 / 0.948 / 0.944 with it. The *gradient* is the evidence: a
+  constant-variance assumption fails exactly where the variance stops being constant.
+
+  The original figures here — 0.896 before, 0.945 after — came from a 12-replicate run, and a
+  replicate's coverage ranges from 0.56 to 1.00 depending on where its nuisance fits land. At that
+  rep count the harness moved by 0.12 between runs, which is enough to invent a finding. The
+  conclusion held; the numbers did not. `scripts/coverage_check.py` now defaults to 40 replicates
+  and prints a standard error, a range, and a line saying that a mean without one is not a
+  measurement.
 
 ---
 
@@ -642,7 +651,18 @@ Roughly in order of value per unit of effort:
 
 1. ~~**Continuous treatments** — dose-response curves.~~ **DONE**: `do_ape` recovers a known average partial effect of 2.0 to 2.0019 where a naive slope gives 2.75, and `do_dose_response` traces the curve on a quantile grid. Multi-valued *categorical* treatments are still open.
 2. ~~**Panel data and difference-in-differences**~~ **DONE** for the core: `do_did` computes group-time effects in the Callaway–Sant'Anna sense and `do_event_study` exposes the pre-trend check. Two-way fixed effects was deliberately *not* implemented — it misweights under staggered adoption. Synthetic control and covariate-conditional (doubly-robust) DiD are still open.
-3. **Longitudinal / time-varying treatment** — g-methods, marginal structural models; the Causal Longitudinal PFN line of work as a model backend.
+3. ~~**Longitudinal / time-varying treatment**~~ **DONE for the core**: `do_msm` fits a marginal
+   structural model by stabilised inverse-probability-of-treatment weighting. On a DGP where a
+   time-varying confounder is itself affected by prior treatment — the case with no correct
+   adjustment set — the truth is 2.0 per treated period, no adjustment gives 3.92, adjusting for
+   every measured confounder gives 3.47, and `do_msm` gives 2.13 with an interval covering 2.0.
+
+   Weight diagnostics are in the result rather than a log: `mean_weight` near 1 is the cheapest
+   check on the treatment model, and `effective_n` shows what the weights cost. `truncate` is
+   available and **off by default**, because on that same data it nearly doubles effective *n* and
+   halves the interval while moving the estimate off the truth — every quality signal improving as
+   the answer gets worse. Causal longitudinal PFNs as a model backend, and history-dependent
+   structural models beyond "cumulative periods treated", are still open.
 4. **Survival outcomes** — time-to-event treatment effects.
 5. ~~**Mediation analysis** — natural direct and indirect effects.~~ **DONE**: `do_mediate`
    returns the natural direct and indirect effects and the proportion mediated, with a row-level

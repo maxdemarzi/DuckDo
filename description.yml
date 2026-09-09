@@ -182,9 +182,9 @@ docs:
     `do_ape` and `do_dose_response`, and a dose passed to the binary path is
     refused rather than silently binarised. Multi-valued categorical treatments
     are unsupported. Base learners are regularised GLMs, so strongly non-linear
-    confounding will not be fully removed. `do_cate` intervals run a touch narrow
-    under heavy confounding - measured 95% coverage is 0.973 / 0.935 / 0.945
-    across randomised, confounded and strongly-confounded DGPs.
+    confounding will not be fully removed. `do_cate` interval coverage measures
+    0.948, 0.948 and 0.944 - each within its own standard error of the nominal
+    0.95 - across randomised, confounded and strongly-confounded DGPs.
 
     ### Causal foundation models
 
