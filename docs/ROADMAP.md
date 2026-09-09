@@ -231,7 +231,7 @@ src/
 | 5 | Inference runtime | 0.5.0 | yes (models opt-in) | **DONE** — ONNX Runtime linked behind a build flag, model catalog, session cache, and a parity gate the export refuses to pass below 1e-4 (measured 4.3e-06 to 8.1e-06) |
 | 6 | CFM estimators | 0.6.0 | opt-in | **DONE for CausalPFN and Do-PFN** — CausalPFN matches AIPW (3.061 vs 3.063, truth 2.981) with CATE correlation 0.9995 and no shrinkage; Do-PFN shrinks to 2.631, reproduced and reported. CausalFM not exported |
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
-| 8 | Scale and performance | 0.8.0 | — | **PARTIAL** — `do_ate_by` segmented estimation landed; parallelism, spill and the 1M-row target are outstanding |
+| 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
 | 10 | Frontier | post-1.0 | — | Continuous treatments, panel, longitudinal |
 
@@ -686,9 +686,9 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    for its explicit treatment of unobserved confounding, which DuckDo does not currently exploit.
 5. **Ensemble over covariate subsets** where a model's budget binds, instead of keeping only the
    most outcome-correlated.
-6. **Finish Phase 8**: parallelise cross-fitting folds and bootstrap replicates through DuckDB's
-   task scheduler, add a chunked scan path to lift `duckdo_max_rows` above 100k, and spill past
-   `duckdo_max_memory`.
+6. **Spill past `duckdo_max_memory`.** The frame is held in memory as doubles, so 1M rows by 50
+   covariates is roughly 400 MB. The row cap now defaults to 1M because that is fast enough, but
+   nothing yet spills, and `duckdo_max_memory` is still only advisory.
 7. **Persist graphs** somewhere better than a process-global registry (open question 3).
 8. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
    the current gate covers one IHDP replication plus two synthetic scenarios.

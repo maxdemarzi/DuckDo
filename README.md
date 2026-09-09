@@ -209,9 +209,26 @@ Inference cost: ~16 s for 1500 rows across both models, single CPU.
 
 ## Settings
 
-`duckdo_default_estimator`, `duckdo_max_rows` (100k), `duckdo_max_features` (500),
+`duckdo_default_estimator`, `duckdo_max_rows` (1M), `duckdo_max_features` (500),
 `duckdo_max_categorical_levels` (32), `duckdo_max_groups` (1000), `duckdo_seed` (42),
-`duckdo_bootstrap_reps` (200). Every guardrail names the setting to raise when it trips.
+`duckdo_bootstrap_reps` (200), `duckdo_threads` (0 = one per hardware thread). Every guardrail
+names the setting to raise when it trips.
+
+### Cost
+
+The dense accumulations that dominate every fit are split across row blocks, with a fixed reduction
+order so results stay bit-identical run to run. Timings include generating the table
+(`scripts/benchmark.py`):
+
+| rows | covariates | estimator | seconds |
+|---|---|---|---|
+| 100k | 5 | `aipw` | 0.6 |
+| 100k | 50 | `aipw` | 2.1 |
+| 1M | 5 | `aipw` | 2.3 |
+| 1M | 50 | `aipw` | 18.9 |
+| 1M | 50 | `dml` | 18.7 |
+
+The 1M × 50 case was 101 s single-threaded before the accumulation was parallelised.
 
 ## Known limitations
 

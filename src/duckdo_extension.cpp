@@ -17,8 +17,10 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "(naive, regression, ipw, aipw, dml, s_learner, t_learner, x_learner, dr_learner)",
 	                          LogicalType::VARCHAR, Value("aipw"));
 	config.AddExtensionOption("duckdo_max_rows",
-	                          "Maximum number of rows an estimation frame may contain before DuckDo refuses to run",
-	                          LogicalType::BIGINT, Value::BIGINT(100000));
+	                          "Maximum number of rows an estimation frame may contain before DuckDo refuses to "
+	                          "run. The frame is held in memory as doubles, so 1M rows by 50 covariates is "
+	                          "roughly 400 MB",
+	                          LogicalType::BIGINT, Value::BIGINT(1000000));
 	config.AddExtensionOption("duckdo_max_features",
 	                          "Maximum number of encoded features an estimation frame may contain",
 	                          LogicalType::BIGINT, Value::BIGINT(500));
@@ -32,8 +34,10 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "Directory holding exported causal foundation model graphs and weights "
 	                          "(default ~/.cache/duckdo)",
 	                          LogicalType::VARCHAR, Value(""));
-	config.AddExtensionOption("duckdo_threads", "Intra-op threads for model inference", LogicalType::BIGINT,
-	                          Value::BIGINT(4));
+	config.AddExtensionOption("duckdo_threads",
+	                          "Threads for model inference and for the dense accumulations inside every "
+	                          "estimator; 0 means one per hardware thread",
+	                          LogicalType::BIGINT, Value::BIGINT(0));
 	config.AddExtensionOption("duckdo_query_chunk",
 	                          "Rows scored per model forward pass", LogicalType::BIGINT, Value::BIGINT(512));
 	config.AddExtensionOption("duckdo_seed", "Seed for fold assignment, bootstrap and every other random draw",

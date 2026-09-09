@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <thread>
 
 namespace duckdb {
 namespace duckdo {
@@ -65,14 +66,27 @@ bool CholeskySolve(vector<double> &A, idx_t n, const vector<double> &rhs, vector
 	return true;
 }
 
-//! Accumulate the weighted normal equations X'WX (with intercept) and X'Wz.
-static void BuildNormalEquations(const Matrix &X, const vector<double> &z, const vector<idx_t> &rows,
-                                 const vector<double> &w, vector<double> &xtx, vector<double> &xtz) {
+static idx_t numeric_threads = 0;
+
+void SetNumericThreads(idx_t threads) {
+	numeric_threads = threads;
+}
+
+idx_t NumericThreads() {
+	if (numeric_threads > 0) {
+		return numeric_threads;
+	}
+	const unsigned hardware = std::thread::hardware_concurrency();
+	return hardware > 0 ? static_cast<idx_t>(hardware) : 1;
+}
+
+//! Accumulate the weighted normal equations X'WX (with intercept) and X'Wz over
+//! one block of rows. Only the lower triangle is filled; the caller mirrors it.
+static void AccumulateBlock(const Matrix &X, const vector<double> &z, const vector<idx_t> &rows,
+                            const vector<double> &w, idx_t begin, idx_t end, double *xtx, double *xtz) {
 	const idx_t p = X.cols + 1;
-	xtx.assign(p * p, 0.0);
-	xtz.assign(p, 0.0);
 	vector<double> row(p);
-	for (idx_t idx = 0; idx < rows.size(); idx++) {
+	for (idx_t idx = begin; idx < end; idx++) {
 		const idx_t r = rows[idx];
 		const double wi = w.empty() ? 1.0 : w[idx];
 		if (wi == 0.0) {
@@ -92,6 +106,58 @@ static void BuildNormalEquations(const Matrix &X, const vector<double> &z, const
 			}
 		}
 	}
+}
+
+//! Accumulate the weighted normal equations, split across threads by row block.
+//! This is the dominant cost of every fit - O(n * p^2), run once per IRLS
+//! iteration per fold - and each thread only needs its own (p+1)^2 scratch
+//! matrix, which is kilobytes. The reduction order is fixed by block index, so
+//! results stay bit-identical run to run.
+static void BuildNormalEquations(const Matrix &X, const vector<double> &z, const vector<idx_t> &rows,
+                                 const vector<double> &w, vector<double> &xtx, vector<double> &xtz) {
+	const idx_t p = X.cols + 1;
+	xtx.assign(p * p, 0.0);
+	xtz.assign(p, 0.0);
+
+	// Below this the threading overhead costs more than the work saved.
+	const idx_t kMinRowsPerThread = 4096;
+	idx_t blocks = NumericThreads();
+	if (blocks > 1) {
+		blocks = std::min(blocks, std::max<idx_t>(rows.size() / kMinRowsPerThread, 1));
+	}
+
+	if (blocks <= 1) {
+		AccumulateBlock(X, z, rows, w, 0, rows.size(), xtx.data(), xtz.data());
+	} else {
+		vector<vector<double>> partial_xtx(blocks, vector<double>(p * p, 0.0));
+		vector<vector<double>> partial_xtz(blocks, vector<double>(p, 0.0));
+		vector<std::thread> workers;
+		workers.reserve(blocks - 1);
+		const idx_t span = (rows.size() + blocks - 1) / blocks;
+		for (idx_t b = 0; b < blocks; b++) {
+			const idx_t begin = std::min(b * span, rows.size());
+			const idx_t end = std::min(begin + span, rows.size());
+			if (b + 1 == blocks) {
+				AccumulateBlock(X, z, rows, w, begin, end, partial_xtx[b].data(), partial_xtz[b].data());
+			} else {
+				workers.emplace_back([&, b, begin, end] {
+					AccumulateBlock(X, z, rows, w, begin, end, partial_xtx[b].data(), partial_xtz[b].data());
+				});
+			}
+		}
+		for (auto &worker : workers) {
+			worker.join();
+		}
+		for (idx_t b = 0; b < blocks; b++) {
+			for (idx_t i = 0; i < p * p; i++) {
+				xtx[i] += partial_xtx[b][i];
+			}
+			for (idx_t i = 0; i < p; i++) {
+				xtz[i] += partial_xtz[b][i];
+			}
+		}
+	}
+
 	// Mirror the lower triangle into the upper one.
 	for (idx_t a = 0; a < p; a++) {
 		for (idx_t b = 0; b < a; b++) {

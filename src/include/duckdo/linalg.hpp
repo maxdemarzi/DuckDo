@@ -90,6 +90,12 @@ RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const ve
 LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,
                         const vector<double> &weights, double lambda, idx_t max_iter);
 
+//! Threads used by the dense accumulations that dominate every fit. Set once
+//! per query from duckdo_threads; 0 means "one per hardware thread". The work
+//! is a sum over rows into a (p+1)^2 matrix, so it splits cleanly by row block.
+void SetNumericThreads(idx_t threads);
+idx_t NumericThreads();
+
 double Sigmoid(double x);
 double Mean(const vector<double> &v);
 double Variance(const vector<double> &v);

@@ -312,6 +312,10 @@ double Median(vector<double> values) {
 } // namespace
 
 CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
+	// One place to pick up the thread budget for the dense accumulations that
+	// dominate every fit. 0 means one per hardware thread.
+	SetNumericThreads(GetSettingIdx(context, "duckdo_threads", 0));
+
 	CausalFrame frame;
 	const string rel = RelationSql(spec.relation);
 	const idx_t max_rows = GetSettingIdx(context, "duckdo_max_rows", 100000);

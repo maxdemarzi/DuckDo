@@ -416,7 +416,7 @@ CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const Causa
 		context_y[i] = static_cast<float>((frame.y[r] - y_mean) / y_sd);
 	}
 
-	auto &session = AcquireSession(GraphPath(dir, model, rung), GetSettingIdx(context, "duckdo_threads", 4));
+	auto &session = AcquireSession(GraphPath(dir, model, rung), NumericThreads());
 	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 	const std::array<int64_t, 3> context_shape {static_cast<int64_t>(rung), 1, static_cast<int64_t>(width)};
 	const std::array<int64_t, 2> context_y_shape {static_cast<int64_t>(rung), 1};
@@ -517,7 +517,7 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 		context_y[i] = static_cast<float>(frame.y[r]);
 	}
 
-	auto &session = AcquireSession(GraphPath(dir, model, 0), GetSettingIdx(context, "duckdo_threads", 4));
+	auto &session = AcquireSession(GraphPath(dir, model, 0), NumericThreads());
 	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 	const std::array<int64_t, 3> context_shape {1, static_cast<int64_t>(ctx), static_cast<int64_t>(width)};
 	const std::array<int64_t, 2> context_1d {1, static_cast<int64_t>(ctx)};
