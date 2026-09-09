@@ -114,3 +114,51 @@ statement error
 SELECT do_dseparated('sales_dag', 'not_a_node', 'revenue', []);
 ----
 is not a node in the graph
+
+# --- persistence --------------------------------------------------------------
+#
+# Graphs live in an ordinary table rather than in process memory, so they survive
+# a restart of a persistent database and are inspectable like any other data.
+
+query I
+SELECT count(*) >= 2 FROM duckdo_graphs;
+----
+true
+
+query I
+SELECT definition LIKE '%latent%' FROM duckdo_graphs WHERE name = 'sales_dag';
+----
+true
+
+# Re-registering a name replaces it rather than duplicating it.
+statement ok
+CALL do_graph_create('clean_dag', 'digraph { a -> b; b -> c; }');
+
+query I
+SELECT count(*) FROM duckdo_graphs WHERE name = 'clean_dag';
+----
+1
+
+query II
+SELECT n_nodes, n_edges FROM do_graphs() WHERE name = 'clean_dag';
+----
+3	2
+
+# An invalid definition never reaches the store.
+statement error
+CALL do_graph_create('cyclic', 'digraph { a -> b; b -> a; }');
+----
+contains a cycle
+
+query I
+SELECT count(*) FROM duckdo_graphs WHERE name = 'cyclic';
+----
+0
+
+statement ok
+CALL do_graph_drop('clean_dag');
+
+query I
+SELECT count(*) FROM duckdo_graphs WHERE name = 'clean_dag';
+----
+0

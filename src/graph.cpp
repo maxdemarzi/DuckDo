@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdo/frame.hpp"
 #include "duckdo/functions.hpp"
 
@@ -428,9 +430,19 @@ bool FindInstrument(const Dag &dag, idx_t t, idx_t y, std::set<idx_t> &out) {
 
 // --- registry ---------------------------------------------------------------
 
+//! Graphs live in an ordinary DuckDB table, so they survive a restart of a
+//! persistent database and are visible to the user like any other data. The
+//! in-process map is only a parse cache in front of it.
+//!
+//! The DatabaseInstance is captured at extension load because do_dseparated is a
+//! scalar function, and a scalar's execution does not carry a ClientContext the
+//! way a table function's bind does. Everything here opens its own connection.
+constexpr const char *GRAPH_TABLE = "duckdo_graphs";
+
 struct GraphRegistry {
 	std::mutex lock;
-	std::unordered_map<string, Dag> graphs;
+	std::unordered_map<string, Dag> cache;
+	optional_ptr<DatabaseInstance> database;
 
 	static GraphRegistry &Get() {
 		static GraphRegistry instance;
@@ -438,16 +450,68 @@ struct GraphRegistry {
 	}
 };
 
-Dag LookupGraph(const string &name) {
+
+//! Run a statement on a fresh connection against the captured database.
+unique_ptr<MaterializedQueryResult> GraphQuery(const string &sql, const string &what) {
 	auto &registry = GraphRegistry::Get();
-	std::lock_guard<std::mutex> guard(registry.lock);
-	auto entry = registry.graphs.find(StringUtil::Lower(name));
-	if (entry == registry.graphs.end()) {
+	if (!registry.database) {
+		throw BinderException("duckdo: the graph store is not initialised; reload the extension");
+	}
+	Connection con(*registry.database);
+	auto result = con.Query(sql);
+	if (!result || result->HasError()) {
+		throw BinderException("duckdo: failed while %s: %s", what,
+		                      result ? result->GetError() : string("no result"));
+	}
+	return result;
+}
+
+void EnsureGraphTable() {
+	GraphQuery(string("CREATE TABLE IF NOT EXISTS ") + GRAPH_TABLE +
+	               " (name VARCHAR PRIMARY KEY, definition VARCHAR)",
+	           "creating the graph store");
+}
+
+string QuoteText(const string &text) {
+	string out = "'";
+	for (char c : text) {
+		if (c == '\'') {
+			out += '\'';
+		}
+		out += c;
+	}
+	out += "'";
+	return out;
+}
+
+Dag ParseDot(const string &text);
+
+Dag LookupGraph(const string &name) {
+	const string key = StringUtil::Lower(name);
+	{
+		auto &registry = GraphRegistry::Get();
+		std::lock_guard<std::mutex> guard(registry.lock);
+		auto entry = registry.cache.find(key);
+		if (entry != registry.cache.end()) {
+			return entry->second;
+		}
+	}
+
+	EnsureGraphTable();
+	auto stored = GraphQuery(string("SELECT definition FROM ") + GRAPH_TABLE + " WHERE name = " + QuoteText(key),
+	                         "reading graph '" + name + "'");
+	if (stored->RowCount() == 0) {
 		throw BinderException("duckdo: no graph named '%s'. Register one with CALL do_graph_create('%s', 'digraph { a "
 		                      "-> b; }') and list them with SELECT * FROM do_graphs()",
 		                      name, name);
 	}
-	return entry->second;
+	auto dag = ParseDot(stored->GetValue(0, 0).ToString());
+	{
+		auto &registry = GraphRegistry::Get();
+		std::lock_guard<std::mutex> guard(registry.lock);
+		registry.cache[key] = dag;
+	}
+	return dag;
 }
 
 idx_t RequireNode(const Dag &dag, const string &name, const char *role) {
@@ -519,10 +583,18 @@ unique_ptr<FunctionData> BindGraphCreate(ClientContext &, TableFunctionBindInput
 	}
 	const idx_t node_count = dag.nodes.size();
 	const idx_t edge_count = dag.EdgeCount();
+	const string key = StringUtil::Lower(name);
+	// Parsed first, so an invalid graph never reaches the store.
+	EnsureGraphTable();
+	GraphQuery(string("DELETE FROM ") + GRAPH_TABLE + " WHERE name = " + QuoteText(key),
+	           "replacing graph '" + name + "'");
+	GraphQuery(string("INSERT INTO ") + GRAPH_TABLE + " VALUES (" + QuoteText(key) + ", " +
+	               QuoteText(input.inputs[1].ToString()) + ")",
+	           "storing graph '" + name + "'");
 	{
 		auto &registry = GraphRegistry::Get();
 		std::lock_guard<std::mutex> guard(registry.lock);
-		registry.graphs[StringUtil::Lower(name)] = std::move(dag);
+		registry.cache[key] = std::move(dag);
 	}
 
 	names = {"name", "n_nodes", "n_edges", "n_latent"};
@@ -540,11 +612,17 @@ unique_ptr<FunctionData> BindGraphDrop(ClientContext &, TableFunctionBindInput &
 		throw BinderException("duckdo: do_graph_drop takes the name of a registered graph");
 	}
 	const string name = input.inputs[0].ToString();
-	bool dropped;
+	const string key = StringUtil::Lower(name);
+	EnsureGraphTable();
+	auto existing = GraphQuery(string("SELECT count(*) FROM ") + GRAPH_TABLE + " WHERE name = " + QuoteText(key),
+	                           "checking graph '" + name + "'");
+	const bool dropped = existing->GetValue(0, 0).GetValue<int64_t>() > 0;
+	GraphQuery(string("DELETE FROM ") + GRAPH_TABLE + " WHERE name = " + QuoteText(key),
+	           "dropping graph '" + name + "'");
 	{
 		auto &registry = GraphRegistry::Get();
 		std::lock_guard<std::mutex> guard(registry.lock);
-		dropped = registry.graphs.erase(StringUtil::Lower(name)) > 0;
+		registry.cache.erase(key);
 	}
 	names = {"name", "dropped"};
 	return_types = {LogicalType::VARCHAR, LogicalType::BOOLEAN};
@@ -559,15 +637,18 @@ unique_ptr<FunctionData> BindGraphs(ClientContext &, TableFunctionBindInput &, v
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT,
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 	auto bind = make_uniq<ResultBindData>();
-	auto &registry = GraphRegistry::Get();
-	std::lock_guard<std::mutex> guard(registry.lock);
-	vector<string> keys;
-	for (auto &entry : registry.graphs) {
-		keys.push_back(entry.first);
-	}
-	std::sort(keys.begin(), keys.end());
-	for (auto &key : keys) {
-		auto &dag = registry.graphs[key];
+	EnsureGraphTable();
+	auto stored = GraphQuery(string("SELECT name, definition FROM ") + GRAPH_TABLE + " ORDER BY name",
+	                         "listing graphs");
+	for (idx_t r = 0; r < stored->RowCount(); r++) {
+		const string key = stored->GetValue(0, r).ToString();
+		Dag dag;
+		try {
+			dag = ParseDot(stored->GetValue(1, r).ToString());
+		} catch (const std::exception &) {
+			// A row someone edited by hand should not take the whole listing down.
+			continue;
+		}
 		vector<Value> node_values;
 		for (auto &n : dag.nodes) {
 			node_values.push_back(Value(n));
@@ -783,6 +864,14 @@ void DSeparatedFunction(DataChunk &args, ExpressionState &, Vector &result) {
 }
 
 } // namespace
+
+void SetGraphDatabase(DatabaseInstance &instance) {
+	auto &registry = GraphRegistry::Get();
+	std::lock_guard<std::mutex> guard(registry.lock);
+	registry.database = &instance;
+	// A different database means different stored graphs.
+	registry.cache.clear();
+}
 
 void RegisterGraphFunctions(ExtensionLoader &loader) {
 	TableFunction create("", {LogicalType::VARCHAR, LogicalType::VARCHAR}, EmitRows, BindGraphCreate, InitGlobal);

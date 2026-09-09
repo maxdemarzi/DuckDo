@@ -34,6 +34,8 @@ void RegisterContinuousFunctions(ExtensionLoader &loader);
 void RegisterPanelFunctions(ExtensionLoader &loader);
 void RegisterDiagnosticFunctions(ExtensionLoader &loader);
 void RegisterGraphFunctions(ExtensionLoader &loader);
+//! Point the graph store at the database it should persist into.
+void SetGraphDatabase(DatabaseInstance &instance);
 
 //! Register a table function under both `do_<name>` and `duckdo_<name>`.
 void RegisterUnderBothNames(ExtensionLoader &loader, TableFunction fn, const string &bare_name);

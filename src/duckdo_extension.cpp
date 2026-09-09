@@ -55,6 +55,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("Causal inference in DuckDB: treatment effects, diagnostics, graph identification and "
 	                      "interventional queries in SQL");
 	RegisterSettings(loader.GetDatabaseInstance());
+	duckdo::SetGraphDatabase(loader.GetDatabaseInstance());
 	duckdo::RegisterEstimationFunctions(loader);
 	duckdo::RegisterInterventionFunctions(loader);
 	duckdo::RegisterContinuousFunctions(loader);

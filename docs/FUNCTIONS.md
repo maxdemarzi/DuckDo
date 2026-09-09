@@ -227,8 +227,19 @@ CALL do_graph_create('sales_dag', 'digraph {
 ```
 
 A DOT subset: `a -> b` edges, chains (`a -> b -> c`), and a `[latent]` (or
-`[unobserved]`) attribute marking a node as unmeasured. Cycles are rejected.
-Graphs live in process memory and do not survive a restart.
+`[unobserved]`) attribute marking a node as unmeasured. Cycles are rejected —
+and an invalid definition never reaches the store.
+
+Graphs are kept in an ordinary table named `duckdo_graphs`, created on first use,
+so they survive a restart of a persistent database and can be inspected, backed
+up or version-controlled like any other data:
+
+```sql
+SELECT name, definition FROM duckdo_graphs;
+```
+
+Re-registering a name replaces it. The in-process map is only a parse cache in
+front of that table.
 
 ### `do_identify`
 

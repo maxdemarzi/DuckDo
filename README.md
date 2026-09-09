@@ -311,7 +311,6 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   gap is nuisance-estimation uncertainty, second-order under cross-fitting.
 - **Base learners are regularised GLMs.** Strongly non-linear confounding will not be fully removed.
   Gradient-boosted base learners are a Phase 2 follow-up.
-- **Graphs live in process memory**, not the DuckDB catalog, so they do not survive a restart.
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
   not visible to an estimation call.
 - **Foundation model intervals need `ensemble :=`, and still miss parameter uncertainty.** A single

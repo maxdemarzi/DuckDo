@@ -662,7 +662,7 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 
 1. **Relation input**: native table in-out function, or `anofox_tabfm`-style string relation names? Phase 0 spike decides; the native form gives better bind-time errors if it can see column types.
 2. **Do we ship gradient-boosted trees as a base learner**, or stay with regularized GLMs through 1.0? Decide from Phase 2 benchmark results, not in advance.
-3. **How are graphs persisted** — DuckDB catalog objects, a system table, or session-only? Catalog integration is nicer but couples us to internals that move between DuckDB versions.
+3. ~~**How are graphs persisted?**~~ **ANSWERED: a plain table.** `duckdo_graphs` is created on first use, survives restarts, and is inspectable and backup-able like any other data. Catalog integration would have been tidier in principle and would have coupled DuckDo to internals that move between DuckDB versions.
 4. **Should `do_ate` auto-select an estimator** based on diagnostics, or always require an explicit one? Auto-selection is friendlier and less auditable. Current lean: explicit default (`aipw`), with `estimator := 'auto'` available and loud about what it chose.
 5. **Sampling weights and survey designs** — in scope for 1.0, or Phase 10?
 6. **Multiple testing** across `do_ate_by` groups — report adjusted p-values by default, or leave it to the user? Current lean: report both, defaulting to flagging when the group count is large.
@@ -691,7 +691,7 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
 6. **Spill past `duckdo_max_memory`.** The frame is held in memory as doubles, so 1M rows by 50
    covariates is roughly 400 MB. The row cap now defaults to 1M because that is fast enough, but
    nothing yet spills, and `duckdo_max_memory` is still only advisory.
-7. **Persist graphs** somewhere better than a process-global registry (open question 3).
+7. ~~**Persist graphs**~~ **DONE**: graphs live in a `duckdo_graphs` table, so they survive a restart and are inspectable as ordinary data. Open question 3 is answered — a plain table beat catalog integration, which would have coupled DuckDo to internals that move between DuckDB versions.
 8. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
    the current gate covers one IHDP replication plus two synthetic scenarios.
 9. **Host the exported graphs** so `do_download` can fetch them, rather than requiring every user to
