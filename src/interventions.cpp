@@ -374,6 +374,12 @@ struct PolicyLeaf {
 
 //! One greedy split: bucket each feature into deciles, then read off every cut
 //! point from prefix sums. O(features * rows) rather than O(features * rows^2).
+//! `psi` here is the NET value of treating a row - the estimated effect minus
+//! whatever treating costs. That matters: with a cost of zero and an effect that
+//! is positive everywhere, no split can ever beat treating everyone, so the tree
+//! correctly returns a single leaf and the search looks broken when it is not.
+//! Subtracting the cost first is what makes the question "who is worth treating"
+//! have an interesting answer.
 bool BestSplit(const CausalFrame &frame, const vector<double> &psi, const vector<idx_t> &rows, idx_t &best_feature,
                double &best_threshold, double &best_value) {
 	const idx_t kBuckets = 10;
@@ -443,6 +449,16 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 	auto fit = FitNuisance(frame, spec, spec.seed);
 	auto psi = AipwPseudoOutcome(frame, fit);
 
+	// `threshold` is the cost of treating one row, on the outcome's scale, and
+	// the tree searches on the effect net of it. Without this the parameter was
+	// accepted, documented and ignored: every leaf came back "treat", because
+	// with no cost and a positive effect there is never a reason not to.
+	const double cost = spec.threshold;
+	vector<double> net = psi;
+	for (auto &v : net) {
+		v -= cost;
+	}
+
 	const idx_t max_depth = std::min<idx_t>(std::max<idx_t>(spec.depth, 1), 3);
 	vector<PolicyLeaf> leaves;
 	vector<PolicyLeaf> frontier {PolicyLeaf {frame.AllRows(), "all rows", 0}};
@@ -453,7 +469,7 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 		idx_t feature = 0;
 		double threshold = 0.0, value = 0.0;
 		if (node.depth < max_depth && node.rows.size() >= 60 &&
-		    BestSplit(frame, psi, node.rows, feature, threshold, value)) {
+		    BestSplit(frame, net, node.rows, feature, threshold, value)) {
 			auto &info = frame.features[feature];
 			// Report the cut in the column's own units, not standardised space.
 			const double original = info.center + info.scale * threshold;
@@ -473,9 +489,9 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 		}
 	}
 
-	names = {"leaf", "rule", "n", "mean_effect", "std_error", "action", "expected_gain"};
+	names = {"leaf", "rule", "n", "mean_effect", "std_error", "cost", "action", "expected_gain"};
 	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE, LogicalType::VARCHAR, LogicalType::DOUBLE};
+	                LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::VARCHAR, LogicalType::DOUBLE};
 
 	std::stable_sort(leaves.begin(), leaves.end(),
 	                 [](const PolicyLeaf &a, const PolicyLeaf &b) { return a.rule < b.rule; });
@@ -483,11 +499,15 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 	auto bind = make_uniq<ResultBindData>();
 	for (idx_t l = 0; l < leaves.size(); l++) {
 		auto &leaf = leaves[l];
-		double sum = 0.0;
+		double sum = 0.0, net_sum = 0.0;
 		for (auto r : leaf.rows) {
 			sum += psi[r];
+			net_sum += net[r];
 		}
 		const double count = static_cast<double>(leaf.rows.size());
+		// mean_effect stays the effect itself, because that is the quantity a
+		// reader wants to compare against the cost. The decision is made on the
+		// net figure.
 		const double mean = count > 0.0 ? sum / count : 0.0;
 		double variance = 0.0;
 		for (auto r : leaf.rows) {
@@ -495,11 +515,11 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 			variance += d * d;
 		}
 		const double se = count > 1.0 ? std::sqrt(variance / (count * (count - 1.0))) : 0.0;
-		const bool treat = mean > 0.0;
+		const bool treat = net_sum > 0.0;
 		bind->rows.push_back({Value::BIGINT(static_cast<int64_t>(l)), Value(leaf.rule),
 		                      Value::BIGINT(static_cast<int64_t>(leaf.rows.size())), Value::DOUBLE(mean),
-		                      Value::DOUBLE(se), Value(treat ? "treat" : "do not treat"),
-		                      Value::DOUBLE(treat ? sum / static_cast<double>(frame.n) : 0.0)});
+		                      Value::DOUBLE(se), Value::DOUBLE(cost), Value(treat ? "treat" : "do not treat"),
+		                      Value::DOUBLE(treat ? net_sum / static_cast<double>(frame.n) : 0.0)});
 	}
 	return std::move(bind);
 }

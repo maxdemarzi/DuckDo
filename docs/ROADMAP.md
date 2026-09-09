@@ -646,7 +646,14 @@ to leave room for the 2.2x.
        -- the surface, the models, the licenses
    ```
    The `hello_world` must run with **no model download** — a classical AIPW estimate on inline `VALUES`. A first impression that requires a 300MB fetch is a first impression most people never have.
-2. **Documentation.** Function reference; a "your first causal question" tutorial; an assumptions guide written for analysts rather than statisticians; a model catalog with licenses and the Do-PFN attribution notice; a page of worked examples (A/B test with non-compliance, observational pricing, churn intervention).
+2. **Documentation.** ~~Function reference~~ **DONE** (`docs/FUNCTIONS.md`); ~~a "your first
+   causal question" tutorial~~ **DONE** (`docs/TUTORIAL.md`, built entirely from real output —
+   naive $18.67 against a true $8.00, then diagnostics, refutation, heterogeneity and a shippable
+   targeting rule); ~~an assumptions guide written for analysts rather than statisticians~~
+   **DONE** (`docs/ASSUMPTIONS.md`, organised by whether the data can settle each assumption at
+   all); ~~a model catalog with licenses and the Do-PFN attribution notice~~ **DONE** (in the
+   function reference and `do_list_models()`). Still open: a page of worked examples (A/B test
+   with non-compliance, observational pricing, churn intervention).
 3. **Honest benchmark page.** DuckDo classical vs DuckDo CFM vs Python EconML/DoWhy/CausalPFN, on the standard benchmarks, with the losses shown.
 4. **Reproducibility statement.** What is deterministic, what is not, and how to pin it.
 5. **No telemetry.** Causal analysis runs on sensitive data. Shipping zero telemetry is both the right default and a genuine differentiator worth stating explicitly.

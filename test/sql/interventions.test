@@ -187,3 +187,69 @@ statement error
 SELECT * FROM do_ate_by('customers', treatment := 'discount', outcome := 'revenue');
 ----
 requires by
+
+# --- a targeting rule has to know what treating costs ---------------------------
+#
+# `threshold` was accepted and documented as the point above which a row is worth
+# treating, and do_optimal_policy ignored it. With no cost and an effect that is
+# positive everywhere, no split can beat treating everyone, so every call came
+# back with one leaf saying "treat" - a correct answer to a question nobody asked.
+
+statement ok
+SELECT setseed(0.5);
+
+# Effect is 14.00 - 0.30*tenure, so at a cost of $8 the rule that maximises value
+# is exactly tenure < 20. The tree has to find that boundary from the data.
+statement ok
+CREATE TABLE targeting AS
+WITH u AS (
+  SELECT i AS customer_id, (random()*40)::INT AS tenure_months,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise, random() AS roll
+  FROM range(20000) t(i)),
+ p AS (SELECT *, 1.0/(1.0 + exp(-(-1.2 + 0.05*tenure_months))) AS ps FROM u)
+SELECT customer_id, tenure_months, (roll < ps)::INT AS got_discount,
+       18.0 + 0.35*tenure_months + (14.0 - 0.30*tenure_months)*((roll < ps)::INT) + 6.0*noise AS revenue
+FROM p;
+
+# With no cost, treating everyone really is optimal, and one leaf is the right
+# answer rather than a bug.
+query II
+SELECT count(*), bool_and(action = 'treat')
+FROM do_optimal_policy('targeting', treatment := 'got_discount', outcome := 'revenue',
+                       exclude := ['customer_id'], depth := 2);
+----
+1	true
+
+# With a cost of 8 it splits, and the cut lands on the true boundary of 20.
+query I
+SELECT count(*) > 1
+FROM do_optimal_policy('targeting', treatment := 'got_discount', outcome := 'revenue',
+                       exclude := ['customer_id'], depth := 1, threshold := 8.0);
+----
+true
+
+query III
+SELECT rule, action, abs(mean_effect - 8.0) > 1.0
+FROM do_optimal_policy('targeting', treatment := 'got_discount', outcome := 'revenue',
+                       exclude := ['customer_id'], depth := 1, threshold := 8.0)
+ORDER BY action;
+----
+tenure_months > 20	do not treat	true
+tenure_months <= 20	treat	true
+
+# The leaf that is treated has a mean effect above the cost, the other below it.
+query I
+SELECT min(CASE WHEN action = 'treat' THEN mean_effect END) > 8.0
+   AND max(CASE WHEN action = 'do not treat' THEN mean_effect END) < 8.0
+FROM do_optimal_policy('targeting', treatment := 'got_discount', outcome := 'revenue',
+                       exclude := ['customer_id'], depth := 1, threshold := 8.0);
+----
+true
+
+# The cost used is reported, so a rule can never be read without it.
+query I
+SELECT DISTINCT cost
+FROM do_optimal_policy('targeting', treatment := 'got_discount', outcome := 'revenue',
+                       exclude := ['customer_id'], depth := 1, threshold := 8.0);
+----
+8.0

@@ -526,12 +526,27 @@ best first.
 
 ### `do_optimal_policy`
 
-Extra parameter: `depth` (BIGINT, default 2, capped at 3).
+Extra parameters: `depth` (BIGINT, default 2, capped at 3) and `threshold` (DOUBLE,
+default 0) — **the cost of treating one row**, on the outcome's scale.
 
-A shallow, deployable targeting rule found by greedily maximising the
-doubly-robust value. Returns one row per leaf: `leaf, rule, n, mean_effect,
-std_error, action, expected_gain`. Thresholds in `rule` are reported in the
-column's own units, not the standardised space the model works in.
+A shallow, deployable targeting rule found by greedily maximising the doubly-robust
+value net of that cost. Returns one row per leaf: `leaf, rule, n, mean_effect,
+std_error, cost, action, expected_gain`. Thresholds in `rule` are reported in the
+column's own units, not the standardised space the model works in, and `mean_effect`
+is the effect itself so it can be compared against `cost` directly.
+
+```sql
+SELECT rule, n, round(mean_effect,2) AS mean_effect, cost, action
+FROM do_optimal_policy('customers', treatment := 'got_discount', outcome := 'revenue',
+                       exclude := ['customer_id'], depth := 1, threshold := 8.0);
+-- tenure_months <= 20 | 20552 | 10.99 | 8.0 | treat
+-- tenure_months > 20  | 19448 |  4.93 | 8.0 | do not treat
+```
+
+**Leave `threshold` at zero and the answer is usually "treat everyone"** — and that is
+correct, because a free intervention with a positive effect should go to everybody. The
+question only becomes interesting once treating costs something. On the DGP above the
+true break-even is at twenty months' tenure, which the tree recovers from the data.
 
 ---
 

@@ -22,7 +22,10 @@ FROM do_ate('customers',
 > That path is opt-in at build time (`-DDUCKDO_WITH_ONNX=ON`) so the default build keeps zero
 > dependencies and needs no downloads.
 
-Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
+New here? **[docs/TUTORIAL.md](docs/TUTORIAL.md)** walks one real question end to end in about
+five minutes — a targeted discount campaign where the naive answer is $18.67 and the true one is
+$8.00. **[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** is what every estimate rests on, written for
+analysts. Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
 
 ## What works today
 
@@ -459,7 +462,7 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-328 assertions in the dependency-free build, 353 with the foundation-model path enabled, across
+341 assertions in the dependency-free build, 373 with the foundation-model path enabled, across
 estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
 time-varying treatment, survival, the `do()` surface and end-to-end inference for both models.
 
