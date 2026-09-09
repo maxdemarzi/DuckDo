@@ -121,6 +121,50 @@ The binary estimators (`do_ate` and friends) refuse a continuous treatment and p
 
 ---
 
+## Panel data
+
+Both functions take `unit`, `period`, `treatment` and `outcome` as named parameters. The treatment
+is a per-row boolean; each unit's adoption period is derived as the first period where it is true,
+and a unit that is never true is a never-treated control.
+
+The parameter is `period`, not `time`: `TIME` is a type name, so `time := ...` is a parser error.
+
+### `do_did`
+
+```sql
+SELECT * FROM do_did('rollout', unit := 'store_id', period := 'month',
+                     treatment := 'has_feature', outcome := 'revenue');
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, n_units, n_periods, n_cohorts,
+n_never_treated, pre_trend, warnings`.
+
+Group-time average treatment effects in the Callaway–Sant'Anna sense, aggregated by cohort size.
+**Two-way fixed effects is deliberately not implemented**: under staggered adoption it uses
+already-treated units as controls for later adopters and can put negative weights on some cells.
+The comparison group here is never-treated units where any exist, and not-yet-treated units
+otherwise; `warnings` says which was used. Standard errors come from a unit-level cluster bootstrap
+(`bootstrap_reps`, minimum 50).
+
+`pre_trend` is the cohort-weighted average effect over pre-treatment periods. Under parallel trends
+it should be near zero, and a value large relative to the standard error raises a warning.
+
+### `do_event_study`
+
+```sql
+SELECT * FROM do_event_study('rollout', unit := 'store_id', period := 'month',
+                             treatment := 'has_feature', outcome := 'revenue');
+```
+
+Returns `relative_period, att, std_error, ci_low, ci_high, n_treated, is_pre_treatment` — one row
+per period relative to adoption, pooled across cohorts.
+
+Relative period −1 is the reference and is **omitted** rather than reported as a zero nobody
+estimated. Rows with `is_pre_treatment` are the parallel-trends evidence; if they are not flat, the
+post-treatment numbers do not mean what they appear to.
+
+---
+
 ## Diagnostics
 
 ### `do_balance`

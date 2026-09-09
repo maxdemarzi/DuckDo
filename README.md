@@ -154,6 +154,36 @@ extrapolates past where data exists, and `n_within_decile` says how much support
 
 The binary estimators still refuse a dose outright, and point here.
 
+### Panel data - difference-in-differences that does not misweight
+
+```sql
+SELECT estimand, estimator, estimate, ci_low, ci_high, n_cohorts, pre_trend
+FROM do_did('rollout', unit := 'store_id', period := 'month',
+            treatment := 'has_feature', outcome := 'revenue');
+-- ATT | callaway-santanna | 4.878 | 4.671 | 5.084 | 2 | 0.126
+
+-- The pre-treatment periods are the parallel-trends check. Look at them.
+SELECT relative_period, att, ci_low, ci_high, is_pre_treatment
+FROM do_event_study('rollout', unit := 'store_id', period := 'month',
+                    treatment := 'has_feature', outcome := 'revenue');
+```
+
+**DuckDo does not ship two-way fixed effects.** Under staggered adoption TWFE lets already-treated
+units serve as controls for later adopters, and the coefficient becomes a weighted average that can
+carry negative weights. `do_did` computes group-time effects in the Callaway–Sant'Anna sense
+instead — never-treated units as the comparison where any exist, not-yet-treated otherwise —
+aggregated by cohort size. Standard errors come from a **unit-level** cluster bootstrap, because
+units are the independent draws, not unit-periods.
+
+`do_event_study` is the part that earns its keep: pre-treatment periods are a direct read on whether
+parallel trends is plausible, which is the panel version of *assumptions are queryable objects*.
+`do_did` also reports the average pre-trend and warns when it is large relative to its standard
+error.
+
+On a staggered panel with a true ATT of exactly 5.0, comparing treated to untreated rows gives
+**6.560**; `do_did` gives **4.878** with an interval covering the truth, and the event study shows
+pre-periods at −0.02 and 0.20 against post-periods of 4.93 to 5.03.
+
 ### Interventions - querying a world that did not happen
 
 ```sql

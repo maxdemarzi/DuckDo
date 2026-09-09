@@ -233,7 +233,7 @@ src/
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
-| 10 | Frontier | post-1.0 | — | **STARTED** — continuous treatments landed (`do_ape`, `do_dose_response`); panel/DiD, longitudinal, survival, mediation and discovery outstanding |
+| 10 | Frontier | post-1.0 | — | **IN PROGRESS** — continuous treatments (`do_ape`, `do_dose_response`) and panel/DiD (`do_did`, `do_event_study`) landed; longitudinal, survival, mediation and discovery outstanding |
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
 
@@ -597,7 +597,7 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 Roughly in order of value per unit of effort:
 
 1. ~~**Continuous treatments** — dose-response curves.~~ **DONE**: `do_ape` recovers a known average partial effect of 2.0 to 2.0019 where a naive slope gives 2.75, and `do_dose_response` traces the curve on a quantile grid. Multi-valued *categorical* treatments are still open.
-2. **Panel data and difference-in-differences** — two-way fixed effects, event studies, synthetic control. Enormous practical demand, and a natural fit for a columnar engine.
+2. ~~**Panel data and difference-in-differences**~~ **DONE** for the core: `do_did` computes group-time effects in the Callaway–Sant'Anna sense and `do_event_study` exposes the pre-trend check. Two-way fixed effects was deliberately *not* implemented — it misweights under staggered adoption. Synthetic control and covariate-conditional (doubly-robust) DiD are still open.
 3. **Longitudinal / time-varying treatment** — g-methods, marginal structural models; the Causal Longitudinal PFN line of work as a model backend.
 4. **Survival outcomes** — time-to-event treatment effects.
 5. **Mediation analysis** — natural direct and indirect effects, building on the Phase 4 graph machinery.

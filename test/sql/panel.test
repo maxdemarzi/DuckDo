@@ -1,0 +1,136 @@
+# name: test/sql/panel.test
+# description: difference-in-differences under staggered adoption
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.5);
+
+# Staggered adoption: one cohort treated from period 4, another from period 7,
+# a third never treated. Unit and period fixed effects, constant true effect of
+# exactly 5.0. This is precisely the shape where two-way fixed effects
+# misweights, which is why DuckDo does not use it.
+statement ok
+CREATE TABLE panel AS
+WITH units AS (
+  SELECT u, (u % 7) * 1.0 AS unit_fe,
+         CASE WHEN u % 3 = 0 THEN 4 WHEN u % 3 = 1 THEN 7 ELSE NULL END AS cohort
+  FROM range(300) t(u)),
+grid AS (SELECT u, unit_fe, cohort, p FROM units, range(1,11) g(p))
+SELECT u AS unit, p AS period,
+       (cohort IS NOT NULL AND p >= cohort) AS treated,
+       unit_fe + 0.5*p + 5.0*((cohort IS NOT NULL AND p >= cohort)::INT)
+         + sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS y
+FROM grid;
+
+# The confounding is real: comparing treated to untreated rows overstates the
+# effect, because treated rows sit in later periods with a higher period effect.
+query I
+SELECT avg(CASE WHEN treated THEN y END) - avg(CASE WHEN NOT treated THEN y END) > 6.0 FROM panel;
+----
+true
+
+# --- do_did -------------------------------------------------------------------
+
+query I
+SELECT abs(estimate - 5.0) < 0.3
+FROM do_did('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+query I
+SELECT ci_low < 5.0 AND 5.0 < ci_high
+FROM do_did('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+# The panel's shape is reported, because a DiD you cannot see the structure of
+# is not one you should trust.
+query IIIII
+SELECT estimand, estimator, n_units, n_periods, n_cohorts
+FROM do_did('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+ATT	callaway-santanna	300	10	2
+
+query I
+SELECT n_never_treated = 100
+FROM do_did('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+# Parallel trends holds here by construction, so the reported pre-trend is small.
+query I
+SELECT abs(pre_trend) < 0.3
+FROM do_did('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+# The estimator names itself, so nobody mistakes it for a TWFE regression.
+query I
+SELECT list_contains(warnings, 'group-time ATT aggregated by cohort size (Callaway-Sant''Anna); two-way fixed effects is not used because it misweights under staggered adoption')
+FROM do_did('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+# --- do_event_study -----------------------------------------------------------
+
+# Pre-treatment periods are the parallel-trends check, and must sit near zero.
+query I
+SELECT bool_and(abs(att) < 0.5)
+FROM do_event_study('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y')
+WHERE is_pre_treatment;
+----
+true
+
+# Post-treatment periods recover the true constant effect.
+query I
+SELECT bool_and(abs(att - 5.0) < 0.5)
+FROM do_event_study('panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y')
+WHERE NOT is_pre_treatment AND relative_period <= 3;
+----
+true
+
+# Period -1 is the reference and is omitted rather than reported as a zero the
+# model did not estimate.
+query I
+SELECT count(*) FROM do_event_study('panel', unit := 'unit', period := 'period',
+       treatment := 'treated', outcome := 'y') WHERE relative_period = -1;
+----
+0
+
+query I
+SELECT count(*) > 5 FROM do_event_study('panel', unit := 'unit', period := 'period',
+       treatment := 'treated', outcome := 'y');
+----
+true
+
+# --- error paths --------------------------------------------------------------
+
+statement error
+SELECT * FROM do_did('panel', unit := 'unit', treatment := 'treated', outcome := 'y');
+----
+requires period
+
+statement error
+SELECT * FROM do_did('panel', period := 'period', treatment := 'treated', outcome := 'y');
+----
+requires unit
+
+# A panel where nobody is ever treated has no effect to estimate.
+statement ok
+CREATE TABLE untreated AS SELECT unit, period, false AS treated, y FROM panel;
+
+statement error
+SELECT * FROM do_did('untreated', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+is ever treated
+
+# One period is not a difference in differences.
+statement ok
+CREATE TABLE single AS SELECT unit, 1 AS period, treated, y FROM panel WHERE period = 1;
+
+statement error
+SELECT * FROM do_did('single', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+at least two periods

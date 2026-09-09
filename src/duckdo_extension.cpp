@@ -54,6 +54,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	duckdo::RegisterEstimationFunctions(loader);
 	duckdo::RegisterInterventionFunctions(loader);
 	duckdo::RegisterContinuousFunctions(loader);
+	duckdo::RegisterPanelFunctions(loader);
 	duckdo::RegisterDiagnosticFunctions(loader);
 	duckdo::RegisterGraphFunctions(loader);
 	duckdo::RegisterModelFunctions(loader);
