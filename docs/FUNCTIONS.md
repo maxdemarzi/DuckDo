@@ -270,6 +270,47 @@ Grades each covariate: `covariate, role, verdict, reason`.
 
 Scalar, returns BOOLEAN. `z` is an optional VARCHAR[] conditioning set.
 
+### `do_iv`
+
+Two-stage least squares. Extra parameter: `instrument` (VARCHAR, required).
+
+```sql
+SELECT * FROM do_iv('trial', treatment := 'took_drug', outcome := 'health',
+                    instrument := 'assigned_to_drug', covariates := ['age']);
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, p_value, n, first_stage_f,
+instrument, weak_instrument, warnings`.
+
+`first_stage_f` is the instrument's robust F in the first stage; `weak_instrument` is true below the
+conventional threshold of 10, and a warning says so. The exclusion restriction — that the instrument
+touches the outcome only through the treatment — is an assumption no data can check, and the output
+says that too. With a binary treatment this identifies the local average treatment effect among
+compliers, not the population ATE; the estimand column reads `LATE` accordingly.
+
+Standard errors use the **structural** residual, computed from the actual treatment rather than the
+fitted one. Using the fitted treatment there is the classic 2SLS standard-error mistake.
+
+### `do_frontdoor`
+
+The front-door product formula, for a **binary** mediator. Extra parameter: `mediator` (VARCHAR,
+required).
+
+```sql
+SELECT * FROM do_frontdoor('sales', treatment := 'discount', outcome := 'revenue',
+                           mediator := 'clicks');
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, n, effect_t_on_m,
+effect_m_on_y, mediator, warnings`.
+
+The estimate is the product of the treatment's effect on the mediator and the mediator's effect on
+the outcome, and both halves are reported because that is where a front-door estimate goes wrong.
+Intervals come from a bootstrap of the whole product rather than a delta-method approximation.
+
+Covariates are not used: this is the unconditional formula. The mediator must vary within both
+treatment arms, and a mediator that does not gets an explicit error rather than a silent NaN.
+
 ---
 
 ## Interventions

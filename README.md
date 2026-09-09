@@ -82,7 +82,33 @@ SELECT covariate, role, verdict FROM do_validate(
 SELECT do_dseparated('sales_dag', 'season', 'loyalty', ['revenue']);  -- false: collider opened
 ```
 
-Also `do_graphs()`, `do_graph_drop()`.
+Also `do_graphs()`, `do_graph_drop()`. Graphs live in a `duckdo_graphs` table, so they survive a
+restart and can be inspected, backed up or version-controlled like any other data.
+
+### When the backdoor is closed, take another door
+
+`do_identify` will tell you the backdoor is blocked by an unobserved confounder but that a front-door
+mediator or an instrument is available. Both are estimable:
+
+```sql
+-- Two-stage least squares, with the weak-instrument check in the output rather
+-- than left to the reader.
+SELECT estimate, ci_low, ci_high, first_stage_f, weak_instrument
+FROM do_iv('trial', treatment := 'took_drug', outcome := 'health',
+           instrument := 'assigned_to_drug', covariates := ['age']);
+-- 2.044 | 2.012 | 2.075 | 5875.2 | false
+
+-- The front-door product formula, with both halves reported separately because
+-- that is where it goes wrong.
+SELECT estimate, effect_t_on_m, effect_m_on_y
+FROM do_frontdoor('sales', treatment := 'discount', outcome := 'revenue', mediator := 'clicks');
+-- 1.997 | 0.501 | 3.984
+```
+
+On a DGP with an unobserved confounder and a true effect of 2.0, ordinary regression gives 2.582 and
+`do_iv` gives **2.044**; where the treatment acts only through a mediator, the naive difference gives
+4.903 and `do_frontdoor` gives **1.997**. Point a useless variable at `instrument :=` and the
+first-stage F comes back at 0.08 with `weak_instrument = true`.
 
 ### Causal foundation models
 

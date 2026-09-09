@@ -1,0 +1,142 @@
+# name: test/sql/identification.test
+# description: estimators for the strategies do_identify recommends - IV and front-door
+# group: [duckdo]
+
+require duckdo
+
+# --- instrumental variables ----------------------------------------------------
+
+statement ok
+SELECT setseed(0.33);
+
+# An unobserved confounder drives both the treatment and the outcome, so no
+# amount of adjustment on observed covariates can help. The instrument z shifts
+# the treatment and nothing else. True effect of d on y is exactly 2.0.
+statement ok
+CREATE TABLE ivdata AS
+WITH u AS (
+  SELECT i,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS conf,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+    (random() < 0.5)::INT AS z,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1
+  FROM range(20000) t(i))
+SELECT i AS id, z, x1,
+       1.5*z + 1.0*conf + e1 AS d,
+       2.0*(1.5*z + 1.0*conf + e1) + 1.5*conf + e2 AS y
+FROM u;
+
+# The confounding is real: an ordinary regression is well above the truth.
+query I
+SELECT regr_slope(y, d) > 2.4 FROM ivdata;
+----
+true
+
+# 2SLS recovers it. The tolerance allows for 2SLS's known finite-sample bias
+# toward OLS, which pulls the estimate slightly above 2.0 here.
+query I
+SELECT abs(estimate - 2.0) < 0.15
+FROM do_iv('ivdata', treatment := 'd', outcome := 'y', instrument := 'z', covariates := ['x1']);
+----
+true
+
+query III
+SELECT estimand, estimator, instrument
+FROM do_iv('ivdata', treatment := 'd', outcome := 'y', instrument := 'z', covariates := ['x1']);
+----
+LATE	2sls	z
+
+# A strong instrument is not flagged.
+query II
+SELECT first_stage_f > 100, weak_instrument
+FROM do_iv('ivdata', treatment := 'd', outcome := 'y', instrument := 'z', covariates := ['x1']);
+----
+true	false
+
+# A variable unrelated to the treatment is a useless instrument, and saying so
+# is the whole job of the first-stage F.
+query I
+SELECT weak_instrument
+FROM do_iv('ivdata', treatment := 'd', outcome := 'y', instrument := 'x1', covariates := []);
+----
+true
+
+query I
+SELECT list_contains(warnings, 'the exclusion restriction - that the instrument affects the outcome only through the treatment - is an assumption no data can check')
+FROM do_iv('ivdata', treatment := 'd', outcome := 'y', instrument := 'z', covariates := ['x1']);
+----
+true
+
+statement error
+SELECT * FROM do_iv('ivdata', treatment := 'd', outcome := 'y');
+----
+requires instrument
+
+statement error
+SELECT * FROM do_iv('ivdata', treatment := 'd', outcome := 'y', instrument := 'not_a_column');
+----
+does not exist in ivdata
+
+# --- front door ----------------------------------------------------------------
+
+statement ok
+SELECT setseed(0.77);
+
+# The treatment affects the outcome ONLY through the mediator, while an
+# unobserved confounder drives the treatment and the outcome directly. The
+# backdoor is hopeless; the front door is not.
+# True ATE = (0.8 - 0.3) * 4.0 = 2.0
+statement ok
+CREATE TABLE fd AS
+WITH u AS (
+  SELECT i,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS conf,
+    random() AS r1, random() AS r2,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e
+  FROM range(30000) t(i)),
+t AS (SELECT *, (conf + e*0.5 > 0)::INT AS tr FROM u)
+SELECT i AS id, tr AS t,
+       (CASE WHEN tr = 1 THEN (r1 < 0.8) ELSE (r1 < 0.3) END)::INT AS m,
+       4.0*((CASE WHEN tr = 1 THEN (r1 < 0.8) ELSE (r1 < 0.3) END)::INT) + 2.0*conf
+         + sqrt(-2*ln(r2+1e-12))*cos(2*pi()*random()) AS y
+FROM t;
+
+query I
+SELECT avg(CASE WHEN t=1 THEN y END) - avg(CASE WHEN t=0 THEN y END) > 4.0 FROM fd;
+----
+true
+
+query I
+SELECT abs(estimate - 2.0) < 0.15
+FROM do_frontdoor('fd', treatment := 't', outcome := 'y', mediator := 'm', covariates := []);
+----
+true
+
+query I
+SELECT ci_low < 2.0 AND 2.0 < ci_high
+FROM do_frontdoor('fd', treatment := 't', outcome := 'y', mediator := 'm', covariates := []);
+----
+true
+
+# The two halves of the product formula are reported separately, because that is
+# where a front-door estimate goes wrong and it should be inspectable.
+query I
+SELECT abs(effect_t_on_m - 0.5) < 0.05 AND abs(effect_m_on_y - 4.0) < 0.2
+FROM do_frontdoor('fd', treatment := 't', outcome := 'y', mediator := 'm', covariates := []);
+----
+true
+
+statement error
+SELECT * FROM do_frontdoor('fd', treatment := 't', outcome := 'y');
+----
+requires mediator
+
+# A mediator that does not vary within both arms cannot support the formula.
+statement ok
+CREATE TABLE degenerate AS SELECT id, t, t AS m, y FROM fd;
+
+statement error
+SELECT * FROM do_frontdoor('degenerate', treatment := 't', outcome := 'y', mediator := 'm', covariates := []);
+----
+not estimable here

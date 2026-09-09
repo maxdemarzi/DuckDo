@@ -38,6 +38,9 @@ struct CausalSpec {
 	string id_column;
 	//! Optional boolean column naming a targeting rule, for do_policy_value.
 	string policy_column;
+	//! Optional numeric column carried through unencoded: the instrument for
+	//! do_iv, the mediator for do_frontdoor.
+	string aux_column;
 	//! Treat a row when its estimated effect exceeds this, for do_policy_value.
 	double threshold = 0.0;
 	//! Maximum depth of the tree do_optimal_policy searches.
@@ -104,6 +107,9 @@ struct CausalFrame {
 	//! Values of the `policy :=` boolean column, when one was given.
 	vector<uint8_t> policy;
 	bool has_policy = false;
+	//! Values of the auxiliary numeric column (instrument or mediator).
+	vector<double> aux;
+	bool has_aux = false;
 	vector<FeatureInfo> features;
 	//! Source covariate columns that survived encoding.
 	vector<string> covariate_columns;

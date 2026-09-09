@@ -240,6 +240,7 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.id_column = OptionalString(named, "id", "");
 	spec.policy_column = OptionalString(named, "policy", "");
 	spec.grid = OptionalIdx(named, "grid", 20);
+	spec.aux_column = OptionalString(named, "instrument", OptionalString(named, "mediator", ""));
 	spec.ensemble = OptionalIdx(named, "ensemble", GetSettingIdx(context, "duckdo_ensemble_draws", 1));
 	spec.threshold = OptionalDouble(named, "threshold", 0.0);
 	spec.depth = OptionalIdx(named, "depth", 2);
@@ -359,6 +360,20 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.has_policy = true;
 	}
 
+	idx_t aux_idx = DConstants::INVALID_INDEX;
+	if (!spec.aux_column.empty()) {
+		aux_idx = FindColumn(names, spec.aux_column);
+		if (aux_idx == DConstants::INVALID_INDEX) {
+			MissingColumn("instrument or mediator", spec.aux_column, spec.relation, names);
+		}
+		if (!types[aux_idx].IsNumeric() && types[aux_idx].id() != LogicalTypeId::BOOLEAN) {
+			throw BinderException("duckdo: '%s' must be numeric or boolean to serve as an instrument or mediator; "
+			                      "it has type %s",
+			                      spec.aux_column, types[aux_idx].ToString());
+		}
+		frame.has_aux = true;
+	}
+
 	// 2. Resolve the covariate set.
 	vector<string> covariates;
 	if (!spec.covariates.empty()) {
@@ -376,7 +391,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 	} else {
 		for (idx_t i = 0; i < names.size(); i++) {
-			if (i == t_idx || i == y_idx || i == id_idx || i == policy_idx) {
+			if (i == t_idx || i == y_idx || i == id_idx || i == policy_idx || i == aux_idx) {
 				continue;
 			}
 			bool excluded = false;
@@ -534,8 +549,13 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	if (frame.has_policy) {
 		projection += ", coalesce(CAST(" + QuoteIdentifier(names[policy_idx]) + " AS BOOLEAN), false) AS __duckdo_policy";
 	}
-	const idx_t cov_base = 2 + (frame.has_id ? 1 : 0) + (frame.has_policy ? 1 : 0);
+	if (frame.has_aux) {
+		projection += ", CAST(CASE WHEN " + QuoteIdentifier(names[aux_idx]) + " IS NULL THEN NULL ELSE " +
+		              QuoteIdentifier(names[aux_idx]) + " END AS DOUBLE) AS __duckdo_aux";
+	}
+	const idx_t cov_base = 2 + (frame.has_id ? 1 : 0) + (frame.has_policy ? 1 : 0) + (frame.has_aux ? 1 : 0);
 	const idx_t policy_col = frame.has_id ? 3 : 2;
+	const idx_t aux_col = 2 + (frame.has_id ? 1 : 0) + (frame.has_policy ? 1 : 0);
 	for (idx_t i = 0; i < plans.size(); i++) {
 		projection += ", ";
 		projection += plans[i].categorical ? plans[i].sql : ("CAST(" + plans[i].sql + " AS DOUBLE)");
@@ -583,6 +603,9 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	if (frame.has_policy) {
 		frame.policy.reserve(frame.n);
 	}
+	if (frame.has_aux) {
+		frame.aux.reserve(frame.n);
+	}
 
 	ColumnDataScanState scan_state;
 	auto &collection = data->Collection();
@@ -616,6 +639,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 				auto &pol_vec = chunk.data[policy_col];
 				const bool valid = FlatVector::Validity(pol_vec).RowIsValid(i);
 				frame.policy.push_back((valid && FlatVector::GetData<bool>(pol_vec)[i]) ? 1 : 0);
+			}
+			if (frame.has_aux) {
+				auto &aux_vec = chunk.data[aux_col];
+				const bool valid = FlatVector::Validity(aux_vec).RowIsValid(i);
+				frame.aux.push_back(valid ? FlatVector::GetData<double>(aux_vec)[i] : 0.0);
 			}
 			for (idx_t c = 0; c < ncols; c++) {
 				auto &vec = chunk.data[c + cov_base];

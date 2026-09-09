@@ -679,9 +679,9 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    `[3.007, 3.121]` contains it. What remains is the model's *own* parameter uncertainty, which the
    ensemble does not touch — CausalPFN's package ships a calibration routine DuckDo has not
    reimplemented.
-2. **Export CausalFM.** Two of the three models from section 1 now run; CausalFM adds front-door
-   and instrumental-variable settings, which `do_identify` can already recommend but nothing can
-   yet estimate.
+2. **Export CausalFM.** Two of the three models from section 1 now run. CausalFM would add
+   *model-based* front-door and IV estimation; the classical versions already exist as `do_iv` and
+   `do_frontdoor`, so this is no longer a coherence gap, just an additional engine.
 3. **Statically link ONNX Runtime** so the community build can ship the model path at all.
 4. **Consider retiring or demoting Do-PFN.** CausalPFN is better on every axis measured here —
    licence, covariate budget, dynamic context, and no shrinkage. Do-PFN remains interesting only

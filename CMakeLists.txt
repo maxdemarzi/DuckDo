@@ -24,7 +24,8 @@ set(EXTENSION_SOURCES
     src/interventions.cpp
     src/runtime.cpp
     src/continuous.cpp
-    src/panel.cpp)
+    src/panel.cpp
+    src/identification.cpp)
 
 # Causal foundation models are an opt-in build: point DUCKDO_ONNXRUNTIME_ROOT at
 # an unpacked onnxruntime release to enable them. Without it the extension still
