@@ -1,0 +1,100 @@
+# name: test/sql/diagnostics.test
+# description: assumptions are queryable, with boolean verdicts
+# group: [duckdo]
+
+require duckdo
+
+# Deterministic confounded DGP. True ATE is exactly 3.0; x1 drives both the
+# treatment and the outcome, so an unadjusted comparison must be biased.
+statement ok
+SELECT setseed(0.42);
+
+statement ok
+CREATE TABLE customers AS
+WITH u AS (
+  SELECT i,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x3,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise,
+         random() AS draw
+  FROM range(6000) t(i)
+), p AS (SELECT *, 1.0/(1.0+exp(-(0.9*x1 - 0.6*x2))) AS ps FROM u)
+SELECT i AS customer_id, x1, x2, x3,
+       CASE WHEN x3 > 0 THEN 'north' ELSE 'south' END AS region,
+       (draw < ps)::INTEGER AS discount,
+       2.0 + 1.5*x1 + 0.7*x2 - x3 + 3.0*((draw < ps)::INTEGER) + noise AS revenue
+FROM p;
+
+# Weighting removes the imbalance that confounds the naive estimate.
+query I
+SELECT max(abs(smd_raw)) > 0.4 FROM do_balance('customers', treatment := 'discount',
+                                               exclude := ['customer_id', 'revenue']);
+----
+true
+
+query I
+SELECT max(abs(smd_weighted)) < 0.1 FROM do_balance('customers', treatment := 'discount',
+                                                    exclude := ['customer_id', 'revenue']);
+----
+true
+
+query I
+SELECT bool_and(balanced) FROM do_balance('customers', treatment := 'discount',
+                                          exclude := ['customer_id', 'revenue']);
+----
+true
+
+# Overlap buckets partition every row.
+query I
+SELECT sum(n_treated) + sum(n_control) = (SELECT count(*) FROM customers)
+FROM do_overlap('customers', treatment := 'discount', exclude := ['customer_id', 'revenue']);
+----
+true
+
+# The diagnose battery runs every check, and this well-behaved DGP fails none.
+query I
+SELECT count(*) >= 7 FROM do_diagnose('customers', treatment := 'discount', outcome := 'revenue',
+                                      exclude := ['customer_id']);
+----
+true
+
+query I
+SELECT count(*) FROM do_diagnose('customers', treatment := 'discount', outcome := 'revenue',
+                                 exclude := ['customer_id']) WHERE status = 'fail';
+----
+0
+
+# Permuting the treatment must collapse the effect to zero.
+query I
+SELECT abs(refuted_estimate) < 0.2 AND passed
+FROM do_refute('customers', treatment := 'discount', outcome := 'revenue',
+               exclude := ['customer_id'], method := 'placebo_treatment');
+----
+true
+
+# An irrelevant covariate must not move the estimate.
+query I
+SELECT passed FROM do_refute('customers', treatment := 'discount', outcome := 'revenue',
+                             exclude := ['customer_id'], method := 'random_common_cause');
+----
+true
+
+query I
+SELECT passed FROM do_refute('customers', treatment := 'discount', outcome := 'revenue',
+                             exclude := ['customer_id'], method := 'subset', fraction := 0.7);
+----
+true
+
+statement error
+SELECT * FROM do_refute('customers', treatment := 'discount', outcome := 'revenue',
+                        exclude := ['customer_id'], method := 'wishful_thinking');
+----
+unknown refutation method
+
+# A strong, well-identified effect needs a strong confounder to explain away.
+query I
+SELECT robustness_value > 0.2 AND e_value > 1.5
+FROM do_sensitivity('customers', treatment := 'discount', outcome := 'revenue', exclude := ['customer_id']);
+----
+true

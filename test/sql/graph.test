@@ -1,0 +1,116 @@
+# name: test/sql/graph.test
+# description: d-separation, identification and covariate grading
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+CALL do_graph_create('sales_dag', 'digraph {
+  intent [latent];
+  season -> discount; season -> revenue;
+  discount -> clicks; clicks -> revenue;
+  intent -> discount; intent -> revenue;
+  coupon_mail -> discount;
+  loyalty -> revenue;
+  revenue -> refund;
+}');
+
+query II
+SELECT n_nodes, n_edges FROM do_graphs() WHERE name = 'sales_dag';
+----
+8	9
+
+# A cycle is not a causal graph.
+statement error
+CALL do_graph_create('bad', 'digraph { a -> b; b -> a; }');
+----
+contains a cycle
+
+# An unobserved common cause blocks backdoor identification, and gets named.
+query II
+SELECT identifiable, note LIKE '%intent%' FROM do_identify(graph := 'sales_dag',
+       treatment := 'discount', outcome := 'revenue') WHERE strategy = 'backdoor';
+----
+false	true
+
+# The mediator satisfies the front-door criterion.
+query II
+SELECT identifiable, adjustment_set FROM do_identify(graph := 'sales_dag',
+       treatment := 'discount', outcome := 'revenue') WHERE strategy = 'frontdoor';
+----
+true	[clicks]
+
+query II
+SELECT identifiable, adjustment_set FROM do_identify(graph := 'sales_dag',
+       treatment := 'discount', outcome := 'revenue') WHERE strategy = 'iv';
+----
+true	[coupon_mail]
+
+# With no latent confounder the backdoor set is found, and is minimal.
+statement ok
+CALL do_graph_create('clean_dag', 'digraph { season -> discount; season -> revenue; discount -> revenue; }');
+
+query II
+SELECT identifiable, adjustment_set FROM do_identify(graph := 'clean_dag',
+       treatment := 'discount', outcome := 'revenue') WHERE strategy = 'backdoor';
+----
+true	[season]
+
+# Covariate grading: the function that prevents the most wrong answers.
+query II
+SELECT role, verdict FROM do_validate(graph := 'sales_dag', treatment := 'discount',
+       outcome := 'revenue', covariates := ['season']);
+----
+confounder	keep
+
+query II
+SELECT role, verdict FROM do_validate(graph := 'sales_dag', treatment := 'discount',
+       outcome := 'revenue', covariates := ['clicks']);
+----
+mediator	DROP
+
+query II
+SELECT role, verdict FROM do_validate(graph := 'sales_dag', treatment := 'discount',
+       outcome := 'revenue', covariates := ['coupon_mail']);
+----
+instrument	DROP
+
+query II
+SELECT role, verdict FROM do_validate(graph := 'sales_dag', treatment := 'discount',
+       outcome := 'revenue', covariates := ['refund']);
+----
+outcome descendant	DROP
+
+query II
+SELECT role, verdict FROM do_validate(graph := 'sales_dag', treatment := 'discount',
+       outcome := 'revenue', covariates := ['loyalty']);
+----
+precision variable	keep
+
+# d-separation. Conditioning on the treatment opens the collider path from the
+# instrument to the outcome through the unobserved confounder.
+query I
+SELECT do_dseparated('sales_dag', 'coupon_mail', 'revenue', ['discount']);
+----
+false
+
+query I
+SELECT do_dseparated('sales_dag', 'season', 'loyalty', []);
+----
+true
+
+# Conditioning on their common effect makes two independent causes dependent.
+query I
+SELECT do_dseparated('sales_dag', 'season', 'loyalty', ['revenue']);
+----
+false
+
+statement error
+SELECT * FROM do_identify(graph := 'no_such_graph', treatment := 'a', outcome := 'b');
+----
+no graph named
+
+statement error
+SELECT do_dseparated('sales_dag', 'not_a_node', 'revenue', []);
+----
+is not a node in the graph

@@ -1,26 +1,139 @@
 # DuckDo
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+**Causal inference inside DuckDB.** `SELECT` tells you what happened. `do_ate()` tells you what your
+last change was worth.
 
----
+DuckDo makes DuckDB an in-process causal engine: treatment effects, assumption diagnostics and
+graph-based identification expressed as ordinary SQL over ordinary tables. No Python, no training
+loop, no data leaving the process.
 
-This extension, DuckDo, brings causal inference to DuckDB: estimate treatment effects and answer interventional
-(`do()`) queries over your tables using causal foundation models, directly in SQL.
+```sql
+SELECT estimand, estimator, round(estimate, 2) AS estimate, round(ci_low, 2), round(ci_high, 2)
+FROM do_ate('customers',
+     treatment  := 'received_discount',
+     outcome    := 'revenue',
+     covariates := ['age', 'income', 'tenure']);
+-- ATE | aipw | 12.84 | 8.59 | 17.09
+```
 
-> **Status: pre-alpha.** The build below is still the unmodified extension template. See
-> [docs/ROADMAP.md](docs/ROADMAP.md) for the phased implementation plan, the target SQL surface,
-> and the current open questions.
+> **Status: 0.4 (Phases 0-4 of the [roadmap](docs/ROADMAP.md)).** Classical estimators, diagnostics
+> and graph identification all work and are tested. **Causal foundation models (CausalPFN, Do-PFN,
+> CausalFM) are not wired up yet** - that is Phases 5-6. Passing `model := 'causalpfn'` today returns
+> an error saying so.
 
+## What works today
+
+Everything below runs with no downloads, no ONNX and no network.
+
+### Estimation
+
+| Function | Returns |
+|---|---|
+| `do_ate` / `do_att` / `do_atc` | one row: `estimand, estimator, estimate, std_error, ci_low, ci_high, p_value, n, n_treated, n_trimmed, variance_method, warnings` |
+| `do_cate` | one row per input row: `row_id, id, treatment, outcome, cate, cate_low, cate_high, learner` |
+
+Estimators via `estimator :=` - `aipw` (doubly robust, the default), `dml` (cross-fitted partially
+linear), `ipw` (Hajek), `regression` (g-computation), `naive`, and the `s_learner` / `t_learner` /
+`x_learner` / `dr_learner` meta-learners. Propensity and outcome models are cross-fitted 5-fold with
+a seeded, stratified split, so results are reproducible run to run.
+
+### Diagnostics - assumptions as rows
+
+Every diagnostic returns a boolean verdict column, so it drops straight into a dbt test or a CI query.
+
+```sql
+SELECT * FROM do_balance('customers', treatment := 'discount');       -- SMD raw vs weighted
+SELECT * FROM do_overlap('customers', treatment := 'discount');       -- propensity support
+SELECT * FROM do_diagnose('customers', treatment := ..., outcome := ...);
+SELECT * FROM do_refute(..., method := 'placebo_treatment');          -- also random_common_cause,
+                                                                      -- subset, bootstrap,
+                                                                      -- unobserved_confounder
+SELECT * FROM do_sensitivity(...);   -- E-value and Cinelli-Hazlett robustness value
+```
+
+### Graphs - what should I even adjust for?
+
+```sql
+CALL do_graph_create('sales_dag', 'digraph {
+  intent [latent];
+  season -> discount;  season -> revenue;
+  discount -> clicks;  clicks -> revenue;
+  intent -> discount;  intent -> revenue;
+  coupon_mail -> discount;
+}');
+
+SELECT strategy, identifiable, adjustment_set FROM do_identify(
+       graph := 'sales_dag', treatment := 'discount', outcome := 'revenue');
+-- backdoor  | false | []              -- 'intent' is an unobserved common cause
+-- frontdoor | true  | [clicks]
+-- iv        | true  | [coupon_mail]
+
+SELECT covariate, role, verdict FROM do_validate(
+       graph := 'sales_dag', treatment := 'discount', outcome := 'revenue',
+       covariates := ['season', 'clicks', 'coupon_mail']);
+-- season      | confounder | keep
+-- clicks      | mediator   | DROP    -- adjusting removes part of the effect
+-- coupon_mail | instrument | DROP    -- reaches the outcome only through the treatment
+
+SELECT do_dseparated('sales_dag', 'season', 'loyalty', ['revenue']);  -- false: collider opened
+```
+
+Also `do_graphs()`, `do_graph_drop()`.
+
+Every function is registered twice: the short `do_*` name and the unambiguous `duckdo_*` full name.
+
+## Does it actually work?
+
+On a confounded synthetic DGP with a true ATE of exactly 3.0 (20,000 rows, `x1` driving both
+treatment assignment and the outcome):
+
+| estimator | estimate | std_error | 95% interval |
+|---|---|---|---|
+| `naive` | 3.718 | 0.030 | [3.659, 3.777] |
+| `aipw` | **2.996** | 0.016 | [2.964, 3.028] |
+| `dml` | **3.002** | 0.016 | [2.971, 3.033] |
+| `ipw` | **2.999** | 0.037 | [2.926, 3.072] |
+| `regression` | **3.002** | 0.016 | [2.971, 3.034] |
+
+The naive contrast is biased by +0.72, which is precisely the confounding the adjusted estimators
+remove. With a heterogeneous effect of `3 + 2*x1`, `do_cate` correlates 0.9995 with the truth and
+`do_att` (3.72) > ATE (3.00) > `do_atc` (2.29), as it must when the treated have higher `x1`.
+
+Reproduce with `test/sql/estimators.test`.
+
+## Settings
+
+`duckdo_default_estimator`, `duckdo_max_rows` (100k), `duckdo_max_features` (500),
+`duckdo_max_categorical_levels` (32), `duckdo_seed` (42), `duckdo_bootstrap_reps` (200).
+
+## Known limitations
+
+Stated plainly, because a causal tool that hides its limits is worse than none.
+
+- **Binary treatments only.** Continuous and multi-valued treatments are refused with an explicit
+  error rather than silently binarised. Planned for Phase 10.
+- **`do_cate` intervals are slightly narrow.** Measured 95% coverage is about 0.90 on synthetic data,
+  because the pseudo-outcome regression does not propagate uncertainty from the nuisance models.
+- **Base learners are regularised GLMs.** Strongly non-linear confounding will not be fully removed.
+  Gradient-boosted base learners are a Phase 2 follow-up.
+- **Graphs live in process memory**, not the DuckDB catalog, so they do not survive a restart.
+- **Data is read on a separate connection**, so uncommitted changes in your current transaction are
+  not visible to an estimation call.
+- **No foundation models yet.** See Phases 5-6 of the [roadmap](docs/ROADMAP.md).
+
+## Testing
+
+```sh
+./build/release/test/unittest "test/*"
+```
+
+67 assertions across estimator recovery, diagnostics, error paths and graph identification.
 
 ## Building
 ### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
+DuckDo currently has **no external dependencies** - the numerics are hand-rolled in `src/linalg.cpp`,
+so `vcpkg.json` lists nothing and you can skip vcpkg entirely. That changes in Phase 5, when ONNX
+Runtime arrives for the foundation-model path.
 
 ### Build steps
 Now to build the extension, run:
@@ -38,17 +151,31 @@ The main binaries that will be built are:
 - `duckdo.duckdb_extension` is the loadable binary as it would be distributed.
 
 ## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `duckdo()` that takes a string argument and returns a string:
+Start the shell with `./build/release/duckdb`, then:
+
+```sql
+-- A tiny randomised experiment: treatment is assigned by coin flip, so the
+-- naive difference is already unbiased and every estimator should agree.
+CREATE TABLE trial AS
+SELECT i AS user_id,
+       (i % 2) AS nudged,
+       (i % 7) * 1.0 AS tenure,
+       10.0 + 0.5 * (i % 7) + 2.0 * (i % 2) + ((i * 37) % 11) * 0.1 AS minutes
+FROM range(2000) t(i);
+
+SELECT estimand, estimator, round(estimate, 3) AS estimate,
+       round(ci_low, 3) AS ci_low, round(ci_high, 3) AS ci_high, n
+FROM do_ate('trial', treatment := 'nudged', outcome := 'minutes',
+            covariates := ['tenure']);
 ```
-D select duckdo('Jane') as result;
-┌─────────────────┐
-│     result      │
-│     varchar     │
-├─────────────────┤
-│ ...........🦆 Jane │
-└─────────────────┘
+
+Then check the assumptions behind that number:
+
+```sql
+SELECT check_name, status, severity, detail
+FROM do_diagnose('trial', treatment := 'nudged', outcome := 'minutes',
+                 covariates := ['tenure']);
 ```
 
 ## Running the tests

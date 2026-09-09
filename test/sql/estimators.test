@@ -1,0 +1,113 @@
+# name: test/sql/estimators.test
+# description: estimators recover a known ATE and expose the confounding bias
+# group: [duckdo]
+
+require duckdo
+
+# Deterministic confounded DGP. True ATE is exactly 3.0; x1 drives both the
+# treatment and the outcome, so an unadjusted comparison must be biased.
+statement ok
+SELECT setseed(0.42);
+
+statement ok
+CREATE TABLE customers AS
+WITH u AS (
+  SELECT i,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x3,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise,
+         random() AS draw
+  FROM range(6000) t(i)
+), p AS (SELECT *, 1.0/(1.0+exp(-(0.9*x1 - 0.6*x2))) AS ps FROM u)
+SELECT i AS customer_id, x1, x2, x3,
+       CASE WHEN x3 > 0 THEN 'north' ELSE 'south' END AS region,
+       (draw < ps)::INTEGER AS discount,
+       2.0 + 1.5*x1 + 0.7*x2 - x3 + 3.0*((draw < ps)::INTEGER) + noise AS revenue
+FROM p;
+
+# The naive contrast is confounded upward and must NOT land on the truth.
+query I
+SELECT estimate > 3.3 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                  exclude := ['customer_id'], estimator := 'naive');
+----
+true
+
+# Every adjusted estimator recovers 3.0.
+query I
+SELECT abs(estimate - 3.0) < 0.15 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                              exclude := ['customer_id'], estimator := 'aipw');
+----
+true
+
+query I
+SELECT abs(estimate - 3.0) < 0.15 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                              exclude := ['customer_id'], estimator := 'dml');
+----
+true
+
+query I
+SELECT abs(estimate - 3.0) < 0.25 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                              exclude := ['customer_id'], estimator := 'ipw');
+----
+true
+
+query I
+SELECT abs(estimate - 3.0) < 0.15 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                              exclude := ['customer_id'], estimator := 'regression');
+----
+true
+
+# The interval covers the truth.
+query I
+SELECT ci_low < 3.0 AND 3.0 < ci_high FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                                  exclude := ['customer_id']);
+----
+true
+
+# Every result names its estimand, estimator and variance method.
+query III
+SELECT estimand, estimator, variance_method FROM do_ate('customers', treatment := 'discount',
+       outcome := 'revenue', exclude := ['customer_id']);
+----
+ATE	aipw	influence function
+
+query I
+SELECT estimand FROM do_att('customers', treatment := 'discount', outcome := 'revenue', exclude := ['customer_id']);
+----
+ATT
+
+query I
+SELECT estimand FROM do_atc('customers', treatment := 'discount', outcome := 'revenue', exclude := ['customer_id']);
+----
+ATC
+
+# Results are deterministic for a fixed seed.
+query I
+SELECT a.estimate = b.estimate
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', exclude := ['customer_id']) a,
+     do_ate('customers', treatment := 'discount', outcome := 'revenue', exclude := ['customer_id']) b;
+----
+true
+
+# do_cate returns one row per source row and can be joined back through id :=.
+query I
+SELECT count(*) = (SELECT count(*) FROM customers)
+FROM do_cate('customers', treatment := 'discount', outcome := 'revenue',
+             exclude := ['customer_id'], id := 'customer_id');
+----
+true
+
+# With a homogeneous effect the per-row estimates concentrate near 3.0.
+query I
+SELECT abs(avg(cate) - 3.0) < 0.15
+FROM do_cate('customers', treatment := 'discount', outcome := 'revenue', exclude := ['customer_id']);
+----
+true
+
+# A subquery works anywhere a table name does.
+query I
+SELECT n < 6000 FROM do_ate('(SELECT * FROM customers WHERE x2 > -1)', treatment := 'discount',
+                            outcome := 'revenue', exclude := ['customer_id']);
+----
+true

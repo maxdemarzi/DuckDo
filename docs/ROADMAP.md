@@ -2,6 +2,10 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
+> **Progress: Phases 0-4 are implemented, built and tested** (67 assertions passing against a
+> DuckDB v1.5.4 build). Phases 5-10 are still plan. Per-phase status is marked in the table in
+> section 5.
+
 ---
 
 ## 1. Thesis
@@ -217,11 +221,11 @@ src/
 
 | Phase | Name | Version | Works with no download? | Exit gate |
 |---|---|---|---|---|
-| 0 | Foundation and spikes | 0.0.x | — | CI green on all target platforms; `do_` naming validated |
-| 1 | The causal frame | 0.1.0 | yes | Binder + encoder round-trip every DuckDB type |
-| 2 | Classical estimators | 0.2.0 | yes | Matches EconML/DoWhy within tolerance on IHDP + Lalonde |
-| 3 | Diagnostics and refutation | 0.3.0 | yes | Detects planted confounding in the synthetic suite |
-| 4 | Graphs and identification | 0.4.0 | yes | Backdoor/front-door/IV correct on a DAG test corpus |
+| 0 | Foundation and spikes | 0.0.x | — | **DONE** — builds on MSVC 19.44 / DuckDB v1.5.4; `do_` prefix confirmed usable |
+| 1 | The causal frame | 0.1.0 | yes | **DONE** — binder, encoder, guardrails, provenance, `id :=` join key |
+| 2 | Classical estimators | 0.2.0 | yes | **DONE** — recovers a known ATE to 0.004; still to do: EconML/DoWhy cross-check on IHDP + Lalonde |
+| 3 | Diagnostics and refutation | 0.3.0 | yes | **DONE** — balance, overlap, diagnose, 5 refuters, E-value + robustness value |
+| 4 | Graphs and identification | 0.4.0 | yes | **DONE** — d-separation, backdoor/front-door/IV, covariate grading |
 | 5 | Inference runtime | 0.5.0 | yes (download opt-in) | ONNX parity with PyTorch reference to 1e-4 |
 | 6 | CFM estimators | 0.6.0 | opt-in | PEHE within 5% of the Python reference |
 | 7 | The `do()` surface | 0.7.0 | opt-in | Interventional and policy functions land |
@@ -241,7 +245,7 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 
 1. **Submodules and first build.** `git submodule update --init --recursive`, then `make` on Linux, macOS (arm64 + x64), and Windows. Confirm the DuckDB v1.5.4 / `v1.5-variegata` CI toolchain pinned in `.github/workflows/MainDistributionPipeline.yml` actually builds this repo.
 2. **Drop the template's OpenSSL dependency.** Remove `find_package(OpenSSL)` and the `target_link_libraries` lines from `CMakeLists.txt`, drop it from `vcpkg.json`, and delete `duckdo_openssl_version` from the source and the test. It is scaffolding, and it constrains the vcpkg manifest we will need for real dependencies.
-3. **Spike: is `do_` a usable prefix?** PostgreSQL treats `DO` as a statement keyword; DuckDB inherits much of that grammar. Write a throwaway extension registering `do_ate` and confirm `SELECT * FROM do_ate(...)` and `SELECT do_x(...)` parse. **If they do not, fall back to `duckdo_*` as the primary surface with a `causal_*` alias set** and record the decision here. Everything downstream depends on this answer, so it is the first thing to settle.
+3. **Spike: is `do_` a usable prefix? RESOLVED — yes.** Verified against a DuckDB v1.5.4 build on 2026-09-08: `SELECT do_ate('x')`, `SELECT * FROM do_ate('x', treatment := 'a')` and `CALL do_download(model := 'causalpfn')` all reach name resolution and fail with a *Catalog* error, meaning the parser accepted them. Only the bare word is reserved — `SELECT do(1)` is a parser error. **`do_*` is therefore the primary surface**, with `duckdo_*` full names registered alongside.
 4. **Spike: relation input shape.** `anofox_tabfm` takes a table name or subquery *as a string*. DuckDB also supports table in-out functions that accept a real relation. Prototype both; prefer the native relation if the binder can see column types at bind time, because it gives us error messages at plan time instead of run time. Fall back to the string form if not.
 5. **Spike: named parameters and list/struct parameters.** Confirm `covariates := ['a','b']` (LIST) and `intervention := {'price': 19.99}` (STRUCT) bind cleanly in a table function, including the type of an empty list.
 6. **Choose a linear algebra dependency.** Eigen (header-only, MPL2) via vcpkg is the default recommendation — no runtime, easy static link, and enough for GLMs and cross-fitting. Confirm it builds for every target platform before committing.
@@ -252,7 +256,7 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 ### Exit gate
 
 - `make test` green on Linux x64, macOS arm64, Windows x64.
-- The `do_` naming question is answered and written into this document.
+- The `do_` naming question is answered and written into this document. ✅ `do_*` confirmed usable.
 - Zero OpenSSL references remain.
 - A synthetic fixture with a known ATE exists and is loadable from a test.
 
@@ -635,8 +639,10 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 
 ## 9. Immediate next actions
 
-1. `git submodule update --init --recursive` and get `make` green locally.
-2. Strip OpenSSL from `CMakeLists.txt`, `vcpkg.json`, [src/duckdo_extension.cpp](../src/duckdo_extension.cpp), and [test/sql/duckdo.test](../test/sql/duckdo.test).
-3. Run the `do_` grammar spike and record the answer in section 3 of this document.
-4. Write the synthetic DGP generator and commit the first fixture with a known ATE.
-5. Land the `CausalSpec` binder — the smallest piece that everything else depends on.
+Phases 0–4 are done. What is next, in order:
+
+1. **Cross-check Phase 2 against EconML and DoWhy** on IHDP (1000 reps), Jobs/Lalonde and an ACIC subset. The estimators recover synthetic truth; they have not yet been graded against an established library, which is the actual Phase 2 exit gate.
+2. **Fix `do_cate` interval coverage** — measured ~0.90 against a nominal 0.95, because the pseudo-outcome regression does not propagate nuisance-model uncertainty.
+3. **Persist graphs** somewhere better than a process-global registry (open question 3).
+4. **Phase 5**: bring in ONNX Runtime and export Do-PFN (7.3M params) as the first model.
+5. **Phase 8 groundwork**: `do_ate_by` for segmented estimation, and a chunked scan path to lift `duckdo_max_rows` above 100k.

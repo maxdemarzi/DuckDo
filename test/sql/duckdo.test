@@ -1,23 +1,54 @@
 # name: test/sql/duckdo.test
-# description: test duckdo extension
-# group: [sql]
+# description: extension loads and reports actionable errors
+# group: [duckdo]
 
-# Before we load the extension, this will fail
 statement error
-SELECT duckdo('Sam');
+SELECT * FROM do_ate('customers', treatment := 'discount', outcome := 'revenue');
 ----
-Catalog Error: Scalar Function with name duckdo does not exist!
+Catalog Error
 
-# Require statement will ensure this test is run with this extension loaded
 require duckdo
 
-# Confirm the extension works
+statement ok
+CREATE TABLE tiny AS SELECT i AS id, (i % 2) AS t, i * 1.0 AS y, (i % 7) * 1.0 AS x FROM range(400) r(i);
+
+# Both the short and the full name are registered.
 query I
-SELECT duckdo('Sam');
+SELECT count(*) FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x']);
 ----
-...........🦆 Sam
+1
 
 query I
-SELECT duckdo_openssl_version('Michael') ILIKE 'Duckdo Michael, my linked OpenSSL version is OpenSSL%';
+SELECT count(*) FROM duckdo_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x']);
 ----
-true
+1
+
+# A misspelled column names the available columns rather than failing opaquely.
+statement error
+SELECT * FROM do_ate('tiny', treatment := 'treatmnt', outcome := 'y');
+----
+Available columns
+
+# A missing outcome is caught at bind time.
+statement error
+SELECT * FROM do_ate('tiny', treatment := 't');
+----
+requires outcome
+
+# An unknown estimator lists the supported ones.
+statement error
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'magic');
+----
+unknown estimator
+
+# Foundation models are not here yet, and the error says exactly that.
+statement error
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', model := 'causalpfn');
+----
+0.6 release
+
+# A non-binary treatment is refused rather than silently binarised.
+statement error
+SELECT * FROM do_ate('tiny', treatment := 'x', outcome := 'y', covariates := ['t']);
+----
+binary treatments only
