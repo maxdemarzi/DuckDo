@@ -1,0 +1,254 @@
+# DuckDo function reference
+
+Every function is registered twice: the short `do_*` name shown here, and an
+identical `duckdo_*` full name for scripts where `do_` might be ambiguous.
+
+All estimation functions take the relation as their first positional argument —
+either a plain table name (`'customers'`, `'main.customers'`) or a query in
+parentheses (`'(SELECT * FROM customers WHERE year = 2026)'`).
+
+---
+
+## Shared named parameters
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `treatment` | VARCHAR | required | Binary treatment column |
+| `outcome` | VARCHAR | required¹ | Numeric or boolean outcome column |
+| `covariates` | VARCHAR[] | all others | Adjustment set. Omit to use every column except the treatment, outcome, `id`, `policy` and `exclude` |
+| `exclude` | VARCHAR[] | `[]` | Columns to drop when `covariates` is not given |
+| `estimator` | VARCHAR | `aipw` | See the estimator table below |
+| `id` | VARCHAR | — | Column carried through to per-row output so results can be joined back |
+| `treated` / `control` | VARCHAR | — | Explicit level mapping when the treatment is not already 0/1. Must be given together |
+| `seed` | BIGINT | 42 | Seeds fold assignment, bootstrap and every other draw |
+| `folds` | BIGINT | 5 | Cross-fitting folds |
+| `bootstrap_reps` | BIGINT | 200 | Replicates for estimators without a closed-form influence function |
+| `trim` | DOUBLE | 0.01 | Drop rows whose propensity falls outside `[trim, 1-trim]` |
+
+¹ `do_balance` and `do_overlap` do not need an outcome.
+
+### Estimators
+
+| Name | Method | Variance |
+|---|---|---|
+| `aipw` | Augmented IPW, doubly robust. **Default.** | influence function |
+| `dml` | Cross-fitted partially linear double ML | influence function |
+| `ipw` | Hajek (self-normalised) inverse propensity weighting | influence function |
+| `regression` | g-computation over per-arm outcome models | bootstrap |
+| `naive` | Raw difference in means. A baseline, not a causal estimate | two-sample |
+| `s_learner` | One model over `[X, T, T·X]` | — |
+| `t_learner` | Separate model per arm | — |
+| `x_learner` | Two-stage imputed-effect learner | — |
+| `dr_learner` | Doubly-robust pseudo-outcome regression | influence function |
+
+---
+
+## Estimation
+
+### `do_ate` / `do_att` / `do_atc`
+
+One row. `do_att` targets the treated, `do_atc` the untreated.
+
+```sql
+SELECT * FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                     covariates := ['age', 'income']);
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, p_value, n,
+n_treated, n_trimmed, variance_method, warnings`.
+
+### `do_cate`
+
+One row per input row, with a pointwise 95% interval.
+
+```sql
+SELECT id, cate, cate_low, cate_high
+FROM do_cate('customers', treatment := 'discount', outcome := 'revenue',
+             id := 'customer_id');
+```
+
+Returns `row_id, id, treatment, outcome, cate, cate_low, cate_high, learner`.
+Intervals are produced only by the default `dr_learner`; the S/T/X learners
+report point estimates with `cate_low = cate_high` and say so in a warning.
+
+### `do_ate_by`
+
+One independent estimate per group. Extra parameter: `by` (VARCHAR[], required).
+
+```sql
+SELECT * FROM do_ate_by('customers', treatment := 'discount', outcome := 'revenue',
+                        by := ['region', 'plan']);
+```
+
+The grouping columns come back first, as VARCHAR, followed by the `do_ate`
+columns. A group too small to estimate yields a row with NULL estimates and the
+reason in `warnings`, rather than failing the whole query. Capped by
+`duckdo_max_groups`.
+
+---
+
+## Diagnostics
+
+### `do_balance`
+
+Per encoded feature: `covariate, feature, smd_raw, smd_weighted, variance_ratio,
+balanced`. `balanced` is `|smd_weighted| < 0.1`.
+
+### `do_overlap`
+
+Ten propensity buckets: `bucket, ps_low, ps_high, n_treated, n_control,
+off_support`. `off_support` marks a bucket containing only one arm — there is no
+counterfactual evidence there.
+
+### `do_diagnose`
+
+The whole battery: `check_name, status, detail, severity`. Checks are
+`sample_size`, `treatment_prevalence`, `positivity`, `balance`,
+`outcome_variation`, `missing_data`, `dimensionality`, plus one `encoding` row
+per warning. `status` is `pass` / `warn` / `fail`.
+
+### `do_refute`
+
+Extra parameters: `method` (VARCHAR, default `placebo_treatment`), `fraction`
+(DOUBLE, default 0.8, for `subset`), `strength` (DOUBLE, default 0.5, for
+`unobserved_confounder`).
+
+| method | What it does | Expectation |
+|---|---|---|
+| `placebo_treatment` | Permutes the treatment | Effect collapses to zero |
+| `random_common_cause` | Adds an irrelevant covariate | Estimate does not move |
+| `subset` | Re-estimates on a random subset | Estimate is stable |
+| `bootstrap` | Re-estimates on a resample | Estimate is stable |
+| `unobserved_confounder` | Simulates a confounder of the given strength | Reports the resulting shift |
+
+Returns `method, original_estimate, refuted_estimate, difference, tolerance,
+passed, detail`.
+
+### `do_sensitivity`
+
+How strong hidden confounding would have to be to overturn the result.
+
+Returns `estimate, std_error, robustness_value, robustness_value_ci, e_value,
+e_value_ci, interpretation`. The robustness value is the Cinelli–Hazlett partial
+R² an unobserved confounder would need with *both* treatment and outcome; the
+E-value is the VanderWeele–Ding risk-ratio equivalent.
+
+---
+
+## Graphs
+
+### `do_graph_create(name, definition)` / `do_graph_drop(name)` / `do_graphs()`
+
+```sql
+CALL do_graph_create('sales_dag', 'digraph {
+  intent [latent];
+  season -> discount; season -> revenue;
+  discount -> clicks; clicks -> revenue;
+  intent -> discount; intent -> revenue;
+}');
+```
+
+A DOT subset: `a -> b` edges, chains (`a -> b -> c`), and a `[latent]` (or
+`[unobserved]`) attribute marking a node as unmeasured. Cycles are rejected.
+Graphs live in process memory and do not survive a restart.
+
+### `do_identify`
+
+Named parameters only: `graph`, `treatment`, `outcome`.
+
+Returns one row per strategy — `backdoor`, `frontdoor`, `iv` — with `strategy,
+identifiable, adjustment_set, note`. When the backdoor criterion fails, the note
+names the unobserved common cause responsible.
+
+### `do_validate`
+
+Named parameters: `graph`, `treatment`, `outcome`, `covariates` (required).
+
+Grades each covariate: `covariate, role, verdict, reason`.
+
+| role | verdict | why |
+|---|---|---|
+| `confounder` | keep | closes a backdoor path |
+| `precision variable` | keep | predicts the outcome only; tightens the interval |
+| `mediator` | DROP | on a directed path; adjusting removes part of the effect |
+| `post-treatment` | DROP | caused by the treatment |
+| `outcome descendant` | DROP | caused by the outcome |
+| `instrument` | DROP | reaches the outcome only through the treatment |
+| `collider` | DROP | conditioning opens a path that was blocked |
+| `latent` | DROP | declared unobserved |
+
+### `do_dseparated(graph, x, y [, z])`
+
+Scalar, returns BOOLEAN. `z` is an optional VARCHAR[] conditioning set.
+
+---
+
+## Interventions
+
+### `do_counterfactual`
+
+Per row: `row_id, id, treatment, observed, y0, y1, effect, effect_low,
+effect_high`.
+
+### `do_predict`
+
+Extra parameter: `intervention` (STRUCT or MAP, required).
+
+```sql
+SELECT * FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                         intervention := {'price': 19.99});
+```
+
+Forces the named columns to the given values **for every row** — that is what
+makes it `do(X = x)` rather than a filter on `X = x` — then predicts the outcome.
+Intervening on the treatment column is allowed and gives `E[Y | do(T = t), X]`.
+
+Returns `row_id, id, intervention, observed, predicted, predicted_low,
+predicted_high`. Intervals are NULL for binary outcomes.
+
+### `do_policy_value`
+
+Extra parameters: `policy` (VARCHAR — names a boolean column in the relation) or
+`threshold` (DOUBLE, default 0.0 — treat when the estimated effect exceeds it).
+
+```sql
+SELECT * FROM do_policy_value('(SELECT *, tenure > 12 AS my_rule FROM customers)',
+       treatment := 'discount', outcome := 'revenue', policy := 'my_rule');
+```
+
+Returns `policy, n_targeted, share_targeted, policy_value, std_error, ci_low,
+ci_high, value_treat_all, value_treat_none, lift_over_treat_all`. The value is
+measured against treating nobody; a negative `lift_over_treat_all` means the rule
+is worse than treating everyone.
+
+### `do_uplift`
+
+Twenty rows tracing the Qini curve: `bucket, fraction_targeted, n_targeted,
+cumulative_gain, random_gain, qini`. Rows are ranked by estimated effect,
+best first.
+
+### `do_optimal_policy`
+
+Extra parameter: `depth` (BIGINT, default 2, capped at 3).
+
+A shallow, deployable targeting rule found by greedily maximising the
+doubly-robust value. Returns one row per leaf: `leaf, rule, n, mean_effect,
+std_error, action, expected_gain`. Thresholds in `rule` are reported in the
+column's own units, not the standardised space the model works in.
+
+---
+
+## Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `duckdo_default_estimator` | `aipw` | Used when `estimator :=` is omitted |
+| `duckdo_max_rows` | 100000 | Refuse frames larger than this |
+| `duckdo_max_features` | 500 | Refuse encodings wider than this |
+| `duckdo_max_categorical_levels` | 32 | Drop categoricals with more levels, with a warning |
+| `duckdo_max_groups` | 1000 | Cap on `do_ate_by` groups |
+| `duckdo_seed` | 42 | Global seed |
+| `duckdo_bootstrap_reps` | 200 | Bootstrap replicates |
+
+Every guardrail names the setting to raise when it trips, rather than silently
+truncating.

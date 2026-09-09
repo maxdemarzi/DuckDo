@@ -16,10 +16,13 @@ FROM do_ate('customers',
 -- ATE | aipw | 12.84 | 8.59 | 17.09
 ```
 
-> **Status: 0.4 (Phases 0-4 of the [roadmap](docs/ROADMAP.md)).** Classical estimators, diagnostics
-> and graph identification all work and are tested. **Causal foundation models (CausalPFN, Do-PFN,
-> CausalFM) are not wired up yet** - that is Phases 5-6. Passing `model := 'causalpfn'` today returns
-> an error saying so.
+> **Status: 0.8 (Phases 0-4, 7, 8 and 9 of the [roadmap](docs/ROADMAP.md)).** Estimators,
+> diagnostics, graph identification, the `do()` surface and segmented estimation all work, are
+> tested, and are cross-checked against EconML and DoWhy. **Causal foundation models (CausalPFN,
+> Do-PFN, CausalFM) are not wired up yet** - that is Phases 5-6. Passing `model := 'causalpfn'`
+> today returns an error saying so.
+
+Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
 
 ## What works today
 
@@ -31,6 +34,7 @@ Everything below runs with no downloads, no ONNX and no network.
 |---|---|
 | `do_ate` / `do_att` / `do_atc` | one row: `estimand, estimator, estimate, std_error, ci_low, ci_high, p_value, n, n_treated, n_trimmed, variance_method, warnings` |
 | `do_cate` | one row per input row: `row_id, id, treatment, outcome, cate, cate_low, cate_high, learner` |
+| `do_ate_by` | one independent estimate per segment; a group too thin to estimate returns NULLs and the reason, rather than failing the query |
 
 Estimators via `estimator :=` - `aipw` (doubly robust, the default), `dml` (cross-fitted partially
 linear), `ipw` (Hajek), `regression` (g-computation), `naive`, and the `s_learner` / `t_learner` /
@@ -80,6 +84,26 @@ SELECT do_dseparated('sales_dag', 'season', 'loyalty', ['revenue']);  -- false: 
 
 Also `do_graphs()`, `do_graph_drop()`.
 
+### Interventions - querying a world that did not happen
+
+```sql
+-- Force every row into a counterfactual state. This is do(X = x), not a filter
+-- on X = x: no rows are dropped, the world is changed.
+SELECT avg(predicted) FROM do_predict('customers',
+       treatment := 'discount', outcome := 'revenue',
+       intervention := {'price': 19.99});
+
+SELECT * FROM do_counterfactual(...);   -- per-row y0, y1, effect and interval
+SELECT * FROM do_uplift(...);           -- Qini curve rows, ready to plot
+SELECT * FROM do_optimal_policy(..., depth := 2);  -- a shallow, deployable rule
+
+-- Is my targeting rule worth anything? A negative lift means it is worse than
+-- treating everyone.
+SELECT policy, policy_value, lift_over_treat_all
+FROM do_policy_value('(SELECT *, tenure > 12 AS my_rule FROM customers)',
+     treatment := 'discount', outcome := 'revenue', policy := 'my_rule');
+```
+
 Every function is registered twice: the short `do_*` name and the unambiguous `duckdo_*` full name.
 
 ## Does it actually work?
@@ -99,12 +123,23 @@ The naive contrast is biased by +0.72, which is precisely the confounding the ad
 remove. With a heterogeneous effect of `3 + 2*x1`, `do_cate` correlates 0.9995 with the truth and
 `do_att` (3.72) > ATE (3.00) > `do_atc` (2.29), as it must when the treated have higher `x1`.
 
-Reproduce with `test/sql/estimators.test`.
+**Recovering synthetic truth is not enough**, so the estimators are also graded against established
+implementations on identical rows, including the standard IHDP replication:
+
+| scenario | truth | duckdo `aipw` | econml `LinearDRLearner` | dowhy PSW |
+|---|---|---|---|---|
+| linear confounded | 3.0000 | 3.0193 | 3.0180 | 3.0337 |
+| heterogeneous | 2.9936 | 2.9847 | 2.9716 | 2.9662 |
+| IHDP npci-1 | 4.0161 | 3.8766 | 3.9555 | 4.0287 |
+
+Reproduce with `test/sql/estimators.test` and `python scripts/crosscheck_econml.py`
+(the latter needs `econml` and `dowhy`; it is a dev tool, not shipped).
 
 ## Settings
 
 `duckdo_default_estimator`, `duckdo_max_rows` (100k), `duckdo_max_features` (500),
-`duckdo_max_categorical_levels` (32), `duckdo_seed` (42), `duckdo_bootstrap_reps` (200).
+`duckdo_max_categorical_levels` (32), `duckdo_max_groups` (1000), `duckdo_seed` (42),
+`duckdo_bootstrap_reps` (200). Every guardrail names the setting to raise when it trips.
 
 ## Known limitations
 
@@ -127,7 +162,15 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 ./build/release/test/unittest "test/*"
 ```
 
-67 assertions across estimator recovery, diagnostics, error paths and graph identification.
+92 assertions across estimator recovery, diagnostics, error paths, graph identification and the
+`do()` surface.
+
+## Submitting to community extensions
+
+[description.yml](description.yml) is ready to copy into a fork of
+`duckdb/community-extensions`; update `version` and `ref` to the release commit first. Its
+`hello_world` deliberately needs no download - a first impression that requires a 300 MB fetch is a
+first impression most people never have.
 
 ## Building
 ### Managing dependencies

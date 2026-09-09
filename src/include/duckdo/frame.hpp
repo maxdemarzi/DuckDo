@@ -36,6 +36,12 @@ struct CausalSpec {
 	string refute_method;
 	//! Optional column carried through to per-row output so results can be joined.
 	string id_column;
+	//! Optional boolean column naming a targeting rule, for do_policy_value.
+	string policy_column;
+	//! Treat a row when its estimated effect exceeds this, for do_policy_value.
+	double threshold = 0.0;
+	//! Maximum depth of the tree do_optimal_policy searches.
+	idx_t depth = 2;
 	//! Explicit two-level mapping when the treatment is not already 0/1.
 	string treated_label;
 	string control_label;
@@ -81,6 +87,9 @@ struct CausalFrame {
 	//! Values of the `id :=` column, rendered as text, when one was given.
 	vector<string> ids;
 	bool has_id = false;
+	//! Values of the `policy :=` boolean column, when one was given.
+	vector<uint8_t> policy;
+	bool has_policy = false;
 	vector<FeatureInfo> features;
 	//! Source covariate columns that survived encoding.
 	vector<string> covariate_columns;
@@ -114,6 +123,10 @@ unique_ptr<MaterializedQueryResult> RunQuery(ClientContext &context, const strin
 //! identifier (optionally qualified) is passed through quoted; anything else
 //! must be a SELECT/WITH query and is wrapped in parentheses.
 string RelationSql(const string &relation);
+//! Quote a SQL identifier, doubling any embedded quote.
+string QuoteIdentifier(const string &identifier);
+//! Quote a SQL string literal, doubling any embedded apostrophe.
+string QuoteLiteral(const string &text);
 
 idx_t GetSettingIdx(ClientContext &context, const char *name, idx_t fallback);
 double GetSettingDouble(ClientContext &context, const char *name, double fallback);

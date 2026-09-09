@@ -1,0 +1,189 @@
+# name: test/sql/interventions.test
+# description: the do() surface - counterfactuals, interventions, policy value
+# group: [duckdo]
+
+require duckdo
+
+# Effect is 3 + 2*x1, so it is genuinely negative below x1 = -1.5. A targeting
+# rule therefore has something real to find.
+statement ok
+SELECT setseed(0.42);
+
+statement ok
+CREATE TABLE customers AS
+WITH u AS (
+  SELECT i,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise,
+         random() AS draw
+  FROM range(6000) t(i)
+), p AS (SELECT *, 1.0/(1.0+exp(-(0.9*x1 - 0.6*x2))) AS ps FROM u)
+SELECT i AS customer_id, x1, x2,
+       CASE WHEN x2 > 0 THEN 'north' ELSE 'south' END AS region,
+       (draw < ps)::INTEGER AS discount,
+       2.0 + 1.5*x1 + 0.7*x2 + (3.0 + 2.0*x1)*((draw < ps)::INTEGER) + noise AS revenue
+FROM p;
+
+# --- do_counterfactual -----------------------------------------------------
+
+query I
+SELECT count(*) = (SELECT count(*) FROM customers)
+FROM do_counterfactual('customers', treatment := 'discount', outcome := 'revenue',
+                       exclude := ['customer_id']);
+----
+true
+
+# y1 - y0 averaged over the sample is the ATE, which here is 3.0.
+query I
+SELECT abs(avg(y1 - y0) - 3.0) < 0.2
+FROM do_counterfactual('customers', treatment := 'discount', outcome := 'revenue',
+                       exclude := ['customer_id']);
+----
+true
+
+# The per-row effect tracks the true 3 + 2*x1.
+query I
+SELECT corr(c.effect, 3 + 2*t.x1) > 0.95
+FROM do_counterfactual('customers', treatment := 'discount', outcome := 'revenue',
+                       exclude := ['customer_id'], id := 'customer_id') c
+JOIN customers t ON t.customer_id = c.id::BIGINT;
+----
+true
+
+# --- do_predict ------------------------------------------------------------
+
+# Forcing everyone into one arm and then the other must differ by the ATE.
+query I
+SELECT abs(
+  (SELECT avg(predicted) FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                                         exclude := ['customer_id'], intervention := {'discount': 1}))
+  -
+  (SELECT avg(predicted) FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                                         exclude := ['customer_id'], intervention := {'discount': 0}))
+  - 3.0) < 0.2;
+----
+true
+
+# An intervention is not a filter: every row is returned, not just matching ones.
+query I
+SELECT count(*) = (SELECT count(*) FROM customers)
+FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                exclude := ['customer_id'], intervention := {'x1': 2.0});
+----
+true
+
+# Setting a covariate that raises the outcome must raise the prediction.
+query I
+SELECT (SELECT avg(predicted) FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                                              exclude := ['customer_id'], intervention := {'x1': 2.0}))
+     > (SELECT avg(predicted) FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                                              exclude := ['customer_id'], intervention := {'x1': -2.0}));
+----
+true
+
+statement error
+SELECT * FROM do_predict('customers', treatment := 'discount', outcome := 'revenue');
+----
+requires intervention
+
+statement error
+SELECT * FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                         intervention := {'not_a_column': 1});
+----
+Interveneable columns
+
+# --- do_policy_value -------------------------------------------------------
+
+# Treating only where the effect is positive must beat treating nobody.
+query I
+SELECT policy_value > 0 AND ci_low > 0
+FROM do_policy_value('customers', treatment := 'discount', outcome := 'revenue',
+                     exclude := ['customer_id'], threshold := 0.0);
+----
+true
+
+# Here the effect is positive for most rows, so a rule that drops half of them
+# gives up value relative to treating everyone. The sign of that lift is the
+# thing the function exists to report.
+query I
+SELECT lift_over_treat_all < 0
+FROM do_policy_value('(SELECT *, x1 > 0 AS my_rule FROM customers)', treatment := 'discount',
+                     outcome := 'revenue', exclude := ['customer_id'], policy := 'my_rule');
+----
+true
+
+query I
+SELECT policy FROM do_policy_value('(SELECT *, x1 > 0 AS my_rule FROM customers)',
+       treatment := 'discount', outcome := 'revenue', exclude := ['customer_id'], policy := 'my_rule');
+----
+column 'my_rule'
+
+# --- do_uplift -------------------------------------------------------------
+
+query I
+SELECT count(*) FROM do_uplift('customers', treatment := 'discount', outcome := 'revenue',
+                               exclude := ['customer_id']);
+----
+20
+
+# Targeting everybody is the same as the ATE, so qini closes back to zero.
+query I
+SELECT abs(qini) < 0.01 AND fraction_targeted = 1.0
+FROM do_uplift('customers', treatment := 'discount', outcome := 'revenue',
+               exclude := ['customer_id']) WHERE bucket = 20;
+----
+true
+
+# Ranking by estimated effect must beat random targeting somewhere in between.
+query I
+SELECT max(qini) > 0.1 FROM do_uplift('customers', treatment := 'discount', outcome := 'revenue',
+                                      exclude := ['customer_id']);
+----
+true
+
+# --- do_optimal_policy -----------------------------------------------------
+
+# The tree should carve out a region it declines to treat, because one exists.
+query I
+SELECT count(*) >= 1 FROM do_optimal_policy('customers', treatment := 'discount', outcome := 'revenue',
+                                            exclude := ['customer_id'], depth := 2)
+WHERE action = 'do not treat';
+----
+true
+
+# And that region must be the low-x1 one, where 3 + 2*x1 goes negative.
+query I
+SELECT bool_and(rule LIKE '%x1 <=%') FROM do_optimal_policy('customers', treatment := 'discount',
+       outcome := 'revenue', exclude := ['customer_id'], depth := 2)
+WHERE action = 'do not treat';
+----
+true
+
+# --- do_ate_by -------------------------------------------------------------
+
+query I
+SELECT count(*) FROM do_ate_by('customers', treatment := 'discount', outcome := 'revenue',
+                               exclude := ['customer_id'], by := ['region']);
+----
+2
+
+# The effect is the same in both regions, so both estimates recover 3.0.
+query I
+SELECT bool_and(abs(estimate - 3.0) < 0.25)
+FROM do_ate_by('customers', treatment := 'discount', outcome := 'revenue',
+               exclude := ['customer_id'], by := ['region']);
+----
+true
+
+query II
+SELECT region, estimand FROM do_ate_by('customers', treatment := 'discount', outcome := 'revenue',
+       exclude := ['customer_id'], by := ['region']) ORDER BY region;
+----
+north	ATE
+south	ATE
+
+statement error
+SELECT * FROM do_ate_by('customers', treatment := 'discount', outcome := 'revenue');
+----
+requires by

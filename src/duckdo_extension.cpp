@@ -24,6 +24,9 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	config.AddExtensionOption("duckdo_max_categorical_levels",
 	                          "Categorical covariates with more distinct levels than this are dropped with a warning",
 	                          LogicalType::BIGINT, Value::BIGINT(32));
+	config.AddExtensionOption("duckdo_max_groups",
+	                          "Maximum number of groups do_ate_by will estimate before refusing to run",
+	                          LogicalType::BIGINT, Value::BIGINT(1000));
 	config.AddExtensionOption("duckdo_seed", "Seed for fold assignment, bootstrap and every other random draw",
 	                          LogicalType::BIGINT, Value::BIGINT(42));
 	config.AddExtensionOption("duckdo_bootstrap_reps",
@@ -36,6 +39,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                      "interventional queries in SQL");
 	RegisterSettings(loader.GetDatabaseInstance());
 	duckdo::RegisterEstimationFunctions(loader);
+	duckdo::RegisterInterventionFunctions(loader);
 	duckdo::RegisterDiagnosticFunctions(loader);
 	duckdo::RegisterGraphFunctions(loader);
 }

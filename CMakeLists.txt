@@ -20,7 +20,8 @@ set(EXTENSION_SOURCES
     src/estimators.cpp
     src/functions.cpp
     src/diagnostics.cpp
-    src/graph.cpp)
+    src/graph.cpp
+    src/interventions.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

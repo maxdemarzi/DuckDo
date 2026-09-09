@@ -1,0 +1,161 @@
+# Descriptor for submission to duckdb/community-extensions.
+#
+# Copy this file to extensions/duckdo/description.yml in a fork of that repo and
+# open a PR. Update `version` and `ref` to the release commit first - `ref` must
+# be a full SHA, not a branch.
+#
+# excluded_platforms is deliberately empty: DuckDo has no external dependencies,
+# so there is no known reason any target should fail. The community CI builds
+# every platform; add exclusions only for the ones it actually reports failing,
+# rather than pre-emptively.
+
+extension:
+  name: duckdo
+  description: Causal inference inside DuckDB - average and conditional treatment effects, assumption diagnostics, refutation tests, DAG-based identification and interventional do() queries, all in SQL with no Python and no model downloads
+  version: '2026.09.08'
+  language: C++
+  build: cmake
+  license: MIT
+  maintainers:
+    - maxdemarzi
+
+repo:
+  github: maxdemarzi/DuckDo
+  ref: 0000000000000000000000000000000000000000
+
+docs:
+  hello_world: |
+    -- No downloads, no network, no Python. A tiny randomised experiment:
+    -- treatment is assigned by coin flip, so the true effect is exactly 2.0.
+    CREATE TABLE trial AS
+    SELECT i AS user_id,
+           (i % 2) AS nudged,
+           (i % 7) * 1.0 AS tenure,
+           10.0 + 0.5 * (i % 7) + 2.0 * (i % 2) + ((i * 37) % 11) * 0.1 AS minutes
+    FROM range(2000) t(i);
+
+    -- Every result names its estimand, its estimator and how the interval was made.
+    SELECT estimand, estimator, round(estimate, 3) AS estimate,
+           round(ci_low, 3) AS ci_low, round(ci_high, 3) AS ci_high, variance_method
+    FROM do_ate('trial', treatment := 'nudged', outcome := 'minutes',
+                covariates := ['tenure']);
+    -- ATE | aipw | 2.000 | 1.972 | 2.027 | influence function
+
+    -- Then check the assumptions behind that number. Every diagnostic returns
+    -- rows with a verdict, so it drops straight into a dbt test.
+    SELECT check_name, status, severity, detail
+    FROM do_diagnose('trial', treatment := 'nudged', outcome := 'minutes',
+                     covariates := ['tenure']);
+
+  extended_description: |
+    **DuckDo** answers the question SQL cannot: not *what happened*, but **what
+    would happen if I did X**. `SELECT` reports the past; `do_ate()` reports what
+    your last change was worth; `do_predict(intervention := ...)` reports what the
+    next one would be worth.
+
+    Everything runs in-process. There are no model weights to download, no Python
+    runtime, no network calls, and no telemetry - which matters, because causal
+    analysis tends to run on exactly the data you cannot send anywhere.
+
+    ### Estimation
+
+    ```sql
+    SELECT * FROM do_ate('customers',
+        treatment  := 'received_discount',
+        outcome    := 'revenue',
+        covariates := ['age', 'income', 'tenure'],
+        estimator  := 'aipw');
+    ```
+
+    Nine estimators behind `estimator :=` - `aipw` (doubly robust, the default),
+    `dml` (cross-fitted partially linear), `ipw` (Hajek), `regression`
+    (g-computation), `naive`, and the `s_learner` / `t_learner` / `x_learner` /
+    `dr_learner` meta-learners. Propensity and outcome models are cross-fitted
+    5-fold with a seeded, stratified split, so a query returns the same number
+    twice. `do_att` and `do_atc` target the treated and the untreated;
+    `do_cate` returns a per-row effect with a pointwise interval; `do_ate_by`
+    estimates one effect per segment.
+
+    Every result carries `estimand`, `estimator`, `variance_method`, `n`,
+    `n_treated`, `n_trimmed` and a `warnings` list. No result is a bare number.
+
+    ### Assumptions you can query
+
+    This is what separates causal inference from prediction, so it is not
+    relegated to the documentation:
+
+    ```sql
+    SELECT * FROM do_balance(...);       -- standardised differences, raw vs weighted
+    SELECT * FROM do_overlap(...);       -- propensity support, off-support buckets
+    SELECT * FROM do_diagnose(...);      -- the whole battery, with severities
+    SELECT * FROM do_refute(..., method := 'placebo_treatment');
+    SELECT * FROM do_sensitivity(...);   -- E-value and Cinelli-Hazlett robustness value
+    ```
+
+    Five refutation methods: `placebo_treatment`, `random_common_cause`, `subset`,
+    `bootstrap`, `unobserved_confounder`. Each returns the original estimate, the
+    refuted estimate and a boolean `passed`.
+
+    ### Graphs: what should I even adjust for?
+
+    ```sql
+    CALL do_graph_create('sales_dag', 'digraph {
+      intent [latent];
+      season -> discount; season -> revenue;
+      discount -> clicks; clicks -> revenue;
+      intent -> discount; intent -> revenue;
+      coupon_mail -> discount;
+    }');
+
+    SELECT strategy, identifiable, adjustment_set
+    FROM do_identify(graph := 'sales_dag', treatment := 'discount', outcome := 'revenue');
+    -- backdoor  | false | []             -- names 'intent' as the unobserved cause
+    -- frontdoor | true  | [clicks]
+    -- iv        | true  | [coupon_mail]
+
+    SELECT covariate, role, verdict
+    FROM do_validate(graph := 'sales_dag', treatment := 'discount', outcome := 'revenue',
+                     covariates := ['season', 'clicks', 'coupon_mail']);
+    -- season      | confounder | keep
+    -- clicks      | mediator   | DROP   -- adjusting removes part of the effect
+    -- coupon_mail | instrument | DROP   -- reaches the outcome only through the treatment
+    ```
+
+    `do_validate` will prevent more wrong answers than any estimator here.
+    `do_dseparated` exposes the underlying primitive directly.
+
+    ### Interventions and policies
+
+    ```sql
+    SELECT * FROM do_predict('customers', treatment := 'discount', outcome := 'revenue',
+                             intervention := {'price': 19.99});
+    SELECT * FROM do_counterfactual(...);    -- per-row y0, y1 and the effect
+    SELECT * FROM do_policy_value(..., policy := 'my_targeting_rule');
+    SELECT * FROM do_uplift(...);            -- Qini curve rows, ready to plot
+    SELECT * FROM do_optimal_policy(...);    -- a shallow, deployable rule
+    ```
+
+    ### Verified, not asserted
+
+    Against EconML and DoWhy on identical rows, including the standard IHDP
+    replication:
+
+    | scenario | truth | duckdo aipw | econml DRLearner | dowhy PSW |
+    |---|---|---|---|---|
+    | linear confounded | 3.0000 | 3.0193 | 3.0180 | 3.0337 |
+    | heterogeneous | 2.9936 | 2.9847 | 2.9716 | 2.9662 |
+    | IHDP npci-1 | 4.0161 | 3.8766 | 3.9555 | 4.0287 |
+
+    Reproduce with `scripts/crosscheck_econml.py`.
+
+    ### Limits, stated plainly
+
+    Binary treatments only - continuous ones are refused with an explicit error
+    rather than silently binarised. Base learners are regularised GLMs, so
+    strongly non-linear confounding will not be fully removed. `do_cate`
+    intervals run slightly narrow (~0.90 coverage against a nominal 0.95).
+    Graphs live in process memory and do not survive a restart.
+
+    Every function is registered twice: the short `do_*` name and the
+    unambiguous `duckdo_*` full name. Causal foundation models (CausalPFN,
+    Do-PFN, CausalFM) are the next milestone; see `docs/ROADMAP.md`.

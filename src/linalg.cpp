@@ -188,6 +188,76 @@ LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<i
 	return model;
 }
 
+RidgeFit FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda) {
+	RidgeFit out;
+	const idx_t p = X.cols + 1;
+	out.dim = p;
+	out.model = FitRidge(X, y, rows, {}, lambda);
+	out.cov.assign(p * p, 0.0);
+	if (rows.empty()) {
+		return out;
+	}
+
+	double rss = 0.0;
+	for (auto r : rows) {
+		const double resid = y[r] - out.model.Eta(X.Row(r), X.cols);
+		rss += resid * resid;
+	}
+	const double dof = static_cast<double>(rows.size() > p ? rows.size() - p : 1);
+	const double sigma2 = rss / dof;
+
+	vector<double> xtx(p * p, 0.0);
+	vector<double> row(p);
+	for (auto r : rows) {
+		row[0] = 1.0;
+		const double *src = X.Row(r);
+		for (idx_t j = 0; j < X.cols; j++) {
+			row[j + 1] = src[j];
+		}
+		for (idx_t a = 0; a < p; a++) {
+			for (idx_t b = 0; b < p; b++) {
+				xtx[a * p + b] += row[a] * row[b];
+			}
+		}
+	}
+	for (idx_t j = 1; j < p; j++) {
+		xtx[j * p + j] += lambda;
+	}
+	// Invert column by column; a failure leaves the covariance zeroed, which
+	// reports a zero-width interval rather than a wrong one.
+	for (idx_t c = 0; c < p; c++) {
+		vector<double> rhs(p, 0.0);
+		rhs[c] = 1.0;
+		vector<double> col;
+		vector<double> a = xtx;
+		if (!CholeskySolve(a, p, rhs, col)) {
+			out.cov.assign(p * p, 0.0);
+			break;
+		}
+		for (idx_t r = 0; r < p; r++) {
+			out.cov[r * p + c] = col[r] * sigma2;
+		}
+	}
+	return out;
+}
+
+double RidgeFit::PredictionStdError(const double *x, idx_t cols) const {
+	vector<double> row(dim);
+	row[0] = 1.0;
+	for (idx_t j = 0; j < cols; j++) {
+		row[j + 1] = x[j];
+	}
+	double acc = 0.0;
+	for (idx_t a = 0; a < dim; a++) {
+		double inner = 0.0;
+		for (idx_t b = 0; b < dim; b++) {
+			inner += cov[a * dim + b] * row[b];
+		}
+		acc += row[a] * inner;
+	}
+	return acc > 0.0 ? std::sqrt(acc) : 0.0;
+}
+
 double Mean(const vector<double> &v) {
 	if (v.empty()) {
 		return 0.0;

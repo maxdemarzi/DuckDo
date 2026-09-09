@@ -334,88 +334,6 @@ EffectResult Dml(const CausalFrame &frame, const NuisanceFit &fit) {
 
 // --- CATE learners ----------------------------------------------------------
 
-namespace {
-
-//! Ridge fit plus the covariance of its coefficients, so we can report a real
-//! pointwise interval instead of a constant band.
-struct RidgeWithCovariance {
-	LinearModel model;
-	//! (p+1) x (p+1) covariance of beta, row-major.
-	vector<double> cov;
-	idx_t dim = 0;
-};
-
-RidgeWithCovariance FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,
-                                           double lambda) {
-	RidgeWithCovariance out;
-	const idx_t p = X.cols + 1;
-	out.dim = p;
-	out.model = FitRidge(X, y, rows, {}, lambda);
-
-	// Residual variance.
-	double rss = 0.0;
-	for (auto r : rows) {
-		const double resid = y[r] - out.model.Eta(X.Row(r), X.cols);
-		rss += resid * resid;
-	}
-	const double dof = static_cast<double>(rows.size() > p ? rows.size() - p : 1);
-	const double sigma2 = rss / dof;
-
-	// Rebuild X'X and invert it column by column via Cholesky.
-	vector<double> xtx(p * p, 0.0);
-	vector<double> row(p);
-	for (auto r : rows) {
-		row[0] = 1.0;
-		const double *src = X.Row(r);
-		for (idx_t j = 0; j < X.cols; j++) {
-			row[j + 1] = src[j];
-		}
-		for (idx_t a = 0; a < p; a++) {
-			for (idx_t b = 0; b < p; b++) {
-				xtx[a * p + b] += row[a] * row[b];
-			}
-		}
-	}
-	for (idx_t j = 1; j < p; j++) {
-		xtx[j * p + j] += lambda;
-	}
-	out.cov.assign(p * p, 0.0);
-	for (idx_t c = 0; c < p; c++) {
-		vector<double> rhs(p, 0.0);
-		rhs[c] = 1.0;
-		vector<double> col;
-		vector<double> a = xtx;
-		if (!CholeskySolve(a, p, rhs, col)) {
-			out.cov.assign(p * p, 0.0);
-			break;
-		}
-		for (idx_t rIdx = 0; rIdx < p; rIdx++) {
-			out.cov[rIdx * p + c] = col[rIdx] * sigma2;
-		}
-	}
-	return out;
-}
-
-double PredictionStdError(const RidgeWithCovariance &fit, const double *x, idx_t cols) {
-	const idx_t p = fit.dim;
-	vector<double> row(p);
-	row[0] = 1.0;
-	for (idx_t j = 0; j < cols; j++) {
-		row[j + 1] = x[j];
-	}
-	double acc = 0.0;
-	for (idx_t a = 0; a < p; a++) {
-		double inner = 0.0;
-		for (idx_t b = 0; b < p; b++) {
-			inner += fit.cov[a * p + b] * row[b];
-		}
-		acc += row[a] * inner;
-	}
-	return acc > 0.0 ? std::sqrt(acc) : 0.0;
-}
-
-} // namespace
-
 CateResult EstimateCate(const CausalFrame &frame, const CausalSpec &spec) {
 	CateResult out;
 	out.cate.assign(frame.n, 0.0);
@@ -502,7 +420,7 @@ CateResult EstimateCate(const CausalFrame &frame, const CausalSpec &spec) {
 	for (idx_t i = 0; i < frame.n; i++) {
 		const double *x = frame.X.Row(i);
 		const double point = model.model.Eta(x, frame.X.cols);
-		const double se = PredictionStdError(model, x, frame.X.cols);
+		const double se = model.PredictionStdError(x, frame.X.cols);
 		out.cate[i] = point;
 		out.lo[i] = point - Z95 * se;
 		out.hi[i] = point + Z95 * se;

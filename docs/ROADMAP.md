@@ -2,9 +2,10 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: Phases 0-4 are implemented, built and tested** (67 assertions passing against a
-> DuckDB v1.5.4 build). Phases 5-10 are still plan. Per-phase status is marked in the table in
-> section 5.
+> **Progress: Phases 0-4, 7, 8 and 9 are implemented, built and tested** (92 assertions passing
+> against a DuckDB v1.5.4 build, plus an EconML/DoWhy cross-check on IHDP). Phases 5-6 - the
+> foundation-model path - are still plan, and phase 7 currently runs on the classical backends
+> rather than on a CFM. Per-phase status is marked in the table in section 5.
 
 ---
 
@@ -223,17 +224,22 @@ src/
 |---|---|---|---|---|
 | 0 | Foundation and spikes | 0.0.x | — | **DONE** — builds on MSVC 19.44 / DuckDB v1.5.4; `do_` prefix confirmed usable |
 | 1 | The causal frame | 0.1.0 | yes | **DONE** — binder, encoder, guardrails, provenance, `id :=` join key |
-| 2 | Classical estimators | 0.2.0 | yes | **DONE** — recovers a known ATE to 0.004; still to do: EconML/DoWhy cross-check on IHDP + Lalonde |
+| 2 | Classical estimators | 0.2.0 | yes | **DONE** — recovers a known ATE to 0.004, and agrees with EconML to within 0.08 on IHDP (`scripts/crosscheck_econml.py`) |
 | 3 | Diagnostics and refutation | 0.3.0 | yes | **DONE** — balance, overlap, diagnose, 5 refuters, E-value + robustness value |
 | 4 | Graphs and identification | 0.4.0 | yes | **DONE** — d-separation, backdoor/front-door/IV, covariate grading |
 | 5 | Inference runtime | 0.5.0 | yes (download opt-in) | ONNX parity with PyTorch reference to 1e-4 |
 | 6 | CFM estimators | 0.6.0 | opt-in | PEHE within 5% of the Python reference |
-| 7 | The `do()` surface | 0.7.0 | opt-in | Interventional and policy functions land |
-| 8 | Scale and performance | 0.8.0 | — | 1M rows segmented; parallel execution, cached context |
-| 9 | Ship | 1.0.0 | — | Accepted into DuckDB community extensions |
+| 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
+| 8 | Scale and performance | 0.8.0 | — | **PARTIAL** — `do_ate_by` segmented estimation landed; parallelism, spill and the 1M-row target are outstanding |
+| 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
 | 10 | Frontier | post-1.0 | — | Continuous treatments, panel, longitudinal |
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
+
+**What actually happened:** phase 7 turned out not to need the foundation models at all. Every
+function in it — interventional prediction, counterfactuals, policy value, uplift, policy trees —
+runs on the phase-2 nuisance models. Phase 6 will add a second engine behind the same SQL rather
+than a new set of functions, which is a better outcome than the plan assumed.
 
 ---
 
@@ -639,10 +645,16 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 
 ## 9. Immediate next actions
 
-Phases 0–4 are done. What is next, in order:
+Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in order:
 
-1. **Cross-check Phase 2 against EconML and DoWhy** on IHDP (1000 reps), Jobs/Lalonde and an ACIC subset. The estimators recover synthetic truth; they have not yet been graded against an established library, which is the actual Phase 2 exit gate.
-2. **Fix `do_cate` interval coverage** — measured ~0.90 against a nominal 0.95, because the pseudo-outcome regression does not propagate nuisance-model uncertainty.
-3. **Persist graphs** somewhere better than a process-global registry (open question 3).
-4. **Phase 5**: bring in ONNX Runtime and export Do-PFN (7.3M params) as the first model.
-5. **Phase 8 groundwork**: `do_ate_by` for segmented estimation, and a chunked scan path to lift `duckdo_max_rows` above 100k.
+1. **Phase 5**: bring in ONNX Runtime and export Do-PFN (7.3M params) as the first model. This is
+   now the only thing standing between the current build and the project's headline feature.
+2. **Fix `do_cate` interval coverage** — measured ~0.90 against a nominal 0.95, because the
+   pseudo-outcome regression does not propagate nuisance-model uncertainty.
+3. **Finish Phase 8**: parallelise cross-fitting folds and bootstrap replicates through DuckDB's
+   task scheduler, add a chunked scan path to lift `duckdo_max_rows` above 100k, and spill past
+   `duckdo_max_memory`.
+4. **Persist graphs** somewhere better than a process-global registry (open question 3).
+5. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
+   the current gate covers one IHDP replication plus two synthetic scenarios.
+6. **Submit** the `description.yml` PR to `duckdb/community-extensions`.

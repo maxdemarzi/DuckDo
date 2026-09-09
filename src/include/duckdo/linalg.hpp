@@ -65,6 +65,20 @@ bool CholeskySolve(vector<double> &A, idx_t n, const vector<double> &rhs, vector
 LinearModel FitRidge(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, const vector<double> &weights,
                      double lambda);
 
+//! A ridge fit that also carries the covariance of its coefficients, so a
+//! prediction can report a real pointwise interval rather than a flat band.
+struct RidgeFit {
+	LinearModel model;
+	//! (p+1) x (p+1) coefficient covariance, row-major, already scaled by sigma^2.
+	vector<double> cov;
+	idx_t dim = 0;
+
+	//! Standard error of the linear prediction at a single row.
+	double PredictionStdError(const double *x, idx_t cols) const;
+};
+
+RidgeFit FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda);
+
 //! Logistic regression by iteratively reweighted least squares, with the same
 //! ridge and intercept conventions as FitRidge.
 LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,

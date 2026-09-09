@@ -43,7 +43,7 @@ vector<idx_t> CausalFrame::ArmRows(double arm) const {
 
 // --- SQL text helpers -------------------------------------------------------
 
-static string Quote(const string &id) {
+string QuoteIdentifier(const string &id) {
 	string out = "\"";
 	for (char c : id) {
 		if (c == '"') {
@@ -55,7 +55,7 @@ static string Quote(const string &id) {
 	return out;
 }
 
-static string Lit(const string &s) {
+string QuoteLiteral(const string &s) {
 	string out = "'";
 	for (char c : s) {
 		if (c == '\'') {
@@ -112,7 +112,7 @@ string RelationSql(const string &relation) {
 				if (!out.empty()) {
 					out += ".";
 				}
-				out += Quote(trimmed.substr(start, i - start));
+				out += QuoteIdentifier(trimmed.substr(start, i - start));
 				start = i + 1;
 			}
 		}
@@ -238,6 +238,9 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.policy = OptionalString(named, "policy", "");
 	spec.refute_method = OptionalString(named, "method", "placebo_treatment");
 	spec.id_column = OptionalString(named, "id", "");
+	spec.policy_column = OptionalString(named, "policy", "");
+	spec.threshold = OptionalDouble(named, "threshold", 0.0);
+	spec.depth = OptionalIdx(named, "depth", 2);
 	spec.treated_label = OptionalString(named, "treated", "");
 	spec.control_label = OptionalString(named, "control", "");
 	spec.seed = static_cast<int64_t>(OptionalIdx(named, "seed", GetSettingIdx(context, "duckdo_seed", 42)));
@@ -344,6 +347,15 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.has_id = true;
 	}
 
+	idx_t policy_idx = DConstants::INVALID_INDEX;
+	if (!spec.policy_column.empty()) {
+		policy_idx = FindColumn(names, spec.policy_column);
+		if (policy_idx == DConstants::INVALID_INDEX) {
+			MissingColumn("policy", spec.policy_column, spec.relation, names);
+		}
+		frame.has_policy = true;
+	}
+
 	// 2. Resolve the covariate set.
 	vector<string> covariates;
 	if (!spec.covariates.empty()) {
@@ -361,7 +373,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 	} else {
 		for (idx_t i = 0; i < names.size(); i++) {
-			if (i == t_idx || i == y_idx || i == id_idx) {
+			if (i == t_idx || i == y_idx || i == id_idx || i == policy_idx) {
 				continue;
 			}
 			bool excluded = false;
@@ -377,7 +389,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 	}
 
-	const string t_quoted = Quote(names[t_idx]);
+	const string t_quoted = QuoteIdentifier(names[t_idx]);
 
 	// 3. Map the treatment onto {0, 1}.
 	string t_expr;
@@ -416,7 +428,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 		frame.control_label = probe->GetValue(0, 0).ToString();
 		frame.treated_label = probe->GetValue(0, 1).ToString();
-		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + Lit(frame.treated_label) + " THEN 1.0 ELSE 0.0 END";
+		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(frame.treated_label) + " THEN 1.0 ELSE 0.0 END";
 	}
 	if (!spec.treated_label.empty() || !spec.control_label.empty()) {
 		if (spec.treated_label.empty() || spec.control_label.empty()) {
@@ -424,8 +436,8 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 		frame.treated_label = spec.treated_label;
 		frame.control_label = spec.control_label;
-		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + Lit(frame.treated_label) +
-		         " THEN 1.0 WHEN CAST(" + t_quoted + " AS VARCHAR) = " + Lit(frame.control_label) +
+		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(frame.treated_label) +
+		         " THEN 1.0 WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(frame.control_label) +
 		         " THEN 0.0 ELSE NULL END";
 	}
 
@@ -433,7 +445,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	string y_expr = "CAST(NULL AS DOUBLE)";
 	string y_quoted;
 	if (y_idx != DConstants::INVALID_INDEX) {
-		y_quoted = Quote(names[y_idx]);
+		y_quoted = QuoteIdentifier(names[y_idx]);
 		if (types[y_idx].id() == LogicalTypeId::BOOLEAN) {
 			y_expr = "CASE WHEN " + y_quoted + " THEN 1.0 ELSE 0.0 END";
 			frame.binary_outcome = true;
@@ -460,7 +472,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	for (auto &col : covariates) {
 		const idx_t idx = FindColumn(names, col);
 		const LogicalType &type = types[idx];
-		const string q = Quote(col);
+		const string q = QuoteIdentifier(col);
 		ColumnPlan plan;
 		plan.source = col;
 		if (type.id() == LogicalTypeId::BOOLEAN) {
@@ -504,9 +516,13 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	// DECIMAL in DuckDB, and the scan below reads flat DOUBLE vectors.
 	string projection = "CAST(" + t_expr + " AS DOUBLE) AS __duckdo_t, CAST(" + y_expr + " AS DOUBLE) AS __duckdo_y";
 	if (frame.has_id) {
-		projection += ", CAST(" + Quote(names[id_idx]) + " AS VARCHAR) AS __duckdo_id";
+		projection += ", CAST(" + QuoteIdentifier(names[id_idx]) + " AS VARCHAR) AS __duckdo_id";
 	}
-	const idx_t cov_base = frame.has_id ? 3 : 2;
+	if (frame.has_policy) {
+		projection += ", coalesce(CAST(" + QuoteIdentifier(names[policy_idx]) + " AS BOOLEAN), false) AS __duckdo_policy";
+	}
+	const idx_t cov_base = 2 + (frame.has_id ? 1 : 0) + (frame.has_policy ? 1 : 0);
+	const idx_t policy_col = frame.has_id ? 3 : 2;
 	for (idx_t i = 0; i < plans.size(); i++) {
 		projection += ", ";
 		projection += plans[i].categorical ? plans[i].sql : ("CAST(" + plans[i].sql + " AS DOUBLE)");
@@ -551,6 +567,9 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	if (frame.has_id) {
 		frame.ids.reserve(frame.n);
 	}
+	if (frame.has_policy) {
+		frame.policy.reserve(frame.n);
+	}
 
 	ColumnDataScanState scan_state;
 	auto &collection = data->Collection();
@@ -579,6 +598,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 				} else {
 					frame.ids.push_back(string());
 				}
+			}
+			if (frame.has_policy) {
+				auto &pol_vec = chunk.data[policy_col];
+				const bool valid = FlatVector::Validity(pol_vec).RowIsValid(i);
+				frame.policy.push_back((valid && FlatVector::GetData<bool>(pol_vec)[i]) ? 1 : 0);
 			}
 			for (idx_t c = 0; c < ncols; c++) {
 				auto &vec = chunk.data[c + cov_base];

@@ -126,6 +126,119 @@ unique_ptr<FunctionData> BindCate(ClientContext &context, TableFunctionBindInput
 	return std::move(bind);
 }
 
+//! Segmented estimation: one independent estimate per group. A group that is
+//! too small to estimate yields a NULL row carrying the reason, rather than
+//! failing the whole query - one thin segment should not cost you the report.
+unique_ptr<FunctionData> BindAteBy(ClientContext &context, TableFunctionBindInput &input,
+                                   vector<LogicalType> &return_types, vector<string> &names) {
+	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
+	RequireOutcome(spec, "do_ate_by");
+
+	vector<string> by;
+	auto entry = input.named_parameters.find("by");
+	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
+		for (auto &child : ListValue::GetChildren(entry->second)) {
+			if (!child.IsNull()) {
+				by.push_back(child.ToString());
+			}
+		}
+	}
+	if (by.empty()) {
+		throw BinderException("duckdo: do_ate_by requires by := ['column'] - without it, use do_ate");
+	}
+
+	const string rel = RelationSql(spec.relation);
+	const idx_t max_groups = GetSettingIdx(context, "duckdo_max_groups", 1000);
+
+	string quoted_by;
+	for (idx_t i = 0; i < by.size(); i++) {
+		if (i) {
+			quoted_by += ", ";
+		}
+		quoted_by += QuoteIdentifier(by[i]);
+	}
+	auto groups = RunQuery(context,
+	                       "SELECT DISTINCT " + quoted_by + " FROM " + rel + " ORDER BY " + quoted_by + " LIMIT " +
+	                           std::to_string(max_groups + 1),
+	                       "listing the groups of " + spec.relation);
+	if (groups->RowCount() > max_groups) {
+		throw BinderException("duckdo: by := produced more than %llu groups. Narrow the grouping, or raise "
+		                      "duckdo_max_groups",
+		                      static_cast<unsigned long long>(max_groups));
+	}
+
+	names.clear();
+	return_types.clear();
+	for (auto &column : by) {
+		names.push_back(column);
+		return_types.push_back(LogicalType::VARCHAR);
+	}
+	for (auto &extra : {"estimand", "estimator"}) {
+		names.push_back(extra);
+		return_types.push_back(LogicalType::VARCHAR);
+	}
+	for (auto &extra : {"estimate", "std_error", "ci_low", "ci_high", "p_value"}) {
+		names.push_back(extra);
+		return_types.push_back(LogicalType::DOUBLE);
+	}
+	for (auto &extra : {"n", "n_treated"}) {
+		names.push_back(extra);
+		return_types.push_back(LogicalType::BIGINT);
+	}
+	names.push_back("warnings");
+	return_types.push_back(LogicalType::LIST(LogicalType::VARCHAR));
+
+	auto bind = make_uniq<ResultBindData>();
+	for (idx_t g = 0; g < groups->RowCount(); g++) {
+		string predicate;
+		vector<Value> key;
+		for (idx_t c = 0; c < by.size(); c++) {
+			const Value cell = groups->GetValue(c, g);
+			key.push_back(cell.IsNull() ? Value(LogicalType::VARCHAR) : Value(cell.ToString()));
+			if (!predicate.empty()) {
+				predicate += " AND ";
+			}
+			// Compare as text and use IS NOT DISTINCT FROM, so a NULL group is a
+			// group like any other rather than a silently dropped one.
+			predicate += "CAST(" + QuoteIdentifier(by[c]) + " AS VARCHAR) IS NOT DISTINCT FROM ";
+			predicate += cell.IsNull() ? string("CAST(NULL AS VARCHAR)") : QuoteLiteral(cell.ToString());
+		}
+
+		CausalSpec group_spec = spec;
+		group_spec.relation = "(SELECT * FROM " + rel + " WHERE " + predicate + ")";
+		for (auto &column : by) {
+			group_spec.exclude.push_back(column);
+		}
+
+		vector<Value> row = key;
+		try {
+			auto frame = BuildFrame(context, group_spec);
+			auto result = EstimateEffect(frame, group_spec, Estimand::ATE);
+			row.push_back(Value(EstimandName(result.estimand)));
+			row.push_back(Value(result.estimator));
+			row.push_back(Value::DOUBLE(result.estimate));
+			row.push_back(Value::DOUBLE(result.std_error));
+			row.push_back(Value::DOUBLE(result.ci_low));
+			row.push_back(Value::DOUBLE(result.ci_high));
+			row.push_back(Value::DOUBLE(result.p_value));
+			row.push_back(Value::BIGINT(static_cast<int64_t>(result.n)));
+			row.push_back(Value::BIGINT(static_cast<int64_t>(result.n_treated)));
+			row.push_back(WarningList(result.warnings));
+		} catch (const std::exception &ex) {
+			row.push_back(Value("ATE"));
+			row.push_back(Value(group_spec.estimator));
+			for (int i = 0; i < 5; i++) {
+				row.push_back(Value(LogicalType::DOUBLE));
+			}
+			row.push_back(Value(LogicalType::BIGINT));
+			row.push_back(Value(LogicalType::BIGINT));
+			row.push_back(WarningList({string("not estimated: ") + ex.what()}));
+		}
+		bind->rows.push_back(std::move(row));
+	}
+	return std::move(bind);
+}
+
 } // namespace
 
 void AddCommonNamedParameters(TableFunction &fn) {
@@ -167,6 +280,11 @@ void RegisterEstimationFunctions(ExtensionLoader &loader) {
 	TableFunction cate("", {LogicalType::VARCHAR}, EmitRows, BindCate, InitGlobal);
 	AddCommonNamedParameters(cate);
 	RegisterUnderBothNames(loader, cate, "cate");
+
+	TableFunction by("", {LogicalType::VARCHAR}, EmitRows, BindAteBy, InitGlobal);
+	AddCommonNamedParameters(by);
+	by.named_parameters["by"] = LogicalType::LIST(LogicalType::VARCHAR);
+	RegisterUnderBothNames(loader, by, "ate_by");
 }
 
 } // namespace duckdo
