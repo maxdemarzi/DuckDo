@@ -692,8 +692,10 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    covariates is roughly 400 MB. The row cap now defaults to 1M because that is fast enough, but
    nothing yet spills, and `duckdo_max_memory` is still only advisory.
 7. ~~**Persist graphs**~~ **DONE**: graphs live in a `duckdo_graphs` table, so they survive a restart and are inspectable as ordinary data. Open question 3 is answered — a plain table beat catalog integration, which would have coupled DuckDo to internals that move between DuckDB versions.
-8. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
-   the current gate covers one IHDP replication plus two synthetic scenarios.
+8. **Broaden the cross-check further.** It now covers all ten IHDP replications available from the
+   CEVAE mirror (mean |ATE error| 0.137, mean PEHE 2.23) and Lalonde NSW against its experimental
+   benchmark (1794.3, with `dml` at 1759.3). The canonical 1000-replication IHDP set is not at that
+   source; an ACIC subset is still open.
 9. **Host the exported graphs** so `do_download` can fetch them, rather than requiring every user to
    run the export script.
 10. **Submit** the `description.yml` PR to `duckdb/community-extensions`.

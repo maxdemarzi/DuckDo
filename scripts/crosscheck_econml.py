@@ -45,6 +45,20 @@ def duckdo_ate(duckdb_exe, csv_path, treatment, outcome, covariates, estimator):
     return float(parts[0]), float(parts[1])
 
 
+def duckdo_cate(duckdb_exe, csv_path, treatment, outcome, covariates):
+    """Per-row effects from DuckDo, in the CSV's row order."""
+    cov_list = ", ".join("'%s'" % c for c in covariates)
+    relation = "(SELECT * FROM read_csv_auto('%s'))" % csv_path.replace("\\", "/")
+    sql = ("SELECT cate FROM do_cate(%s, treatment := '%s', outcome := '%s', "
+           "covariates := [%s]) ORDER BY row_id;"
+           % (_sql_literal(relation), treatment, outcome, cov_list))
+    proc = subprocess.run([duckdb_exe, "-csv", "-noheader", "-c", sql],
+                          capture_output=True, text=True)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise RuntimeError("duckdo do_cate failed: %s%s" % (proc.stdout, proc.stderr))
+    return np.array([float(line) for line in proc.stdout.strip().splitlines()])
+
+
 def _sql_literal(text):
     return "'" + text.replace("'", "''") + "'"
 
@@ -133,10 +147,16 @@ def scenario_heterogeneous(seed, n=8000, p=5):
     return X, T, Y, float(tau.mean())
 
 
-def try_ihdp():
-    """Fetch the standard IHDP replication if the network allows it."""
+# The CEVAE mirror carries replications 1-10, not the canonical 1000. Running all
+# ten is a real improvement on running one; claiming the full benchmark would not
+# be true, so the report says which.
+IHDP_REPLICATIONS = range(1, 11)
+
+
+def try_ihdp(replication):
+    """Fetch one IHDP replication if the network allows it."""
     url = ("https://raw.githubusercontent.com/AMLab-Amsterdam/CEVAE/master/"
-           "datasets/IHDP/csv/ihdp_npci_1.csv")
+           "datasets/IHDP/csv/ihdp_npci_%d.csv" % replication)
     try:
         with urllib.request.urlopen(url, timeout=25) as response:
             raw = response.read().decode("utf8")
@@ -149,7 +169,95 @@ def try_ihdp():
     Y = data[:, 1]
     mu0, mu1 = data[:, 3], data[:, 4]
     X = data[:, 5:]
-    return (X, T, Y, float((mu1 - mu0).mean())), None
+    # The individual effects are known here, so PEHE is measurable, not just ATE error.
+    return (X, T, Y, mu1 - mu0), None
+
+
+def try_lalonde():
+    """The Dehejia-Wahba NSW sample. Treatment was randomised, so the unadjusted
+    difference in means IS the causal effect - which makes it a benchmark an
+    adjusted estimator has to reproduce rather than improve on."""
+    try:
+        from dowhy.datasets import lalonde_dataset
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    frame = lalonde_dataset()
+    covariates = ["age", "educ", "black", "hisp", "married", "nodegr", "re74", "re75"]
+    X = frame[covariates].to_numpy(dtype=float)
+    T = frame["treat"].to_numpy().astype(int)
+    Y = frame["re78"].to_numpy(dtype=float)
+    experimental = float(Y[T == 1].mean() - Y[T == 0].mean())
+    return (X, T, Y, experimental), None
+
+
+def ihdp_and_lalonde(duckdb_exe):
+    """Run every available IHDP replication plus Lalonde, and report both the
+    ATE error and - where individual effects are known - the PEHE."""
+    print()
+    print("IHDP replications (individual effects known, so PEHE is measurable)")
+    print("%6s %10s %12s %12s %10s" % ("rep", "true ATE", "duckdo aipw", "econml DR", "PEHE"))
+    print("-" * 56)
+    ate_errors, pehes, skipped = [], [], 0
+    for replication in IHDP_REPLICATIONS:
+        loaded, error = try_ihdp(replication)
+        if loaded is None:
+            skipped += 1
+            continue
+        X, T, Y, individual = loaded
+        truth = float(individual.mean())
+        covariates = ["x%d" % i for i in range(X.shape[1])]
+        columns = {"discount": T.tolist(), "revenue": Y.tolist()}
+        for i, cov in enumerate(covariates):
+            columns[cov] = X[:, i].tolist()
+        handle, path = tempfile.mkstemp(suffix=".csv")
+        os.close(handle)
+        try:
+            write_csv(path, columns)
+            ours, _ = duckdo_ate(duckdb_exe, path, "discount", "revenue", covariates, "aipw")
+            cate = duckdo_cate(duckdb_exe, path, "discount", "revenue", covariates)
+            pehe = float(np.sqrt(np.mean((cate - individual) ** 2)))
+        finally:
+            os.unlink(path)
+        theirs = econml_estimates(X, T, Y)["econml_LinearDRLearner"]
+        ate_errors.append(abs(ours - truth))
+        pehes.append(pehe)
+        print("%6d %10.4f %12.4f %12.4f %10.4f" % (replication, truth, ours, theirs, pehe))
+
+    if ate_errors:
+        print("-" * 56)
+        print("%6s %10s %12.4f %12s %10.4f"
+              % ("mean", "", float(np.mean(ate_errors)), "", float(np.mean(pehes))))
+        print("       (the 'duckdo aipw' column is mean |error|, not a mean estimate)")
+    if skipped:
+        print("  %d replication(s) unavailable" % skipped)
+
+    print()
+    print("Lalonde NSW (randomised, so the unadjusted difference is the benchmark)")
+    loaded, error = try_lalonde()
+    if loaded is None:
+        print("  skipped (%s)" % error)
+        return ate_errors, pehes
+    X, T, Y, experimental = loaded
+    covariates = ["age", "educ", "black", "hisp", "married", "nodegr", "re74", "re75"]
+    columns = {"discount": T.tolist(), "revenue": Y.tolist()}
+    for i, cov in enumerate(covariates):
+        columns[cov] = X[:, i].tolist()
+    handle, path = tempfile.mkstemp(suffix=".csv")
+    os.close(handle)
+    try:
+        write_csv(path, columns)
+        row = {"experimental benchmark": experimental}
+        for estimator in ("aipw", "dml", "ipw"):
+            row["duckdo " + estimator] = duckdo_ate(duckdb_exe, path, "discount", "revenue",
+                                                    covariates, estimator)[0]
+    finally:
+        os.unlink(path)
+    row["econml DRLearner"] = econml_estimates(X, T, Y)["econml_LinearDRLearner"]
+    for key, value in row.items():
+        print("  %-24s %10.1f" % (key, value))
+    gap = max(abs(row["duckdo aipw"] - experimental), abs(row["duckdo dml"] - experimental))
+    print("  largest gap from the experimental benchmark: %.1f (outcome is 1978 dollars)" % gap)
+    return ate_errors, pehes
 
 
 def run_scenario(name, X, T, Y, truth, duckdb_exe, results):
@@ -181,6 +289,8 @@ def run_scenario(name, X, T, Y, truth, duckdb_exe, results):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--duckdb", default=os.path.join("build", "release", "duckdb.exe"))
+    parser.add_argument("--quick", action="store_true",
+                        help="skip the IHDP replication sweep and Lalonde")
     args = parser.parse_args()
 
     if not os.path.exists(args.duckdb):
@@ -194,10 +304,10 @@ def main():
     X, T, Y, truth = scenario_heterogeneous(11)
     run_scenario("heterogeneous", X, T, Y, truth, args.duckdb, results)
 
-    ihdp, error = try_ihdp()
+    ihdp, error = try_ihdp(1)
     if ihdp is not None:
-        X, T, Y, truth = ihdp
-        run_scenario("ihdp-npci-1", X, T, Y, truth, args.duckdb, results)
+        X, T, Y, individual = ihdp
+        run_scenario("ihdp-npci-1", X, T, Y, float(individual.mean()), args.duckdb, results)
     else:
         print("IHDP skipped (%s)" % error)
 
@@ -230,6 +340,9 @@ def main():
         return 1
     print("GATE PASSED: every DuckDo estimator agrees with its EconML counterpart "
           "to within %.2f on %d scenarios." % (TOLERANCE, len(results)))
+
+    if not args.quick:
+        ihdp_and_lalonde(args.duckdb)
     with io.open("scripts/crosscheck_results.json", "w", encoding="utf8") as handle:
         json.dump(results, handle, indent=2)
     print("wrote scripts/crosscheck_results.json")

@@ -239,13 +239,29 @@ remove. With a heterogeneous effect of `3 + 2*x1`, `do_cate` correlates 0.9995 w
 `do_att` (3.72) > ATE (3.00) > `do_atc` (2.29), as it must when the treated have higher `x1`.
 
 **Recovering synthetic truth is not enough**, so the estimators are also graded against established
-implementations on identical rows, including the standard IHDP replication:
+implementations on identical rows:
 
 | scenario | truth | duckdo `aipw` | econml `LinearDRLearner` | dowhy PSW |
 |---|---|---|---|---|
 | linear confounded | 3.0000 | 3.0193 | 3.0180 | 3.0337 |
 | heterogeneous | 2.9936 | 2.9847 | 2.9716 | 2.9662 |
 | IHDP npci-1 | 4.0161 | 3.8766 | 3.9555 | 4.0287 |
+
+Across **all ten IHDP replications** the mean absolute ATE error is **0.137**, and `do_cate`'s mean
+PEHE is 2.23 — dominated by replication 9, whose true effect is 10.5 where the others sit near 4.
+
+And on **Lalonde NSW**, where treatment was randomised so the unadjusted difference *is* the causal
+effect, the adjusted estimators have a benchmark to reproduce rather than improve on:
+
+| | 1978 dollars |
+|---|---|
+| experimental benchmark | **1794.3** |
+| duckdo `dml` | 1759.3 |
+| econml `DRLearner` | 1688.6 |
+| duckdo `ipw` | 1636.3 |
+| duckdo `aipw` | 1629.1 |
+
+All four land within 9% of the benchmark on a noisy 445-row sample.
 
 Reproduce with `test/sql/estimators.test` and `python scripts/crosscheck_econml.py`
 (the latter needs `econml` and `dowhy`; it is a dev tool, not shipped).
