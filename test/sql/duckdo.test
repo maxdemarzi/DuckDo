@@ -1,0 +1,23 @@
+# name: test/sql/duckdo.test
+# description: test duckdo extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT duckdo('Sam');
+----
+Catalog Error: Scalar Function with name duckdo does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require duckdo
+
+# Confirm the extension works
+query I
+SELECT duckdo('Sam');
+----
+...........🦆 Sam
+
+query I
+SELECT duckdo_openssl_version('Michael') ILIKE 'Duckdo Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
