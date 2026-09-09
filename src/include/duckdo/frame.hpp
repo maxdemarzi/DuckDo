@@ -26,8 +26,13 @@ struct CausalSpec {
 	string relation;
 	string treatment;
 	string outcome;
-	//! Empty means "every column except the treatment, the outcome and `exclude`".
+	//! Empty AND `covariates_given` false means "every column except the
+	//! treatment, the outcome and `exclude`". Written explicitly as
+	//! `covariates := []` it means no covariates at all - the two have to be
+	//! distinguishable, because silently adjusting for every column when
+	//! somebody asked for none is a wrong answer rather than a surprising one.
 	vector<string> covariates;
+	bool covariates_given = false;
 	vector<string> exclude;
 	string estimator;
 	string model;

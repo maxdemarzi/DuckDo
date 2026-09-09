@@ -232,6 +232,10 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.treatment = RequireString(named, "treatment", "this function");
 	spec.outcome = OptionalString(named, "outcome", "");
 	spec.covariates = OptionalStringList(named, "covariates");
+	{
+		auto entry = named.find("covariates");
+		spec.covariates_given = entry != named.end() && !entry->second.IsNull();
+	}
 	spec.exclude = OptionalStringList(named, "exclude");
 	spec.estimator = OptionalString(named, "estimator", GetSettingString(context, "duckdo_default_estimator", "aipw"));
 	spec.model = OptionalString(named, "model", "");
@@ -431,6 +435,10 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 			}
 			covariates.push_back(names[idx]);
 		}
+	} else if (spec.covariates_given) {
+		// An explicit empty list. Nothing to do - the frame carries no covariates,
+		// and every estimator degrades to its unadjusted form, which is exactly
+		// what was asked for.
 	} else {
 		for (idx_t i = 0; i < names.size(); i++) {
 			if (i == t_idx || i == y_idx || i == id_idx || i == policy_idx || i == aux_idx) {

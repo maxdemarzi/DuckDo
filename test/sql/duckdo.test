@@ -120,3 +120,87 @@ SELECT count(*) FROM do_ate('wide', treatment := 't', outcome := 'y', covariates
 
 statement ok
 RESET duckdo_max_memory;
+
+# --- an empty covariate list means none, not all --------------------------------
+#
+# `covariates := []` used to fall through to the same branch as omitting the
+# argument, which adjusts for every remaining column. Asking for no adjustment
+# and silently getting full adjustment is a wrong answer rather than a
+# surprising one, so the two are now distinguishable.
+
+statement ok
+CREATE TABLE confounded AS
+WITH u AS (SELECT i, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+                     sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e,
+                     random() AS d FROM range(8000) r(i)),
+ p AS (SELECT *, 1.0/(1.0+exp(-1.5*x)) AS ps FROM u)
+SELECT i AS id, x, (d<ps)::INT AS t, 2.0*x + 3.0*((d<ps)::INT) + e AS y FROM p;
+
+# Omitted: adjusts for x, recovers the true 3.0.
+query I
+SELECT abs(estimate - 3.0) < 0.15
+FROM do_ate('confounded', treatment := 't', outcome := 'y', exclude := ['id']);
+----
+true
+
+# Explicitly empty: no adjustment at all, so the confounding is left in and the
+# estimate is well above 3.0.
+query I
+SELECT estimate > 3.5
+FROM do_ate('confounded', treatment := 't', outcome := 'y', covariates := []);
+----
+true
+
+# The frame reports what it actually used, either way.
+query I
+SELECT n_features FROM do_frame_summary('confounded', treatment := 't', outcome := 'y',
+                                        covariates := []);
+----
+0
+
+# --- do_frame_summary: what the encoder actually did ----------------------------
+#
+# The roadmap names this as the mitigation for "encoder choices can silently bias
+# estimates". Every estimator runs on this frame, so what it contains has to be
+# answerable without reading the source.
+
+statement ok
+CREATE TABLE mixed AS
+SELECT i AS id, (i % 2) AS t, i * 1.0 AS y,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE (i % 7) * 1.0 END AS tenure,
+       ['red','green','blue'][(i % 3) + 1] AS colour
+FROM range(400) r(i);
+
+# A NULL-bearing numeric becomes a filled column plus an explicit indicator, and
+# a categorical becomes one column per non-reference level.
+query IIII
+SELECT feature, source, kind, level
+FROM do_frame_summary('mixed', treatment := 't', outcome := 'y', exclude := ['id'])
+ORDER BY feature;
+----
+colour=green	colour	one_hot	green
+colour=red	colour	one_hot	red
+tenure	tenure	numeric	NULL
+tenure__missing	tenure	missing_indicator	NULL
+
+# Rows are never dropped for a missing covariate, and the count is reported.
+query II
+SELECT DISTINCT n, n_rows_with_missing
+FROM do_frame_summary('mixed', treatment := 't', outcome := 'y', exclude := ['id']);
+----
+400	80
+
+# The standardisation applied to each feature is visible, since it is what the
+# reported coefficients are on.
+query I
+SELECT abs(center - 2.995) < 0.01 AND abs(scale - 1.794) < 0.01
+FROM do_frame_summary('mixed', treatment := 't', outcome := 'y', exclude := ['id'])
+WHERE feature = 'tenure';
+----
+true
+
+query II
+SELECT DISTINCT treated_label, control_label
+FROM do_frame_summary('mixed', treatment := 't', outcome := 'y', exclude := ['id']);
+----
+1	0

@@ -27,7 +27,9 @@ set(EXTENSION_SOURCES
     src/panel.cpp
     src/identification.cpp
     src/mediation.cpp
-    src/longitudinal.cpp)
+    src/longitudinal.cpp
+    src/survival.cpp
+    src/frame_summary.cpp)
 
 # Causal foundation models are an opt-in build. Without them the extension still
 # builds and runs with zero external dependencies, which is what keeps the

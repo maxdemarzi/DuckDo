@@ -35,6 +35,8 @@ void RegisterPanelFunctions(ExtensionLoader &loader);
 void RegisterIdentificationFunctions(ExtensionLoader &loader);
 void RegisterMediationFunctions(ExtensionLoader &loader);
 void RegisterLongitudinalFunctions(ExtensionLoader &loader);
+void RegisterSurvivalFunctions(ExtensionLoader &loader);
+void RegisterFrameSummaryFunction(ExtensionLoader &loader);
 void RegisterDiagnosticFunctions(ExtensionLoader &loader);
 void RegisterGraphFunctions(ExtensionLoader &loader);
 //! Point the graph store at the database it should persist into.
