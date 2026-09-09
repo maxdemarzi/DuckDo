@@ -385,18 +385,22 @@ the memory one also names the row count that would fit at the frame's width.
 
 ### Cost
 
-The dense accumulations that dominate every fit are split across row blocks, with a fixed reduction
-order so results stay bit-identical run to run. Each shape is generated to Parquet once, outside the
+The dense accumulations that dominate every fit are split across row blocks. **How** they are split
+depends on the data and never on the thread budget, so results are bit-identical whatever
+`duckdo_threads` is set to — floating-point addition is not associative, and a split that follows
+the core count makes the answer follow the core count too. Bootstrap replicates are parallel across
+replicates, with each replicate seeded from `(seed, rep)` rather than a shared stream, so the same
+seed gives the same interval on one core or thirty-two. Each shape is generated to Parquet once, outside the
 measurement, so both columns describe the estimator rather than the table generator
 (`scripts/benchmark.py`):
 
 | rows | covariates | estimator | seconds | peak MB |
 |---|---|---|---|---|
-| 100k | 5 | `aipw` | 0.3 | 35 |
-| 100k | 50 | `aipw` | 1.9 | 108 |
-| 1M | 5 | `aipw` | 1.9 | 143 |
-| 1M | 50 | `aipw` | 16.7 | 882 |
-| 1M | 50 | `dml` | 15.6 | 882 |
+| 100k | 5 | `aipw` | 0.2 | 35 |
+| 100k | 50 | `aipw` | 1.6 | 108 |
+| 1M | 5 | `aipw` | 1.7 | 143 |
+| 1M | 50 | `aipw` | 14.2 | 882 |
+| 1M | 50 | `dml` | 14.2 | 882 |
 
 The 1M × 50 case was 101 s single-threaded before the accumulation was parallelised.
 
@@ -452,7 +456,7 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-315 assertions in the dependency-free build, 340 with the foundation-model path enabled, across
+328 assertions in the dependency-free build, 353 with the foundation-model path enabled, across
 estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
 time-varying treatment, survival, the `do()` surface and end-to-end inference for both models.
 

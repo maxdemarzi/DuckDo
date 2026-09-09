@@ -357,9 +357,11 @@ and a warning names that too.
 Passing the mediator in `covariates :=` is an error, not a silent zero — adjusting for the mediator
 in the outcome model removes the very path being measured.
 
-Cost is bootstrap-bound: `bootstrap_reps` replicates times two ridge fits. 200k rows by 5
-covariates takes 3.7 s; 1M by 50 takes 194 s. Lower `bootstrap_reps :=` to trade interval
-precision for time — the point estimates do not depend on it.
+Cost is bootstrap-bound: `bootstrap_reps` replicates times two ridge fits, run in parallel across
+replicates. 200k rows by 5 covariates takes 1.6 s; 1M by 50 takes 141 s, where the limit is memory
+bandwidth rather than cores — each replicate reads the whole design matrix in random row order.
+Lower `bootstrap_reps :=` to trade interval precision for time; the point estimates do not depend
+on it.
 
 Every result carries the assumption this rests on: **sequential ignorability**. Randomising the
 treatment does not buy it. It removes confounding of treatment-outcome and treatment-mediator, and

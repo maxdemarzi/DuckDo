@@ -1,5 +1,7 @@
 #include "duckdo/linalg.hpp"
 
+#include <atomic>
+
 #include <algorithm>
 #include <cmath>
 #include <thread>
@@ -72,6 +74,49 @@ void SetNumericThreads(idx_t threads) {
 	numeric_threads = threads;
 }
 
+void ParallelJobs(idx_t count, const std::function<void(idx_t)> &job) {
+	if (count == 0) {
+		return;
+	}
+	idx_t workers = NumericThreads();
+	if (workers > count) {
+		workers = count;
+	}
+	if (workers <= 1) {
+		for (idx_t i = 0; i < count; i++) {
+			job(i);
+		}
+		return;
+	}
+
+	// Each replicate is already a full pass over the data, so let the replicates
+	// have the threads and give each fit one. Restored below.
+	const idx_t saved = numeric_threads;
+	numeric_threads = 1;
+
+	std::atomic<idx_t> next(0);
+	vector<std::thread> pool;
+	pool.reserve(workers - 1);
+	auto pump = [&]() {
+		for (;;) {
+			const idx_t i = next.fetch_add(1);
+			if (i >= count) {
+				return;
+			}
+			job(i);
+		}
+	};
+	for (idx_t w = 0; w + 1 < workers; w++) {
+		pool.emplace_back(pump);
+	}
+	pump();
+	for (auto &worker : pool) {
+		worker.join();
+	}
+
+	numeric_threads = saved;
+}
+
 idx_t NumericThreads() {
 	if (numeric_threads > 0) {
 		return numeric_threads;
@@ -119,35 +164,62 @@ static void BuildNormalEquations(const Matrix &X, const vector<double> &z, const
 	xtx.assign(p * p, 0.0);
 	xtz.assign(p, 0.0);
 
-	// Below this the threading overhead costs more than the work saved.
-	const idx_t kMinRowsPerThread = 4096;
-	idx_t blocks = NumericThreads();
-	if (blocks > 1) {
-		blocks = std::min(blocks, std::max<idx_t>(rows.size() / kMinRowsPerThread, 1));
-	}
+	// How the rows are split is a function of the DATA and nothing else - never
+	// of the thread budget. Floating-point addition is not associative, so a
+	// split that follows the core count makes the answer follow the core count
+	// too: before this, the same query on the same seed returned 3.0031935719077567
+	// on one thread and 3.0031935719077549 on sixteen. Two ULPs is harmless
+	// arithmetically and corrosive to a promise of reproducibility, and the cost
+	// of keeping the promise is a few extra block boundaries.
+	//
+	// Below kMinRowsPerBlock the per-block overhead costs more than the work
+	// saved; above kMaxBlocks the scratch and the reduction start to matter.
+	const idx_t kMinRowsPerBlock = 4096;
+	const idx_t kMaxBlocks = 64;
+	idx_t blocks = std::max<idx_t>(rows.size() / kMinRowsPerBlock, 1);
+	blocks = std::min<idx_t>(blocks, kMaxBlocks);
 
 	if (blocks <= 1) {
 		AccumulateBlock(X, z, rows, w, 0, rows.size(), xtx.data(), xtz.data());
 	} else {
 		vector<vector<double>> partial_xtx(blocks, vector<double>(p * p, 0.0));
 		vector<vector<double>> partial_xtz(blocks, vector<double>(p, 0.0));
-		vector<std::thread> workers;
-		workers.reserve(blocks - 1);
 		const idx_t span = (rows.size() + blocks - 1) / blocks;
-		for (idx_t b = 0; b < blocks; b++) {
+		auto run_block = [&](idx_t b) {
 			const idx_t begin = std::min(b * span, rows.size());
 			const idx_t end = std::min(begin + span, rows.size());
-			if (b + 1 == blocks) {
-				AccumulateBlock(X, z, rows, w, begin, end, partial_xtx[b].data(), partial_xtz[b].data());
-			} else {
-				workers.emplace_back([&, b, begin, end] {
-					AccumulateBlock(X, z, rows, w, begin, end, partial_xtx[b].data(), partial_xtz[b].data());
-				});
+			AccumulateBlock(X, z, rows, w, begin, end, partial_xtx[b].data(), partial_xtz[b].data());
+		};
+
+		// The blocks are fixed; only how many threads chew through them varies.
+		idx_t workers = std::min<idx_t>(NumericThreads(), blocks);
+		if (workers <= 1) {
+			for (idx_t b = 0; b < blocks; b++) {
+				run_block(b);
+			}
+		} else {
+			std::atomic<idx_t> next(0);
+			vector<std::thread> pool;
+			pool.reserve(workers - 1);
+			auto pump = [&]() {
+				for (;;) {
+					const idx_t b = next.fetch_add(1);
+					if (b >= blocks) {
+						return;
+					}
+					run_block(b);
+				}
+			};
+			for (idx_t t = 0; t + 1 < workers; t++) {
+				pool.emplace_back(pump);
+			}
+			pump();
+			for (auto &worker : pool) {
+				worker.join();
 			}
 		}
-		for (auto &worker : workers) {
-			worker.join();
-		}
+
+		// Reduced in block order, which is the same order on every machine.
 		for (idx_t b = 0; b < blocks; b++) {
 			for (idx_t i = 0; i < p * p; i++) {
 				xtx[i] += partial_xtx[b][i];

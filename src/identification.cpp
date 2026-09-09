@@ -306,11 +306,13 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 	const double estimate = a * b;
 
 	// Delta-method-free interval: bootstrap the whole product.
-	std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0xFD00FD00ULL);
-	std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
 	const idx_t reps = std::max<idx_t>(spec.bootstrap_reps, 100);
-	vector<double> draws;
-	for (idx_t rep = 0; rep < reps; rep++) {
+	vector<double> per_rep(reps, 0.0);
+	vector<uint8_t> rep_usable(reps, 0);
+	// Per-replicate seeding: the draws must not depend on thread scheduling.
+	ParallelJobs(reps, [&](idx_t rep) {
+		std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0xFD00FD00ULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
 		double bm1 = 0.0, bm0 = 0.0;
 		idx_t bn1 = 0, bn0 = 0;
 		double by[2][2] = {{0.0, 0.0}, {0.0, 0.0}};
@@ -330,7 +332,7 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 			bc[arm][med]++;
 		}
 		if (bn1 == 0 || bn0 == 0 || bc[0][0] == 0 || bc[0][1] == 0 || bc[1][0] == 0 || bc[1][1] == 0) {
-			continue;
+			return;
 		}
 		const double ba = bm1 / static_cast<double>(bn1) - bm0 / static_cast<double>(bn0);
 		double bb = 0.0;
@@ -338,7 +340,14 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 			const double share = static_cast<double>(arm == 1 ? bn1 : bn0) / static_cast<double>(frame.n);
 			bb += share * (by[arm][1] / static_cast<double>(bc[arm][1]) - by[arm][0] / static_cast<double>(bc[arm][0]));
 		}
-		draws.push_back(ba * bb);
+		per_rep[rep] = ba * bb;
+		rep_usable[rep] = 1;
+	});
+	vector<double> draws;
+	for (idx_t rep = 0; rep < reps; rep++) {
+		if (rep_usable[rep]) {
+			draws.push_back(per_rep[rep]);
+		}
 	}
 	double se = 0.0;
 	if (draws.size() >= 20) {

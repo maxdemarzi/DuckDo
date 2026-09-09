@@ -13,6 +13,8 @@
 
 #include "duckdb.hpp"
 
+#include <functional>
+
 namespace duckdb {
 namespace duckdo {
 
@@ -103,6 +105,17 @@ LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<i
 //! is a sum over rows into a (p+1)^2 matrix, so it splits cleanly by row block.
 void SetNumericThreads(idx_t threads);
 idx_t NumericThreads();
+
+//! Run `count` independent jobs across the same thread budget, waiting for all
+//! of them. `job(i)` must write only to slot i of whatever the caller is
+//! filling, so results land in index order regardless of scheduling - a
+//! bootstrap whose answer depended on which thread finished first would not be
+//! reproducible.
+//!
+//! Row-block threading inside each job is switched off for the duration:
+//! bootstrap replicates already saturate the machine, and nesting the two
+//! oversubscribes it badly. It is restored before returning.
+void ParallelJobs(idx_t count, const std::function<void(idx_t)> &job);
 
 double Sigmoid(double x);
 double Mean(const vector<double> &v);

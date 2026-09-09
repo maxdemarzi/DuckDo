@@ -222,16 +222,22 @@ unique_ptr<FunctionData> BindMediate(ClientContext &context, TableFunctionBindIn
 	// neither has a usable closed-form standard error. Resample rows and redo
 	// the whole decomposition, which keeps the three intervals consistent with
 	// each other.
-	std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x0DEC0DEDULL);
-	std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
+	// Each replicate seeds its own generator from (seed, rep) rather than drawing
+	// from one shared stream, so the draws do not depend on the order threads
+	// happen to reach them. Same seed, same answer, one thread or thirty-two.
 	const idx_t reps = std::max<idx_t>(spec.bootstrap_reps, 100);
-	vector<double> direct_draws, indirect_draws, total_draws;
-	vector<idx_t> resample(frame.n);
-	for (idx_t rep = 0; rep < reps; rep++) {
+	vector<Decomposition> results(reps);
+	ParallelJobs(reps, [&](idx_t rep) {
+		std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x0DEC0DEDULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
+		vector<idx_t> resample(frame.n);
 		for (idx_t k = 0; k < frame.n; k++) {
 			resample[k] = pick(rng);
 		}
-		const auto draw = Decompose(design, frame.aux, frame.y, resample, x_mean, lambda);
+		results[rep] = Decompose(design, frame.aux, frame.y, resample, x_mean, lambda);
+	});
+	vector<double> direct_draws, indirect_draws, total_draws;
+	for (auto &draw : results) {
 		if (!draw.ok) {
 			continue;
 		}

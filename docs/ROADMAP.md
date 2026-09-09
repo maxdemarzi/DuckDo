@@ -550,7 +550,20 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 ### Work
 
 1. **Grouped estimation** — `do_ate_by(..., by := ['region'])` runs an independent estimation per group with shared nuisance-model infrastructure, parallelized across groups.
-2. **Parallelism** — cross-fitting folds, bootstrap replicates, and CFM ensemble draws are all embarrassingly parallel; use DuckDB's task scheduler rather than raw threads so the extension respects the engine's thread budget.
+2. ~~**Parallelism**~~ **DONE for bootstrap replicates**, which were the remaining serial cost:
+   `do_mediate`, `do_rmst` and `do_frontdoor` now run their replicates in parallel with the
+   row-block threading switched off inside each, since nesting the two oversubscribes badly. Each
+   replicate seeds from `(seed, rep)` rather than a shared stream, so the answer cannot depend on
+   which thread reached which replicate. `do_mediate` on 200k x 5 went 3.7 s to 1.6 s; on 1M x 50
+   it went 194 s to 141 s, where the limit is memory bandwidth rather than cores.
+
+   The same change closed a hole in design principle 7. The row-block count used to follow the
+   thread budget, and floating-point addition is not associative, so the same query on the same
+   seed returned `3.0031935719077567` on one thread and `3.0031935719077549` on sixteen. The block
+   count is now a function of the data alone and the blocks are reduced in index order, so results
+   are bit-identical at any thread count — and the work-stealing dispatch that replaced the even
+   split is also *faster*: 1M x 50 AIPW fell from 16.7 s to 14.2 s. Cross-fitting folds and CFM
+   ensemble draws are still serial, and DuckDB's own task scheduler is still not used.
 3. **Context caching** — for CFMs, encode a fixed context once and reuse it across query chunks (`anofox_tabfm` does exactly this behind a setting).
 4. ~~**Streaming and chunking**~~ — **partly done, and the other part was rejected.**
    `duckdo_max_memory` is now a real ceiling: the encoded matrix's size is computed before

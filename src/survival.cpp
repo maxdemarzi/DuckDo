@@ -275,30 +275,38 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	// assumptions the weights break, so the interval comes from resampling
 	// subjects and redoing everything including the propensity fit. Anything
 	// cheaper would treat the weights as known.
-	std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x5A1E5A1EULL);
-	std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
+	// Per-replicate seeding, so the answer does not depend on which thread got
+	// which replicate. `usable` marks the ones that drew both arms.
 	const idx_t reps = std::max<idx_t>(spec.bootstrap_reps, 100);
-	vector<double> draws;
-	vector<idx_t> resample(frame.n);
-	vector<double> boot_weights;
-	for (idx_t rep = 0; rep < reps; rep++) {
+	vector<double> per_rep(reps, 0.0);
+	vector<uint8_t> rep_usable(reps, 0);
+	ParallelJobs(reps, [&](idx_t rep) {
+		std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x5A1E5A1EULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
+		vector<idx_t> resample(frame.n);
 		for (idx_t k = 0; k < frame.n; k++) {
 			resample[k] = pick(rng);
 		}
-		bool both_arms = false;
 		idx_t seen[2] = {0, 0};
 		for (auto i : resample) {
 			seen[frame.t[i] >= 0.5 ? 1 : 0]++;
 		}
-		both_arms = seen[0] > 1 && seen[1] > 1;
-		if (!both_arms) {
-			continue;
+		if (seen[0] <= 1 || seen[1] <= 1) {
+			return;
 		}
+		vector<double> boot_weights;
 		double boot_trimmed = 0.0;
 		build_weights(resample, boot_weights, boot_trimmed);
 		double t1 = 0.0, t0 = 0.0;
 		rmst_from(resample, boot_weights, horizon, t1, t0);
-		draws.push_back(t1 - t0);
+		per_rep[rep] = t1 - t0;
+		rep_usable[rep] = 1;
+	});
+	vector<double> draws;
+	for (idx_t rep = 0; rep < reps; rep++) {
+		if (rep_usable[rep]) {
+			draws.push_back(per_rep[rep]);
+		}
 	}
 	double se = 0.0;
 	if (draws.size() >= 20) {

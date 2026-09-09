@@ -204,3 +204,61 @@ SELECT DISTINCT treated_label, control_label
 FROM do_frame_summary('mixed', treatment := 't', outcome := 'y', exclude := ['id']);
 ----
 1	0
+
+# --- results do not depend on the thread budget ---------------------------------
+#
+# Floating-point addition is not associative, so if the row-block split follows
+# the core count then so does the answer. It used to: the same query on the same
+# seed gave 3.0031935719077567 on one thread and 3.0031935719077549 on sixteen.
+# The block count is a function of the data now, and the blocks reduce in index
+# order, so this holds to the last bit rather than to a tolerance.
+
+statement ok
+SELECT setseed(0.21);
+
+statement ok
+CREATE TABLE threaded AS
+WITH u AS (SELECT i, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+  sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e, random() AS d FROM range(50000) r(i)),
+ p AS (SELECT *, 1.0/(1.0+exp(-0.9*x)) AS ps FROM u)
+SELECT i AS id, x, (d<ps)::INT AS t, 2.0+1.5*x+3.0*((d<ps)::INT)+e AS y FROM p;
+
+statement ok
+SET duckdo_threads = 1;
+
+statement ok
+CREATE TABLE one_thread AS
+SELECT estimate, std_error FROM do_ate('threaded', treatment := 't', outcome := 'y', covariates := ['x']);
+
+statement ok
+SET duckdo_threads = 8;
+
+# Bit-identical, not merely close: an equality test on a double is the point.
+query II
+SELECT a.estimate = o.estimate, a.std_error = o.std_error
+FROM do_ate('threaded', treatment := 't', outcome := 'y', covariates := ['x']) a, one_thread o;
+----
+true	true
+
+# The same holds through a bootstrap, where each replicate seeds from (seed, rep)
+# rather than from a stream whose order depends on scheduling.
+statement ok
+SET duckdo_threads = 1;
+
+statement ok
+CREATE TABLE one_thread_boot AS
+SELECT estimate, std_error FROM do_frontdoor('threaded', treatment := 't', outcome := 'y',
+                                             mediator := 'x', covariates := []);
+
+statement ok
+SET duckdo_threads = 8;
+
+query II
+SELECT abs(a.estimate - o.estimate) = 0, abs(a.std_error - o.std_error) = 0
+FROM do_frontdoor('threaded', treatment := 't', outcome := 'y', mediator := 'x',
+                  covariates := []) a, one_thread_boot o;
+----
+true	true
+
+statement ok
+RESET duckdo_threads;
