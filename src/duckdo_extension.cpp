@@ -6,6 +6,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdo/functions.hpp"
+#include "duckdo/runtime.hpp"
 
 namespace duckdb {
 
@@ -27,6 +28,14 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	config.AddExtensionOption("duckdo_max_groups",
 	                          "Maximum number of groups do_ate_by will estimate before refusing to run",
 	                          LogicalType::BIGINT, Value::BIGINT(1000));
+	config.AddExtensionOption("duckdo_model_dir",
+	                          "Directory holding exported causal foundation model graphs and weights "
+	                          "(default ~/.cache/duckdo)",
+	                          LogicalType::VARCHAR, Value(""));
+	config.AddExtensionOption("duckdo_threads", "Intra-op threads for model inference", LogicalType::BIGINT,
+	                          Value::BIGINT(4));
+	config.AddExtensionOption("duckdo_query_chunk",
+	                          "Rows scored per model forward pass", LogicalType::BIGINT, Value::BIGINT(512));
 	config.AddExtensionOption("duckdo_seed", "Seed for fold assignment, bootstrap and every other random draw",
 	                          LogicalType::BIGINT, Value::BIGINT(42));
 	config.AddExtensionOption("duckdo_bootstrap_reps",
@@ -42,6 +51,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	duckdo::RegisterInterventionFunctions(loader);
 	duckdo::RegisterDiagnosticFunctions(loader);
 	duckdo::RegisterGraphFunctions(loader);
+	duckdo::RegisterModelFunctions(loader);
 }
 
 void DuckdoExtension::Load(ExtensionLoader &loader) {

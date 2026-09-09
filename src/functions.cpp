@@ -3,6 +3,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdo/estimators.hpp"
 #include "duckdo/frame.hpp"
+#include "duckdo/runtime.hpp"
+
+#include <cmath>
 
 namespace duckdb {
 namespace duckdo {
@@ -64,13 +67,80 @@ void RequireOutcome(const CausalSpec &spec, const char *fn) {
 	}
 }
 
+//! Resolve model := against the catalog, with an actionable message on a typo.
+const ModelInfo &RequireModel(const CausalSpec &spec) {
+	auto model = FindModel(spec.model);
+	if (!model) {
+		throw BinderException("duckdo: unknown model '%s'. Available: %s. Run SELECT * FROM do_list_models() to see "
+		                      "which are ready to use",
+		                      spec.model, KnownModels());
+	}
+	return *model;
+}
+
+//! A foundation model returns per-row effects; the population effect is their
+//! mean. The interval is the dispersion of those effects, which understates the
+//! truth because it carries no model uncertainty - so it is labelled as such
+//! rather than dressed up as an influence-function interval.
+EffectResult CfmEffect(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
+                       Estimand estimand) {
+	const auto &model = RequireModel(spec);
+	auto cfm = CfmEstimateCate(context, frame, spec, model);
+
+	vector<idx_t> target;
+	for (idx_t i = 0; i < frame.n; i++) {
+		if (estimand == Estimand::ATE || (estimand == Estimand::ATT && frame.t[i] == 1.0) ||
+		    (estimand == Estimand::ATC && frame.t[i] == 0.0)) {
+			target.push_back(i);
+		}
+	}
+	EffectResult result;
+	result.estimator = model.id;
+	result.variance_method = "effect dispersion (no model uncertainty)";
+	double sum = 0.0;
+	for (auto i : target) {
+		sum += cfm.cate[i];
+	}
+	result.estimate = target.empty() ? 0.0 : sum / static_cast<double>(target.size());
+	double variance = 0.0;
+	for (auto i : target) {
+		const double d = cfm.cate[i] - result.estimate;
+		variance += d * d;
+	}
+	if (target.size() > 1) {
+		variance /= static_cast<double>(target.size() - 1);
+		result.std_error = std::sqrt(variance / static_cast<double>(target.size()));
+	}
+	result.warnings.push_back(StringUtil::Format(
+	    "%s ran with a %llu-row context (ladder rung %llu); the interval carries sampling spread only",
+	    model.id.c_str(), static_cast<unsigned long long>(cfm.context_used),
+	    static_cast<unsigned long long>(cfm.ladder_rung)));
+	if (model.attribution_required) {
+		result.warnings.push_back(model.id + " is " + model.license + "; attribution is required downstream");
+	}
+	for (auto &w : cfm.warnings) {
+		result.warnings.push_back(w);
+	}
+	return result;
+}
+
 //! Shared bind for do_ate / do_att / do_atc.
 unique_ptr<FunctionData> BindEffect(ClientContext &context, TableFunctionBindInput &input,
                                     vector<LogicalType> &return_types, vector<string> &names, Estimand estimand) {
 	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
 	RequireOutcome(spec, EstimandName(estimand));
 	auto frame = BuildFrame(context, spec);
-	auto result = EstimateEffect(frame, spec, estimand);
+	auto result = spec.model.empty() ? EstimateEffect(frame, spec, estimand)
+	                                 : CfmEffect(context, frame, spec, estimand);
+	if (!spec.model.empty()) {
+		result.estimand = estimand;
+		result.n = frame.n;
+		result.n_treated = frame.n_treated;
+		for (auto &w : frame.warnings) {
+			result.warnings.push_back(w);
+		}
+		result.Finalize();
+	}
 
 	names = {"estimand", "estimator", "estimate",  "std_error", "ci_low",          "ci_high",
 	         "p_value",  "n",         "n_treated", "n_trimmed", "variance_method", "warnings"};
@@ -109,7 +179,23 @@ unique_ptr<FunctionData> BindCate(ClientContext &context, TableFunctionBindInput
 	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
 	RequireOutcome(spec, "do_cate");
 	auto frame = BuildFrame(context, spec);
-	auto cate = EstimateCate(frame, spec);
+	CateResult cate;
+	if (spec.model.empty()) {
+		cate = EstimateCate(frame, spec);
+	} else {
+		const auto &model = RequireModel(spec);
+		auto cfm = CfmEstimateCate(context, frame, spec, model);
+		cate.cate = std::move(cfm.cate);
+		// The model returns point estimates; reporting a fabricated interval
+		// would be worse than reporting none.
+		cate.lo.assign(frame.n, 0.0);
+		cate.hi.assign(frame.n, 0.0);
+		for (idx_t i = 0; i < frame.n; i++) {
+			cate.lo[i] = cate.hi[i] = cate.cate[i];
+		}
+		cate.learner = model.id;
+		cate.interval_method = "none";
+	}
 
 	names = {"row_id", "id", "treatment", "outcome", "cate", "cate_low", "cate_high", "learner"};
 	return_types = {LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,

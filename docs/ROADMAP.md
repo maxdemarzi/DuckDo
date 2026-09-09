@@ -2,10 +2,12 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: Phases 0-4, 7, 8 and 9 are implemented, built and tested** (92 assertions passing
-> against a DuckDB v1.5.4 build, plus an EconML/DoWhy cross-check on IHDP). Phases 5-6 - the
-> foundation-model path - are still plan, and phase 7 currently runs on the classical backends
-> rather than on a CFM. Per-phase status is marked in the table in section 5.
+> **Progress: every phase through 9 is implemented, built and tested.** 107 assertions in the
+> dependency-free build and 120 with the foundation-model path enabled, against DuckDB v1.5.4, plus
+> an EconML/DoWhy cross-check on IHDP and a PyTorch parity gate on the exported ONNX graphs.
+> Do-PFN runs end to end inside DuckDB. Phase 10 remains future work, and several phase-6 refinements
+> (interval calibration, shrinkage correction, CausalPFN/CausalFM export) are outstanding — see
+> section 9.
 
 ---
 
@@ -227,8 +229,8 @@ src/
 | 2 | Classical estimators | 0.2.0 | yes | **DONE** — recovers a known ATE to 0.004, and agrees with EconML to within 0.08 on IHDP (`scripts/crosscheck_econml.py`) |
 | 3 | Diagnostics and refutation | 0.3.0 | yes | **DONE** — balance, overlap, diagnose, 5 refuters, E-value + robustness value |
 | 4 | Graphs and identification | 0.4.0 | yes | **DONE** — d-separation, backdoor/front-door/IV, covariate grading |
-| 5 | Inference runtime | 0.5.0 | yes (download opt-in) | ONNX parity with PyTorch reference to 1e-4 |
-| 6 | CFM estimators | 0.6.0 | opt-in | PEHE within 5% of the Python reference |
+| 5 | Inference runtime | 0.5.0 | yes (models opt-in) | **DONE** — ONNX Runtime linked behind a build flag, model catalog, session cache, and a parity gate the export refuses to pass below 1e-4 (measured 4.3e-06 to 8.1e-06) |
+| 6 | CFM estimators | 0.6.0 | opt-in | **DONE for Do-PFN** — `model := 'do_pfn'` runs in SQL; CATE correlates 0.98 with truth. Shrinkage on the ATE is reproduced and reported, not corrected. CausalPFN/CausalFM not exported |
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **PARTIAL** — `do_ate_by` segmented estimation landed; parallelism, spill and the 1M-row target are outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
@@ -236,10 +238,24 @@ src/
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
 
-**What actually happened:** phase 7 turned out not to need the foundation models at all. Every
-function in it — interventional prediction, counterfactuals, policy value, uplift, policy trees —
-runs on the phase-2 nuisance models. Phase 6 will add a second engine behind the same SQL rather
-than a new set of functions, which is a better outcome than the plan assumed.
+**What actually happened, versus the plan:**
+
+- **Phase 7 did not need the foundation models at all.** Interventional prediction, counterfactuals,
+  policy value, uplift and policy trees all run on the phase-2 nuisance models. Phase 6 added a
+  second engine behind the same SQL rather than a new set of functions — a better outcome than the
+  plan assumed, and it meant phase 7 could ship before phases 5-6.
+- **The ONNX export was the risk the plan said it was, and it bit in a specific way.** Do-PFN's
+  context/query split is a Python int the torchscript tracer bakes in as a constant, so a graph
+  traced at one context length silently returns the wrong rows at another — wrong numbers, not a
+  shape error. The dynamo exporter would carry it symbolically but cannot get past the model's
+  data-dependent `ModuleList` indexing. The resolution was a *ladder* of graphs at fixed context
+  lengths with the query axis dynamic, which costs nothing real because the model caps at 2200 rows
+  and DuckDo has to subsample context anyway.
+- **Starting with Do-PFN was the right call.** At 7.3M parameters it exported in one afternoon of
+  iteration; the two obstacles (an unsupported `aten::nansum`, a data-dependent debug assert) were
+  both small and both fixable without changing model semantics.
+- **The foundation model lost to AIPW on the ATE and won on ranking.** That is reported in the
+  README rather than buried, which is what design principle 5 requires.
 
 ---
 
@@ -647,14 +663,25 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 
 Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in order:
 
-1. **Phase 5**: bring in ONNX Runtime and export Do-PFN (7.3M params) as the first model. This is
-   now the only thing standing between the current build and the project's headline feature.
-2. **Fix `do_cate` interval coverage** — measured ~0.90 against a nominal 0.95, because the
+1. **Correct or calibrate Do-PFN's shrinkage.** Measured on a heterogeneous DGP: true ATE 2.915,
+   `aipw` 2.912, `do_pfn` 2.493 — while per-row CATE correlates 0.984 with truth. The model ranks
+   well and averages badly, exactly as the CFM literature reports. Today DuckDo reports this rather
+   than correcting it; a calibration layer fitted on held-out synthetic DGPs is the next step.
+2. **Give the CFM path an interval.** It currently returns point estimates, and `do_ate` labels its
+   variance method `effect dispersion (no model uncertainty)` so nobody mistakes it for one.
+3. **Export CausalPFN and CausalFM.** Do-PFN proved the pipeline; CausalPFN is Apache-2.0 and
+   targets the backdoor setting directly, which suits `do_ate` better than a non-identifiable prior.
+4. **Lift the six-feature ceiling.** Do-PFN accepts five covariates; DuckDo picks the five most
+   outcome-correlated. Ensembling over feature subsets would use the rest.
+5. **Statically link ONNX Runtime** so the community build can ship the model path at all.
+6. **Fix `do_cate` interval coverage** — measured ~0.90 against a nominal 0.95, because the
    pseudo-outcome regression does not propagate nuisance-model uncertainty.
-3. **Finish Phase 8**: parallelise cross-fitting folds and bootstrap replicates through DuckDB's
+7. **Finish Phase 8**: parallelise cross-fitting folds and bootstrap replicates through DuckDB's
    task scheduler, add a chunked scan path to lift `duckdo_max_rows` above 100k, and spill past
    `duckdo_max_memory`.
-4. **Persist graphs** somewhere better than a process-global registry (open question 3).
-5. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
+8. **Persist graphs** somewhere better than a process-global registry (open question 3).
+9. **Broaden the cross-check** to IHDP's full 1000 replications, Jobs/Lalonde and an ACIC subset —
    the current gate covers one IHDP replication plus two synthetic scenarios.
-6. **Submit** the `description.yml` PR to `duckdb/community-extensions`.
+10. **Host the exported graphs** so `do_download` can fetch them, rather than requiring every user to
+    run the export script.
+11. **Submit** the `description.yml` PR to `duckdb/community-extensions`.

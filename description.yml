@@ -156,6 +156,25 @@ docs:
     intervals run slightly narrow (~0.90 coverage against a nominal 0.95).
     Graphs live in process memory and do not survive a restart.
 
+    ### Causal foundation models
+
+    `model := 'do_pfn'` runs [Do-PFN](https://github.com/jr2021/Do-PFN) - a 7.3M
+    parameter transformer pretrained on synthetic structural causal models -
+    inside DuckDB on ONNX Runtime, behind the same SQL as the classical
+    estimators.
+
+    That path is **opt-in at build time** (`-DDUCKDO_ONNXRUNTIME_ROOT`), which is
+    why this community build does not carry it: keeping the default build
+    dependency-free is what lets the example above run with no download at all.
+    The extension never ships or redistributes weights - you export the graphs
+    yourself from the upstream checkpoint with `scripts/export/export_dopfn.py`,
+    which refuses to finish unless every graph reproduces PyTorch to within 1e-4.
+
+    On the benchmarks above, Do-PFN correlates 0.98 with the true per-row effect
+    but shrinks the population average (2.49 against a truth of 2.92, where AIPW
+    returns 2.91). That is the documented weakness of this model class,
+    reproduced rather than hidden: it is the better tool for deciding *who* to
+    treat and the worse one for valuing the programme.
+
     Every function is registered twice: the short `do_*` name and the
-    unambiguous `duckdo_*` full name. Causal foundation models (CausalPFN,
-    Do-PFN, CausalFM) are the next milestone; see `docs/ROADMAP.md`.
+    unambiguous `duckdo_*` full name.

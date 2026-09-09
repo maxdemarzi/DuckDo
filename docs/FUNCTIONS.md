@@ -238,6 +238,65 @@ column's own units, not the standardised space the model works in.
 
 ---
 
+## Causal foundation models
+
+Opt-in at build time (`-DDUCKDO_ONNXRUNTIME_ROOT=<onnxruntime release>`); without it every entry
+point below still exists and says specifically that the build lacks ONNX Runtime, rather than
+falling back to a classical estimator while still claiming to be the model.
+
+### `do_list_models()` / `do_models()`
+
+`model, setting, license, commercial, attribution_required, max_features, context_ladder,
+available, detail`. `detail` says why a model is unavailable and what to do about it.
+
+| model | setting | licence | inputs | context ladder |
+|---|---|---|---|---|
+| `do_pfn` | non-identifiable prior | CC BY 4.0 (attribution required) | 6 (treatment + 5 covariates) | 128 / 512 / 1024 / 2048 |
+
+### `do_devices()`
+
+`device, available`. Reports `cpu` when the build has ONNX Runtime; CUDA/ROCm/MLX are listed as
+unavailable placeholders.
+
+### Using a model
+
+Pass `model :=` to `do_ate`, `do_att`, `do_atc` or `do_cate`. It replaces `estimator :=` — the SQL
+and the returned columns are otherwise identical.
+
+```sql
+SET duckdo_model_dir = '~/.cache/duckdo';
+SELECT estimator, estimate, variance_method
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model := 'do_pfn');
+```
+
+What the runtime does, and reports in `warnings`:
+
+- **Feature budget.** Do-PFN takes six columns and the first is the treatment, so the five
+  covariates most correlated with the outcome are kept and the rest named as dropped.
+- **Context selection.** The largest ladder rung below the row count is chosen, and the context is
+  sampled down to it — seeded, and stratified to preserve the treatment proportions.
+- **Outcome scaling.** The model's bar distribution lives in standardised outcome space, so the
+  context outcome is standardised and the resulting effect scaled back.
+- **The intervention.** Query rows are run twice with column 0 forced to 1 and to 0. That is
+  `do(T = t)` for every row, not a filter on rows where `T` happened to equal `t`.
+
+`do_ate` with a model reports `variance_method = 'effect dispersion (no model uncertainty)'`, and
+`do_cate` returns `cate_low = cate_high = cate`. Neither is a calibrated interval, and both say so.
+
+### Exporting the graphs
+
+The extension ships no weights. Produce them yourself:
+
+```sh
+git clone https://github.com/jr2021/Do-PFN
+python scripts/export/export_dopfn.py --repo ./Do-PFN --out ~/.cache/duckdo
+```
+
+This writes four weight-free graphs plus one shared weight blob and a manifest, and fails unless
+every graph reproduces PyTorch to within 1e-4 at two different query lengths.
+
+---
+
 ## Settings
 
 | Setting | Default | Meaning |
@@ -249,6 +308,9 @@ column's own units, not the standardised space the model works in.
 | `duckdo_max_groups` | 1000 | Cap on `do_ate_by` groups |
 | `duckdo_seed` | 42 | Global seed |
 | `duckdo_bootstrap_reps` | 200 | Bootstrap replicates |
+| `duckdo_model_dir` | `~/.cache/duckdo` | Where exported model graphs and weights live |
+| `duckdo_threads` | 4 | Intra-op threads for model inference |
+| `duckdo_query_chunk` | 512 | Rows scored per model forward pass |
 
 Every guardrail names the setting to raise when it trips, rather than silently
 truncating.

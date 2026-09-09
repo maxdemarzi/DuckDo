@@ -1,0 +1,70 @@
+# name: test/sql/models.test
+# description: the causal foundation model catalog and its guard rails
+# group: [duckdo]
+#
+# These assertions hold whether or not the build has ONNX Runtime, and whether
+# or not any model artifacts are on disk. Actual inference is exercised by
+# cfm.test, which is skipped unless DUCKDO_MODEL_DIR points at exported graphs.
+
+require duckdo
+
+# The catalog is static and always visible: you can find out what exists, and
+# under what licence, before downloading or building anything.
+query I
+SELECT count(*) >= 1 FROM do_list_models();
+----
+true
+
+query IIII
+SELECT model, license, attribution_required, max_features FROM do_list_models() WHERE model = 'do_pfn';
+----
+do_pfn	CC BY 4.0	true	6
+
+# The licence obligation is surfaced, not buried.
+query I
+SELECT detail LIKE '%attribution%' FROM do_list_models() WHERE model = 'do_pfn';
+----
+true
+
+query I
+SELECT context_ladder FROM do_list_models() WHERE model = 'do_pfn';
+----
+[128, 512, 1024, 2048]
+
+# do_models is an alias for the same thing.
+query I
+SELECT count(*) = (SELECT count(*) FROM do_list_models()) FROM do_models();
+----
+true
+
+query I
+SELECT count(*) >= 1 FROM do_devices();
+----
+true
+
+statement ok
+CREATE TABLE tiny AS SELECT i AS id, (i % 2) AS t, i * 1.0 AS y, (i % 7) * 1.0 AS x FROM range(400) r(i);
+
+# An unknown model names the ones that exist rather than failing opaquely.
+statement error
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x'], model := 'not_a_model');
+----
+unknown model
+
+statement error
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x'], model := 'causalpfn');
+----
+Available: do_pfn
+
+# Pointing at an empty directory must fail loudly, never fall back to a
+# classical estimator while still claiming to be the model.
+statement ok
+SET duckdo_model_dir = '/duckdo_definitely_not_a_real_directory';
+
+statement error
+SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x'], model := 'do_pfn');
+----
+do_pfn
+
+statement ok
+RESET duckdo_model_dir;

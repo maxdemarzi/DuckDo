@@ -16,11 +16,11 @@ FROM do_ate('customers',
 -- ATE | aipw | 12.84 | 8.59 | 17.09
 ```
 
-> **Status: 0.8 (Phases 0-4, 7, 8 and 9 of the [roadmap](docs/ROADMAP.md)).** Estimators,
-> diagnostics, graph identification, the `do()` surface and segmented estimation all work, are
-> tested, and are cross-checked against EconML and DoWhy. **Causal foundation models (CausalPFN,
-> Do-PFN, CausalFM) are not wired up yet** - that is Phases 5-6. Passing `model := 'causalpfn'`
-> today returns an error saying so.
+> **Status: every roadmap phase through 9 is implemented.** Estimators, diagnostics, graph
+> identification, the `do()` surface and segmented estimation are cross-checked against EconML and
+> DoWhy. **Causal foundation models run too**: Do-PFN executes inside DuckDB on ONNX Runtime. That
+> path is opt-in at build time (`-DDUCKDO_ONNXRUNTIME_ROOT`) so the default build keeps zero
+> dependencies and needs no downloads.
 
 Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
 
@@ -84,6 +84,40 @@ SELECT do_dseparated('sales_dag', 'season', 'loyalty', ['revenue']);  -- false: 
 
 Also `do_graphs()`, `do_graph_drop()`.
 
+### Causal foundation models
+
+```sql
+SELECT * FROM do_list_models();
+-- do_pfn | non-identifiable prior | CC BY 4.0 | ready in ~/.cache/duckdo; attribution required
+
+-- Same SQL, different engine. The result names the model, not a classical estimator.
+SELECT estimator, estimate, variance_method
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model := 'do_pfn');
+-- do_pfn | 3.183 | effect dispersion (no model uncertainty)
+```
+
+[Do-PFN](https://github.com/jr2021/Do-PFN) is a 7.3M-parameter transformer pretrained on synthetic
+structural causal models. It reads your labelled rows as context and returns the interventional
+outcome distribution under `do(T=1)` and `do(T=0)` — one forward pass each.
+
+Getting it running takes three steps, and the extension never ships or redistributes weights:
+
+```sh
+# 1. build with ONNX Runtime (download a release from onnxruntime.ai)
+cmake -DDUCKDO_ONNXRUNTIME_ROOT=/path/to/onnxruntime-1.29.0 ...
+
+# 2. export the graphs yourself, from the upstream checkpoint
+git clone https://github.com/jr2021/Do-PFN
+python scripts/export/export_dopfn.py --repo ./Do-PFN --out ~/.cache/duckdo
+
+# 3. point DuckDo at them
+SET duckdo_model_dir = '~/.cache/duckdo';
+```
+
+The export writes four weight-free graphs (1.3 MB each, traced at context lengths 128/512/1024/2048)
+plus one shared 33 MB weight blob, and refuses to finish unless every graph reproduces PyTorch to
+within 1e-4. Measured: **4.3e-06 to 8.1e-06**.
+
 ### Interventions - querying a world that did not happen
 
 ```sql
@@ -135,6 +169,24 @@ implementations on identical rows, including the standard IHDP replication:
 Reproduce with `test/sql/estimators.test` and `python scripts/crosscheck_econml.py`
 (the latter needs `econml` and `dowhy`; it is a dev tool, not shipped).
 
+### And does the foundation model beat them?
+
+Not on these data, and the honest answer is worth more than a flattering one:
+
+| DGP (1500 rows) | true ATE | `aipw` | `do_pfn` | `do_pfn` CATE correlation |
+|---|---|---|---|---|
+| linear, confounded | 3.000 | **3.069** | 3.183 | — |
+| heterogeneous `3 + 2·x1` | 2.915 | **2.912** | 2.493 | **0.984** |
+
+Do-PFN **shrinks the population effect** — the documented weakness of this model class, reproduced
+here rather than hidden — while ranking individuals extremely well (0.98 correlation with the true
+per-row effect). So it is the better tool for *who to treat* and the worse one for *how much the
+programme is worth*, on data like this. AIPW, which is correctly specified for a linear DGP, wins on
+the average. Use `estimator := 'aipw'` for the ATE and `model := 'do_pfn'` for targeting, and read
+`do_sensitivity` before believing either.
+
+Inference cost: ~7 s for 1500 rows against a 1024-row context, single CPU.
+
 ## Settings
 
 `duckdo_default_estimator`, `duckdo_max_rows` (100k), `duckdo_max_features` (500),
@@ -154,7 +206,13 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 - **Graphs live in process memory**, not the DuckDB catalog, so they do not survive a restart.
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
   not visible to an estimation call.
-- **No foundation models yet.** See Phases 5-6 of the [roadmap](docs/ROADMAP.md).
+- **Foundation models are opt-in and constrained.** Do-PFN accepts **6 input columns total** — the
+  treatment plus five covariates — so DuckDo keeps the five most outcome-correlated and says which
+  in `warnings`. Its context length is fixed per exported graph (see the ladder), it returns point
+  estimates with no interval, and it shrinks population effects. `model := 'causalpfn'` and
+  `'causalfm'` are not exported yet.
+- **ONNX Runtime links dynamically.** The community build ships without it; a build that enables it
+  needs `onnxruntime.dll`/`.so` alongside the binary. Static linking is not done.
 
 ## Testing
 
@@ -162,8 +220,14 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 ./build/release/test/unittest "test/*"
 ```
 
-92 assertions across estimator recovery, diagnostics, error paths, graph identification and the
-`do()` surface.
+```sh
+# with foundation models as well
+DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
+```
+
+107 assertions in the dependency-free build, 120 with the foundation-model path enabled, across
+estimator recovery, diagnostics, error paths, graph identification, the `do()` surface and
+end-to-end Do-PFN inference.
 
 ## Submitting to community extensions
 

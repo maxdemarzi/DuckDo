@@ -1,0 +1,100 @@
+# name: test/sql/cfm.test
+# description: end-to-end causal foundation model inference (Do-PFN over ONNX)
+# group: [duckdo]
+#
+# Skipped unless DUCKDO_MODEL_DIR points at a directory holding exported graphs:
+#   python scripts/export/export_dopfn.py --repo <Do-PFN checkout> --out build/models
+#   DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
+# It also needs a build configured with -DDUCKDO_ONNXRUNTIME_ROOT.
+
+require duckdo
+
+require-env DUCKDO_MODEL_DIR
+
+statement ok
+SET duckdo_model_dir = '${DUCKDO_MODEL_DIR}';
+
+statement ok
+SET duckdo_query_chunk = 256;
+
+statement ok
+SELECT setseed(0.42);
+
+# Confounded DGP, true ATE exactly 3.0, effect heterogeneous in x1.
+statement ok
+CREATE TABLE customers AS
+WITH u AS (
+  SELECT i,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise,
+         random() AS draw
+  FROM range(1500) t(i)
+), p AS (SELECT *, 1.0/(1.0+exp(-(0.9*x1 - 0.6*x2))) AS ps FROM u)
+SELECT i AS customer_id, x1, x2,
+       (draw < ps)::INTEGER AS discount,
+       2.0 + 1.5*x1 + 0.7*x2 + 3.0*((draw < ps)::INTEGER) + noise AS revenue
+FROM p;
+
+query I
+SELECT available FROM do_list_models() WHERE model = 'do_pfn';
+----
+true
+
+# The model recovers the effect. The tolerance is wider than the classical
+# estimators' because Do-PFN shrinks population effects - a documented property
+# of this model class, not a bug in the plumbing.
+query I
+SELECT abs(estimate - 3.0) < 0.6
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'do_pfn');
+----
+true
+
+# The result names the model, not a classical estimator, and is honest about
+# what its interval does and does not cover.
+query II
+SELECT estimator, variance_method FROM do_ate('customers', treatment := 'discount',
+       outcome := 'revenue', exclude := ['customer_id'], model := 'do_pfn');
+----
+do_pfn	effect dispersion (no model uncertainty)
+
+# The CC BY 4.0 attribution obligation travels with the result.
+query I
+SELECT list_contains(warnings, 'do_pfn is CC BY 4.0; attribution is required downstream')
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'do_pfn');
+----
+true
+
+# One row per input row, and the learner column reports the model.
+query II
+SELECT count(*), any_value(learner)
+FROM do_cate('customers', treatment := 'discount', outcome := 'revenue',
+             exclude := ['customer_id'], model := 'do_pfn');
+----
+1500	do_pfn
+
+# Ranking is the model's strength: per-row effects track the truth closely even
+# where the population average is shrunk.
+statement ok
+CREATE TABLE het AS
+WITH u AS (
+  SELECT i,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise,
+         random() AS draw
+  FROM range(1500) t(i)
+), p AS (SELECT *, 1.0/(1.0+exp(-(0.8*x1 - 0.5*x2))) AS ps FROM u)
+SELECT i AS id, x1, x2, (draw < ps)::INTEGER AS t,
+       2.0 + 1.5*x1 + 0.7*x2 + (3.0 + 2.0*x1)*((draw < ps)::INTEGER) + noise AS y
+FROM p;
+
+query I
+SELECT corr(c.cate, 3.0 + 2.0*h.x1) > 0.9
+FROM do_cate('het', treatment := 't', outcome := 'y', exclude := ['id'], id := 'id',
+             model := 'do_pfn') c
+JOIN het h ON h.id = c.id::BIGINT;
+----
+true

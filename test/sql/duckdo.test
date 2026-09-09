@@ -41,11 +41,12 @@ SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', covariates := ['x
 ----
 unknown estimator
 
-# Foundation models are not here yet, and the error says exactly that.
+# The model surface has moved to models.test; here we only confirm that an
+# unknown model id is rejected rather than silently ignored.
 statement error
 SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', model := 'causalpfn');
 ----
-0.6 release
+unknown model
 
 # A non-binary treatment is refused rather than silently binarised.
 statement error

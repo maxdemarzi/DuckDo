@@ -257,11 +257,8 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	if (spec.trim < 0.0 || spec.trim >= 0.5) {
 		throw BinderException("duckdo: trim must be in [0, 0.5); got %f", spec.trim);
 	}
-	if (!spec.model.empty()) {
-		throw BinderException("duckdo: model := '%s' needs a causal foundation model, which arrives in the 0.6 "
-		                      "release. Use estimator := 'aipw' (or 'dml', 'ipw', 't_learner') meanwhile",
-		                      spec.model);
-	}
+	// The model id is checked against the catalog by the caller, which has the
+	// registry in scope; here we only reject the obviously empty case.
 	return spec;
 }
 

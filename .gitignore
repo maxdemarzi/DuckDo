@@ -7,3 +7,6 @@ testext
 test/python/__pycache__/
 .Rhistory
 scripts/crosscheck_results.json
+build/models/
+*.onnx
+*.weights.bin
