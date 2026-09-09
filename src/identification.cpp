@@ -207,22 +207,21 @@ unique_ptr<FunctionData> BindIv(ClientContext &context, TableFunctionBindInput &
 		                   "treatment effect among compliers, not the population ATE");
 	}
 
-	names = {"estimand", "estimator", "estimate",       "std_error", "ci_low", "ci_high",
-	         "p_value",  "n",         "first_stage_f",  "instrument", "weak_instrument", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::BIGINT,
-	                LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::BOOLEAN,
-	                LogicalType::LIST(LogicalType::VARCHAR)};
+	names = {"estimand", "estimator", "estimate",      "std_error",  "ci_low",          "ci_high",
+	         "p_value",  "n",         "first_stage_f", "instrument", "weak_instrument", "warnings"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::BIGINT,  LogicalType::DOUBLE,
+	                LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::LIST(LogicalType::VARCHAR)};
 	vector<Value> warning_values;
 	for (auto &w : warnings) {
 		warning_values.push_back(Value(w));
 	}
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.push_back({Value("LATE"), Value(result.estimator), Value::DOUBLE(result.estimate),
-	                      Value::DOUBLE(result.std_error), Value::DOUBLE(result.ci_low),
-	                      Value::DOUBLE(result.ci_high), Value::DOUBLE(result.p_value),
-	                      Value::BIGINT(static_cast<int64_t>(result.n)), Value::DOUBLE(first_stage_f),
-	                      Value(spec.aux_column), Value::BOOLEAN(first_stage_f < 10.0),
+	                      Value::DOUBLE(result.std_error), Value::DOUBLE(result.ci_low), Value::DOUBLE(result.ci_high),
+	                      Value::DOUBLE(result.p_value), Value::BIGINT(static_cast<int64_t>(result.n)),
+	                      Value::DOUBLE(first_stage_f), Value(spec.aux_column), Value::BOOLEAN(first_stage_f < 10.0),
 	                      Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
 	return std::move(bind);
 }
@@ -293,8 +292,8 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 			estimable = false;
 			break;
 		}
-		const double share = (arm == 1.0 ? static_cast<double>(n1) : static_cast<double>(n0)) /
-		                     static_cast<double>(frame.n);
+		const double share =
+		    (arm == 1.0 ? static_cast<double>(n1) : static_cast<double>(n0)) / static_cast<double>(frame.n);
 		b += share * (y_m1 / static_cast<double>(c1) - y_m0 / static_cast<double>(c0));
 	}
 	if (!estimable) {
@@ -337,8 +336,7 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 		double bb = 0.0;
 		for (int arm = 0; arm < 2; arm++) {
 			const double share = static_cast<double>(arm == 1 ? bn1 : bn0) / static_cast<double>(frame.n);
-			bb += share * (by[arm][1] / static_cast<double>(bc[arm][1]) -
-			               by[arm][0] / static_cast<double>(bc[arm][0]));
+			bb += share * (by[arm][1] / static_cast<double>(bc[arm][1]) - by[arm][0] / static_cast<double>(bc[arm][0]));
 		}
 		draws.push_back(ba * bb);
 	}
@@ -357,11 +355,19 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 	                   "checkable from data. Verify them with do_identify() against a graph");
 	warnings.push_back("covariates are not used: this is the unconditional front-door formula");
 
-	names = {"estimand", "estimator",       "estimate",   "std_error", "ci_low", "ci_high",
-	         "n",        "effect_t_on_m",   "effect_m_on_y", "mediator", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BIGINT, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR)};
+	names = {"estimand", "estimator",     "estimate",      "std_error", "ci_low",  "ci_high",
+	         "n",        "effect_t_on_m", "effect_m_on_y", "mediator",  "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::VARCHAR,
+	                LogicalType::LIST(LogicalType::VARCHAR)};
 	vector<Value> warning_values;
 	for (auto &w : warnings) {
 		warning_values.push_back(Value(w));

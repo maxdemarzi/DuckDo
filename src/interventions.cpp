@@ -65,11 +65,10 @@ unique_ptr<FunctionData> BindCounterfactual(ClientContext &context, TableFunctio
 	auto fit = FitNuisance(frame, spec, spec.seed);
 	auto cate = EstimateCate(frame, spec);
 
-	names = {"row_id", "id",     "treatment", "observed", "y0",
-	         "y1",     "effect", "effect_low", "effect_high"};
-	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE, LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE};
+	names = {"row_id", "id", "treatment", "observed", "y0", "y1", "effect", "effect_low", "effect_high"};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE, LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	                LogicalType::DOUBLE, LogicalType::DOUBLE,  LogicalType::DOUBLE};
 
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.reserve(frame.n);
@@ -301,9 +300,8 @@ unique_ptr<FunctionData> BindPolicyValue(ClientContext &context, TableFunctionBi
 	}
 	const double se = std::sqrt(variance / (n * (n - 1.0)));
 
-	names = {"policy",     "n_targeted",       "share_targeted",     "policy_value", "std_error",
-	         "ci_low",     "ci_high",          "value_treat_all",    "value_treat_none",
-	         "lift_over_treat_all"};
+	names = {"policy", "n_targeted", "share_targeted",  "policy_value",     "std_error",
+	         "ci_low", "ci_high",    "value_treat_all", "value_treat_none", "lift_over_treat_all"};
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE,
 	                LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE,
 	                LogicalType::DOUBLE,  LogicalType::DOUBLE};
@@ -334,8 +332,7 @@ unique_ptr<FunctionData> BindUplift(ClientContext &context, TableFunctionBindInp
 	for (idx_t i = 0; i < frame.n; i++) {
 		order[i] = i;
 	}
-	std::stable_sort(order.begin(), order.end(),
-	                 [&](idx_t a, idx_t b) { return cate.cate[a] > cate.cate[b]; });
+	std::stable_sort(order.begin(), order.end(), [&](idx_t a, idx_t b) { return cate.cate[a] > cate.cate[b]; });
 
 	double total = 0.0;
 	for (auto v : psi) {

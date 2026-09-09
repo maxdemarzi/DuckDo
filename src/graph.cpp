@@ -126,7 +126,7 @@ Dag ParseDot(const string &text) {
 	bool have_pending = false;
 	while (i < tokens.size()) {
 		const string &tok = tokens[i];
-		if (tok == "}" ) {
+		if (tok == "}") {
 			break;
 		}
 		if (tok == ";" || tok == ",") {
@@ -450,7 +450,6 @@ struct GraphRegistry {
 	}
 };
 
-
 //! Run a statement on a fresh connection against the captured database.
 unique_ptr<MaterializedQueryResult> GraphQuery(const string &sql, const string &what) {
 	auto &registry = GraphRegistry::Get();
@@ -460,15 +459,13 @@ unique_ptr<MaterializedQueryResult> GraphQuery(const string &sql, const string &
 	Connection con(*registry.database);
 	auto result = con.Query(sql);
 	if (!result || result->HasError()) {
-		throw BinderException("duckdo: failed while %s: %s", what,
-		                      result ? result->GetError() : string("no result"));
+		throw BinderException("duckdo: failed while %s: %s", what, result ? result->GetError() : string("no result"));
 	}
 	return result;
 }
 
 void EnsureGraphTable() {
-	GraphQuery(string("CREATE TABLE IF NOT EXISTS ") + GRAPH_TABLE +
-	               " (name VARCHAR PRIMARY KEY, definition VARCHAR)",
+	GraphQuery(string("CREATE TABLE IF NOT EXISTS ") + GRAPH_TABLE + " (name VARCHAR PRIMARY KEY, definition VARCHAR)",
 	           "creating the graph store");
 }
 
@@ -638,8 +635,8 @@ unique_ptr<FunctionData> BindGraphs(ClientContext &, TableFunctionBindInput &, v
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 	auto bind = make_uniq<ResultBindData>();
 	EnsureGraphTable();
-	auto stored = GraphQuery(string("SELECT name, definition FROM ") + GRAPH_TABLE + " ORDER BY name",
-	                         "listing graphs");
+	auto stored =
+	    GraphQuery(string("SELECT name, definition FROM ") + GRAPH_TABLE + " ORDER BY name", "listing graphs");
 	for (idx_t r = 0; r < stored->RowCount(); r++) {
 		const string key = stored->GetValue(0, r).ToString();
 		Dag dag;
@@ -669,8 +666,8 @@ string RequireNamed(const named_parameter_map_t &named, const char *key, const c
 	return entry->second.ToString();
 }
 
-unique_ptr<FunctionData> BindIdentify(ClientContext &, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+unique_ptr<FunctionData> BindIdentify(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
+                                      vector<string> &names) {
 	const auto dag = LookupGraph(RequireNamed(input.named_parameters, "graph", "do_identify"));
 	const idx_t t = RequireNode(dag, RequireNamed(input.named_parameters, "treatment", "do_identify"), "treatment");
 	const idx_t y = RequireNode(dag, RequireNamed(input.named_parameters, "outcome", "do_identify"), "outcome");
@@ -696,11 +693,12 @@ unique_ptr<FunctionData> BindIdentify(ClientContext &, TableFunctionBindInput &i
 				break;
 			}
 		}
-		bind->rows.push_back(
-		    {Value("backdoor"), Value::BOOLEAN(false), Value::LIST(LogicalType::VARCHAR, vector<Value>()),
-		     Value(culprit.empty() ? string("no observed set closes every backdoor path")
-		                           : "'" + culprit + "' is an unobserved common cause of the treatment and the "
-		                                             "outcome, leaving a backdoor path open")});
+		bind->rows.push_back({Value("backdoor"), Value::BOOLEAN(false),
+		                      Value::LIST(LogicalType::VARCHAR, vector<Value>()),
+		                      Value(culprit.empty() ? string("no observed set closes every backdoor path")
+		                                            : "'" + culprit +
+		                                                  "' is an unobserved common cause of the treatment and the "
+		                                                  "outcome, leaving a backdoor path open")});
 	}
 
 	std::set<idx_t> frontdoor;
@@ -720,8 +718,8 @@ unique_ptr<FunctionData> BindIdentify(ClientContext &, TableFunctionBindInput &i
 	return std::move(bind);
 }
 
-unique_ptr<FunctionData> BindValidate(ClientContext &, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+unique_ptr<FunctionData> BindValidate(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
+                                      vector<string> &names) {
 	const auto dag = LookupGraph(RequireNamed(input.named_parameters, "graph", "do_validate"));
 	const idx_t t = RequireNode(dag, RequireNamed(input.named_parameters, "treatment", "do_validate"), "treatment");
 	const idx_t y = RequireNode(dag, RequireNamed(input.named_parameters, "outcome", "do_validate"), "outcome");

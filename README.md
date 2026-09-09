@@ -389,16 +389,24 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-116 assertions in the dependency-free build, 135 with the foundation-model path enabled, across
-estimator recovery, diagnostics, error paths, graph identification, the `do()` surface and
-end-to-end inference for both models.
+203 assertions in the dependency-free build, 228 with the foundation-model path enabled, across
+estimator recovery, diagnostics, error paths, guardrails, graph identification, the `do()` surface
+and end-to-end inference for both models.
 
-Two further dev-only harnesses, neither shipped:
+Three further dev-only harnesses, none shipped:
 
 ```sh
 python scripts/crosscheck_econml.py    # grades the estimators against EconML and DoWhy on IHDP
 python scripts/coverage_check.py       # measures do_cate's empirical interval coverage
+python scripts/benchmark.py            # seconds and peak memory, with a gate on both
 ```
+
+CI also runs DuckDB's `format` and `tidy` checks. Note that `.clang-format` and `.clang-tidy` in
+this repo are symlinks into `duckdb/`; git checks them out as plain text files on Windows, where
+`clang-format --style=file` then silently reads the *path* as if it were the config and reports
+every file as needing reformatting. Point it at `duckdb/.clang-format` directly there. The pinned
+version is `clang_format==11.0.1` — later versions disagree about line breaks and will produce a
+diff CI rejects.
 
 ## Submitting to community extensions
 

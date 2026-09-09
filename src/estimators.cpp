@@ -23,8 +23,8 @@ void EffectResult::Finalize() {
 	}
 }
 
-static const char *kEstimators[] = {"naive", "regression", "ipw",       "aipw",     "dml",
-                                    "s_learner", "t_learner", "x_learner", "dr_learner"};
+static const char *kEstimators[] = {"naive",     "regression", "ipw",       "aipw",      "dml",
+                                    "s_learner", "t_learner",  "x_learner", "dr_learner"};
 
 bool IsKnownEstimator(const string &name) {
 	for (auto candidate : kEstimators) {
@@ -502,8 +502,8 @@ double BootstrapSe(const CausalFrame &frame, const CausalSpec &spec, Estimand es
 	return std::sqrt(var / static_cast<double>(draws.size() - 1));
 }
 
-EffectResult GComputation(const CausalFrame &frame, const CausalSpec &spec, const NuisanceFit &fit,
-                          Estimand estimand, const string &name) {
+EffectResult GComputation(const CausalFrame &frame, const CausalSpec &spec, const NuisanceFit &fit, Estimand estimand,
+                          const string &name) {
 	EffectResult res;
 	res.estimator = name;
 	res.variance_method = "bootstrap";
@@ -561,7 +561,8 @@ EffectResult EstimateEffect(const CausalFrame &frame, const CausalSpec &spec, Es
 		}
 		res.n_trimmed = fit.n_trimmed;
 		if (fit.n_trimmed > 0) {
-			res.warnings.push_back(std::to_string(fit.n_trimmed) + " rows were trimmed for extreme propensity (trim = " +
+			res.warnings.push_back(std::to_string(fit.n_trimmed) +
+			                       " rows were trimmed for extreme propensity (trim = " +
 			                       StringUtil::Format("%g", spec.trim) + "); run do_overlap to see the support");
 		}
 	}

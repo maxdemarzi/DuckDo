@@ -109,11 +109,11 @@ Panel LoadPanel(ClientContext &context, const string &relation, const string &un
 	// Periods are ordered by their natural type, which the projection has cast to
 	// text; re-derive the order from a numeric read where possible so that 2 does
 	// not sort after 10.
-	auto order_probe = RunQuery(context,
-	                            "SELECT DISTINCT CAST(" + QuoteIdentifier(period_col) + " AS VARCHAR) AS p FROM " + rel +
-	                                " WHERE " + QuoteIdentifier(period_col) + " IS NOT NULL ORDER BY " +
-	                                QuoteIdentifier(period_col),
-	                            string(fn) + " ordering the periods of " + relation);
+	auto order_probe =
+	    RunQuery(context,
+	             "SELECT DISTINCT CAST(" + QuoteIdentifier(period_col) + " AS VARCHAR) AS p FROM " + rel + " WHERE " +
+	                 QuoteIdentifier(period_col) + " IS NOT NULL ORDER BY " + QuoteIdentifier(period_col),
+	             string(fn) + " ordering the periods of " + relation);
 
 	Panel panel;
 	std::map<string, idx_t> period_index;
@@ -439,27 +439,26 @@ unique_ptr<FunctionData> BindDid(ClientContext &context, TableFunctionBindInput 
 		    pre_trend));
 	}
 
-	names = {"estimand", "estimator",  "estimate", "std_error", "ci_low",     "ci_high",
-	         "n_units",  "n_periods",  "n_cohorts", "n_never_treated", "pre_trend", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BIGINT, LogicalType::BIGINT,
-	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::DOUBLE,
-	                LogicalType::LIST(LogicalType::VARCHAR)};
+	names = {"estimand", "estimator", "estimate",  "std_error",       "ci_low",    "ci_high",
+	         "n_units",  "n_periods", "n_cohorts", "n_never_treated", "pre_trend", "warnings"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::BIGINT,
+	                LogicalType::BIGINT,  LogicalType::DOUBLE,  LogicalType::LIST(LogicalType::VARCHAR)};
 
 	vector<Value> warning_values;
 	for (auto &w : warnings) {
 		warning_values.push_back(Value(w));
 	}
 	auto bind = make_uniq<ResultBindData>();
-	bind->rows.push_back({Value("ATT"), Value("callaway-santanna"), Value::DOUBLE(att),
-	                      se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
-	                      se > 0.0 ? Value::DOUBLE(att - Z95 * se) : Value(LogicalType::DOUBLE),
-	                      se > 0.0 ? Value::DOUBLE(att + Z95 * se) : Value(LogicalType::DOUBLE),
-	                      Value::BIGINT(static_cast<int64_t>(panel.n_units)),
-	                      Value::BIGINT(static_cast<int64_t>(panel.n_periods)),
-	                      Value::BIGINT(static_cast<int64_t>(cohorts)),
-	                      Value::BIGINT(static_cast<int64_t>(panel.n_never)), Value::DOUBLE(pre_trend),
-	                      Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
+	bind->rows.push_back(
+	    {Value("ATT"), Value("callaway-santanna"), Value::DOUBLE(att),
+	     se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
+	     se > 0.0 ? Value::DOUBLE(att - Z95 * se) : Value(LogicalType::DOUBLE),
+	     se > 0.0 ? Value::DOUBLE(att + Z95 * se) : Value(LogicalType::DOUBLE),
+	     Value::BIGINT(static_cast<int64_t>(panel.n_units)), Value::BIGINT(static_cast<int64_t>(panel.n_periods)),
+	     Value::BIGINT(static_cast<int64_t>(cohorts)), Value::BIGINT(static_cast<int64_t>(panel.n_never)),
+	     Value::DOUBLE(pre_trend), Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
 	return std::move(bind);
 }
 
@@ -498,8 +497,8 @@ unique_ptr<FunctionData> BindEventStudy(ClientContext &context, TableFunctionBin
 	}
 
 	names = {"relative_period", "att", "std_error", "ci_low", "ci_high", "n_treated", "is_pre_treatment"};
-	return_types = {LogicalType::BIGINT, LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE, LogicalType::BIGINT,  LogicalType::BOOLEAN};
+	return_types = {LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE, LogicalType::BIGINT, LogicalType::BOOLEAN};
 	auto bind = make_uniq<ResultBindData>();
 	for (auto &entry : point) {
 		const int64_t relative = entry.first;
@@ -518,8 +517,7 @@ unique_ptr<FunctionData> BindEventStudy(ClientContext &context, TableFunctionBin
 		                      se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
 		                      se > 0.0 ? Value::DOUBLE(att - Z95 * se) : Value(LogicalType::DOUBLE),
 		                      se > 0.0 ? Value::DOUBLE(att + Z95 * se) : Value(LogicalType::DOUBLE),
-		                      Value::BIGINT(static_cast<int64_t>(entry.second.second)),
-		                      Value::BOOLEAN(relative < 0)});
+		                      Value::BIGINT(static_cast<int64_t>(entry.second.second)), Value::BOOLEAN(relative < 0)});
 	}
 	return std::move(bind);
 }

@@ -82,8 +82,7 @@ const ModelInfo &RequireModel(const CausalSpec &spec) {
 //! mean. The interval is the dispersion of those effects, which understates the
 //! truth because it carries no model uncertainty - so it is labelled as such
 //! rather than dressed up as an influence-function interval.
-EffectResult CfmEffect(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
-                       Estimand estimand) {
+EffectResult CfmEffect(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec, Estimand estimand) {
 	const auto &model = RequireModel(spec);
 	auto cfm = CfmEstimateCate(context, frame, spec, model);
 
@@ -138,8 +137,8 @@ unique_ptr<FunctionData> BindEffect(ClientContext &context, TableFunctionBindInp
 	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
 	RequireOutcome(spec, EstimandName(estimand));
 	auto frame = BuildFrame(context, spec);
-	auto result = spec.model.empty() ? EstimateEffect(frame, spec, estimand)
-	                                 : CfmEffect(context, frame, spec, estimand);
+	auto result =
+	    spec.model.empty() ? EstimateEffect(frame, spec, estimand) : CfmEffect(context, frame, spec, estimand);
 	if (!spec.model.empty()) {
 		result.estimand = estimand;
 		result.n = frame.n;
@@ -218,8 +217,8 @@ unique_ptr<FunctionData> BindCate(ClientContext &context, TableFunctionBindInput
 	}
 
 	names = {"row_id", "id", "treatment", "outcome", "cate", "cate_low", "cate_high", "learner"};
-	return_types = {LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::VARCHAR};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE, LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::VARCHAR};
 
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.reserve(frame.n);

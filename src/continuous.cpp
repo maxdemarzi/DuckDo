@@ -167,11 +167,20 @@ unique_ptr<FunctionData> BindApe(ClientContext &context, TableFunctionBindInput 
 	warnings.push_back("the average partial effect assumes the dose-response is locally linear; run "
 	                   "do_dose_response() to see whether it is");
 
-	names = {"estimand", "estimator", "estimate",  "std_error", "ci_low",  "ci_high",
-	         "p_value",  "n",         "dose_mean", "dose_sd",   "dose_min", "dose_max", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::BIGINT,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE,
+	names = {"estimand", "estimator", "estimate", "std_error", "ci_low",   "ci_high", "p_value",
+	         "n",        "dose_mean", "dose_sd",  "dose_min",  "dose_max", "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 
 	vector<Value> warning_values;
@@ -180,11 +189,10 @@ unique_ptr<FunctionData> BindApe(ClientContext &context, TableFunctionBindInput 
 	}
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.push_back({Value("APE"), Value(result.estimator), Value::DOUBLE(result.estimate),
-	                      Value::DOUBLE(result.std_error), Value::DOUBLE(result.ci_low),
-	                      Value::DOUBLE(result.ci_high), Value::DOUBLE(result.p_value),
-	                      Value::BIGINT(static_cast<int64_t>(result.n)), Value::DOUBLE(Mean(frame.t)),
-	                      Value::DOUBLE(dose_sd), Value::DOUBLE(dose_min), Value::DOUBLE(dose_max),
-	                      Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
+	                      Value::DOUBLE(result.std_error), Value::DOUBLE(result.ci_low), Value::DOUBLE(result.ci_high),
+	                      Value::DOUBLE(result.p_value), Value::BIGINT(static_cast<int64_t>(result.n)),
+	                      Value::DOUBLE(Mean(frame.t)), Value::DOUBLE(dose_sd), Value::DOUBLE(dose_min),
+	                      Value::DOUBLE(dose_max), Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
 	return std::move(bind);
 }
 
@@ -268,10 +276,10 @@ unique_ptr<FunctionData> BindDoseResponse(ClientContext &context, TableFunctionB
 		const double se = variance > 0.0 ? std::sqrt(variance) : 0.0;
 
 		// How much data actually sits near this grid point.
-		const double lo = frame.dose_sorted[static_cast<idx_t>(std::max(0.0, (q - 0.05)) *
-		                                                       static_cast<double>(frame.n - 1))];
-		const double hi = frame.dose_sorted[static_cast<idx_t>(std::min(1.0, (q + 0.05)) *
-		                                                       static_cast<double>(frame.n - 1))];
+		const double lo =
+		    frame.dose_sorted[static_cast<idx_t>(std::max(0.0, (q - 0.05)) * static_cast<double>(frame.n - 1))];
+		const double hi =
+		    frame.dose_sorted[static_cast<idx_t>(std::min(1.0, (q + 0.05)) * static_cast<double>(frame.n - 1))];
 		idx_t nearby = 0;
 		for (idx_t i = 0; i < frame.n; i++) {
 			if (frame.t[i] >= lo && frame.t[i] <= hi) {

@@ -27,8 +27,8 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "ceiling",
 	                          LogicalType::VARCHAR, Value(""));
 	config.AddExtensionOption("duckdo_max_features",
-	                          "Maximum number of encoded features an estimation frame may contain",
-	                          LogicalType::BIGINT, Value::BIGINT(500));
+	                          "Maximum number of encoded features an estimation frame may contain", LogicalType::BIGINT,
+	                          Value::BIGINT(500));
 	config.AddExtensionOption("duckdo_max_categorical_levels",
 	                          "Categorical covariates with more distinct levels than this are dropped with a warning",
 	                          LogicalType::BIGINT, Value::BIGINT(32));
@@ -47,8 +47,8 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "Independent context draws a foundation model takes. One is a single pass with no "
 	                          "interval; more than one funds one from the spread across draws",
 	                          LogicalType::BIGINT, Value::BIGINT(1));
-	config.AddExtensionOption("duckdo_query_chunk",
-	                          "Rows scored per model forward pass", LogicalType::BIGINT, Value::BIGINT(512));
+	config.AddExtensionOption("duckdo_query_chunk", "Rows scored per model forward pass", LogicalType::BIGINT,
+	                          Value::BIGINT(512));
 	config.AddExtensionOption("duckdo_seed", "Seed for fold assignment, bootstrap and every other random draw",
 	                          LogicalType::BIGINT, Value::BIGINT(42));
 	config.AddExtensionOption("duckdo_bootstrap_reps",

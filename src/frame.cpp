@@ -222,8 +222,7 @@ static idx_t OptionalIdx(const named_parameter_map_t &named, const char *key, id
 	return raw <= 0 ? fallback : static_cast<idx_t>(raw);
 }
 
-CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs,
-                             const named_parameter_map_t &named) {
+CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs, const named_parameter_map_t &named) {
 	CausalSpec spec;
 	if (inputs.empty() || inputs[0].IsNull()) {
 		throw BinderException("duckdo: the first argument must be a table name or a query, e.g. do_ate('customers', "
@@ -250,8 +249,7 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.control_label = OptionalString(named, "control", "");
 	spec.seed = static_cast<int64_t>(OptionalIdx(named, "seed", GetSettingIdx(context, "duckdo_seed", 42)));
 	spec.folds = OptionalIdx(named, "folds", 5);
-	spec.bootstrap_reps =
-	    OptionalIdx(named, "bootstrap_reps", GetSettingIdx(context, "duckdo_bootstrap_reps", 200));
+	spec.bootstrap_reps = OptionalIdx(named, "bootstrap_reps", GetSettingIdx(context, "duckdo_bootstrap_reps", 200));
 	spec.trim = OptionalDouble(named, "trim", 0.01);
 	spec.fraction = OptionalDouble(named, "fraction", 0.8);
 	spec.confounder_strength = OptionalDouble(named, "strength", 0.5);
@@ -470,11 +468,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.control_label = "false";
 		frame.treated_label = "true";
 	} else if (types[t_idx].IsNumeric()) {
-		auto probe = RunQuery(context,
-		                      "SELECT COUNT(DISTINCT " + t_quoted + "), CAST(MIN(" + t_quoted +
-		                          ") AS DOUBLE), CAST(MAX(" + t_quoted + ") AS DOUBLE) FROM " + rel + " WHERE " +
-		                          t_quoted + " IS NOT NULL",
-		                      "inspecting treatment column " + spec.treatment);
+		auto probe =
+		    RunQuery(context,
+		             "SELECT COUNT(DISTINCT " + t_quoted + "), CAST(MIN(" + t_quoted + ") AS DOUBLE), CAST(MAX(" +
+		                 t_quoted + ") AS DOUBLE) FROM " + rel + " WHERE " + t_quoted + " IS NOT NULL",
+		             "inspecting treatment column " + spec.treatment);
 		const auto distinct = probe->GetValue(0, 0).GetValue<int64_t>();
 		if (distinct != 2) {
 			throw BinderException("duckdo: treatment '%s' has %lld distinct non-NULL values, so this function cannot "
@@ -500,7 +498,8 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 		frame.control_label = probe->GetValue(0, 0).ToString();
 		frame.treated_label = probe->GetValue(0, 1).ToString();
-		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(frame.treated_label) + " THEN 1.0 ELSE 0.0 END";
+		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(frame.treated_label) +
+		         " THEN 1.0 ELSE 0.0 END";
 	}
 	if (!spec.treated_label.empty() || !spec.control_label.empty()) {
 		if (spec.treated_label.empty() || spec.control_label.empty()) {
@@ -523,11 +522,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 			frame.binary_outcome = true;
 		} else if (types[y_idx].IsNumeric()) {
 			y_expr = "CAST(" + y_quoted + " AS DOUBLE)";
-			auto probe = RunQuery(context,
-			                      "SELECT COUNT(DISTINCT " + y_quoted + "), CAST(MIN(" + y_quoted +
-			                          ") AS DOUBLE), CAST(MAX(" + y_quoted + ") AS DOUBLE) FROM " + rel + " WHERE " +
-			                          y_quoted + " IS NOT NULL",
-			                      "inspecting outcome column " + spec.outcome);
+			auto probe =
+			    RunQuery(context,
+			             "SELECT COUNT(DISTINCT " + y_quoted + "), CAST(MIN(" + y_quoted + ") AS DOUBLE), CAST(MAX(" +
+			                 y_quoted + ") AS DOUBLE) FROM " + rel + " WHERE " + y_quoted + " IS NOT NULL",
+			             "inspecting outcome column " + spec.outcome);
 			const auto distinct = probe->GetValue(0, 0).GetValue<int64_t>();
 			if (distinct == 2 && probe->GetValue(1, 0).GetValue<double>() == 0.0 &&
 			    probe->GetValue(2, 0).GetValue<double>() == 1.0) {
@@ -591,7 +590,8 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		projection += ", CAST(" + QuoteIdentifier(names[id_idx]) + " AS VARCHAR) AS __duckdo_id";
 	}
 	if (frame.has_policy) {
-		projection += ", coalesce(CAST(" + QuoteIdentifier(names[policy_idx]) + " AS BOOLEAN), false) AS __duckdo_policy";
+		projection +=
+		    ", coalesce(CAST(" + QuoteIdentifier(names[policy_idx]) + " AS BOOLEAN), false) AS __duckdo_policy";
 	}
 	if (frame.has_aux) {
 		projection += ", CAST(CASE WHEN " + QuoteIdentifier(names[aux_idx]) + " IS NULL THEN NULL ELSE " +
@@ -609,8 +609,8 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 	if (!y_quoted.empty()) {
 		where += " AND " + y_quoted + " IS NOT NULL";
 	}
-	const string data_sql = "SELECT " + projection + " FROM " + rel + " WHERE " + where + " LIMIT " +
-	                        std::to_string(max_rows + 1);
+	const string data_sql =
+	    "SELECT " + projection + " FROM " + rel + " WHERE " + where + " LIMIT " + std::to_string(max_rows + 1);
 	auto data = RunQuery(context, data_sql, "reading data from " + spec.relation);
 	if (data->RowCount() > max_rows) {
 		throw BinderException("duckdo: %s has more than %llu usable rows. Raise duckdo_max_rows, or pass a sampled "

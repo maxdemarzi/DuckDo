@@ -235,10 +235,9 @@ vector<idx_t> SelectFeatures(const CausalFrame &frame, idx_t budget) {
 		// the outcome's own scale.
 		scored.emplace_back(y_sd > 0 ? std::fabs(cov) / y_sd : 0.0, j);
 	}
-	std::stable_sort(scored.begin(), scored.end(),
-	                 [](const std::pair<double, idx_t> &a, const std::pair<double, idx_t> &b) {
-		                 return a.first > b.first;
-	                 });
+	std::stable_sort(
+	    scored.begin(), scored.end(),
+	    [](const std::pair<double, idx_t> &a, const std::pair<double, idx_t> &b) { return a.first > b.first; });
 	vector<idx_t> kept;
 	for (idx_t i = 0; i < scored.size() && kept.size() < budget; i++) {
 		kept.push_back(scored[i].second);
@@ -262,8 +261,8 @@ vector<idx_t> SampleContext(const CausalFrame &frame, idx_t size, int64_t seed, 
 	std::shuffle(control.begin(), control.end(), rng);
 
 	// Keep the arm proportions of the source table.
-	idx_t want_treated = static_cast<idx_t>(std::llround(
-	    static_cast<double>(size) * static_cast<double>(treated.size()) / static_cast<double>(frame.n)));
+	idx_t want_treated = static_cast<idx_t>(
+	    std::llround(static_cast<double>(size) * static_cast<double>(treated.size()) / static_cast<double>(frame.n)));
 	want_treated = std::min(want_treated, treated.size());
 	idx_t want_control = size - want_treated;
 	if (want_control > control.size()) {
@@ -357,15 +356,14 @@ struct Prepared {
 	vector<string> warnings;
 };
 
-Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model,
-                       idx_t context_size, bool resample) {
+Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model, idx_t context_size,
+                       bool resample) {
 	Prepared out;
 	out.features = SelectFeatures(frame, model.max_covariates);
 	if (frame.X.cols > model.max_covariates) {
 		out.warnings.push_back(StringUtil::Format(
-		    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu",
-		    model.id.c_str(), static_cast<unsigned long long>(model.max_covariates),
-		    static_cast<unsigned long long>(out.features.size()),
+		    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu", model.id.c_str(),
+		    static_cast<unsigned long long>(model.max_covariates), static_cast<unsigned long long>(out.features.size()),
 		    static_cast<unsigned long long>(frame.X.cols)));
 	}
 	out.context_rows = SampleContext(frame, context_size, spec.seed, resample);
@@ -374,8 +372,8 @@ Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const M
 
 //! Do-PFN: treatment is column 0 of a single X tensor, the output is logits over
 //! a bar distribution, and the context length is fixed by the exported graph.
-CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
-                   const ModelInfo &model, const string &dir) {
+CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model,
+                   const string &dir) {
 	CfmResult result;
 	auto bars = LoadBorders(dir, model.manifest_file);
 	if (!bars.loaded || bars.centres.size() != model.num_buckets) {
@@ -512,8 +510,8 @@ CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const Causa
 //! expected potential outcome directly, and both lengths are dynamic - so there
 //! is no ladder, no bar distribution and no outcome rescaling to undo. The model
 //! standardises the outcome per arm internally.
-CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec,
-                       const ModelInfo &model, const string &dir) {
+CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model,
+                       const string &dir) {
 	CfmResult result;
 	const idx_t context_size = std::min(frame.n, model.max_context);
 	auto prepared = PrepareCommon(frame, spec, model, context_size, spec.ensemble > 1);
@@ -733,11 +731,17 @@ void EmitRows(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 
 unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBindInput &,
                                         vector<LogicalType> &return_types, vector<string> &names) {
-	names = {"model", "setting", "license", "commercial", "attribution_required",
+	names = {"model",          "setting",        "license",   "commercial", "attribution_required",
 	         "max_covariates", "context_ladder", "available", "detail"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BIGINT,
-	                LogicalType::LIST(LogicalType::BIGINT), LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::BOOLEAN,
+	                LogicalType::BOOLEAN,
+	                LogicalType::BIGINT,
+	                LogicalType::LIST(LogicalType::BIGINT),
+	                LogicalType::BOOLEAN,
+	                LogicalType::VARCHAR};
 	auto bind = make_uniq<ResultBindData>();
 	const string dir = ModelDir(context);
 	for (auto &model : ModelCatalog()) {
@@ -759,11 +763,10 @@ unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBin
 		if (model.attribution_required) {
 			detail += "; " + model.license + " requires attribution downstream";
 		}
-		bind->rows.push_back({Value(model.id), Value(model.setting), Value(model.license),
-		                      Value::BOOLEAN(model.commercial), Value::BOOLEAN(model.attribution_required),
-		                      Value::BIGINT(static_cast<int64_t>(model.max_covariates)),
-		                      Value::LIST(LogicalType::BIGINT, std::move(ladder)), Value::BOOLEAN(available),
-		                      Value(detail)});
+		bind->rows.push_back(
+		    {Value(model.id), Value(model.setting), Value(model.license), Value::BOOLEAN(model.commercial),
+		     Value::BOOLEAN(model.attribution_required), Value::BIGINT(static_cast<int64_t>(model.max_covariates)),
+		     Value::LIST(LogicalType::BIGINT, std::move(ladder)), Value::BOOLEAN(available), Value(detail)});
 	}
 	return std::move(bind);
 }

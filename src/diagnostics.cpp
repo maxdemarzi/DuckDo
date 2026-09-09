@@ -180,8 +180,8 @@ unique_ptr<FunctionData> BindDiagnose(ClientContext &context, TableFunctionBindI
 	                            static_cast<unsigned long long>(n_control)),
 	         frame.n >= 200 ? "info" : "medium");
 	AddCheck(*bind, "treatment_prevalence", (prevalence > 0.05 && prevalence < 0.95) ? "pass" : "warn",
-	         StringUtil::Format("%.1f%% of rows are treated ('%s' vs '%s')", prevalence * 100.0,
-	                            frame.treated_label, frame.control_label),
+	         StringUtil::Format("%.1f%% of rows are treated ('%s' vs '%s')", prevalence * 100.0, frame.treated_label,
+	                            frame.control_label),
 	         (prevalence > 0.05 && prevalence < 0.95) ? "info" : "medium");
 
 	// Positivity: how much probability mass sits at the extremes.
@@ -196,8 +196,8 @@ unique_ptr<FunctionData> BindDiagnose(ClientContext &context, TableFunctionBindI
 	}
 	const double extreme_share = static_cast<double>(extreme) / static_cast<double>(frame.n);
 	AddCheck(*bind, "positivity", extreme_share < 0.05 ? "pass" : (extreme_share < 0.2 ? "warn" : "fail"),
-	         StringUtil::Format("propensity spans [%.3f, %.3f]; %.1f%% of rows fall outside [0.05, 0.95]", min_e,
-	                            max_e, extreme_share * 100.0),
+	         StringUtil::Format("propensity spans [%.3f, %.3f]; %.1f%% of rows fall outside [0.05, 0.95]", min_e, max_e,
+	                            extreme_share * 100.0),
 	         extreme_share < 0.05 ? "info" : (extreme_share < 0.2 ? "medium" : "high"));
 
 	// Covariate balance after weighting.
@@ -229,8 +229,8 @@ unique_ptr<FunctionData> BindDiagnose(ClientContext &context, TableFunctionBindI
 	const double ratio = static_cast<double>(frame.n) / static_cast<double>(std::max<idx_t>(frame.Cols(), 1));
 	AddCheck(*bind, "dimensionality", ratio >= 20.0 ? "pass" : "warn",
 	         StringUtil::Format("%llu encoded features for %llu rows (%.1f rows per feature)",
-	                            static_cast<unsigned long long>(frame.Cols()),
-	                            static_cast<unsigned long long>(frame.n), ratio),
+	                            static_cast<unsigned long long>(frame.Cols()), static_cast<unsigned long long>(frame.n),
+	                            ratio),
 	         ratio >= 20.0 ? "info" : "medium");
 
 	for (auto &w : frame.warnings) {
@@ -451,8 +451,8 @@ unique_ptr<FunctionData> BindSensitivity(ClientContext &context, TableFunctionBi
 		interpretation += ". The E-value assumes the estimate is on a risk-difference scale";
 	}
 
-	names = {"estimate",         "std_error",           "robustness_value", "robustness_value_ci",
-	         "e_value",          "e_value_ci",          "interpretation"};
+	names = {"estimate", "std_error",  "robustness_value", "robustness_value_ci",
+	         "e_value",  "e_value_ci", "interpretation"};
 	return_types = {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE,
 	                LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::VARCHAR};
 	auto bind = make_uniq<ResultBindData>();
