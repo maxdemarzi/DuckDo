@@ -122,7 +122,27 @@ docs:
     ```
 
     `do_validate` will prevent more wrong answers than any estimator here.
-    `do_dseparated` exposes the underlying primitive directly.
+    `do_dseparated` exposes the underlying primitive directly. Graphs are stored
+    in a `duckdo_graphs` table, so they survive a restart and can be inspected
+    like any other data.
+
+    When the backdoor is blocked, the strategies `do_identify` recommends are
+    estimable rather than merely named: `do_iv` runs 2SLS and reports the
+    first-stage F so a weak instrument is visible instead of silently ruinous,
+    and `do_frontdoor` applies the product formula and reports each half
+    separately.
+
+    ### Beyond the cross-section
+
+    ```sql
+    SELECT * FROM do_ape(...);            -- average partial effect, continuous treatment
+    SELECT * FROM do_dose_response(...);  -- the curve, on a quantile grid
+    SELECT * FROM do_did(...);            -- Callaway-Sant'Anna group-time effects
+    SELECT * FROM do_event_study(...);    -- the pre-trend check
+    ```
+
+    Two-way fixed effects is deliberately absent: it misweights under staggered
+    adoption.
 
     ### Interventions and policies
 
@@ -150,11 +170,13 @@ docs:
 
     ### Limits, stated plainly
 
-    Binary treatments only - continuous ones are refused with an explicit error
-    rather than silently binarised. Base learners are regularised GLMs, so
-    strongly non-linear confounding will not be fully removed. `do_cate`
-    intervals run slightly narrow (~0.90 coverage against a nominal 0.95).
-    Graphs live in process memory and do not survive a restart.
+    Binary treatments for the effect estimators; continuous ones go through
+    `do_ape` and `do_dose_response`, and a dose passed to the binary path is
+    refused rather than silently binarised. Multi-valued categorical treatments
+    are unsupported. Base learners are regularised GLMs, so strongly non-linear
+    confounding will not be fully removed. `do_cate` intervals run a touch narrow
+    under heavy confounding - measured 95% coverage is 0.973 / 0.935 / 0.945
+    across randomised, confounded and strongly-confounded DGPs.
 
     ### Causal foundation models
 
@@ -164,7 +186,7 @@ docs:
     on ONNX Runtime, behind the same SQL as the classical estimators.
     [Do-PFN](https://github.com/jr2021/Do-PFN) is available too.
 
-    That path is **opt-in at build time** (`-DDUCKDO_ONNXRUNTIME_ROOT`), which is
+    That path is **opt-in at build time** (`-DDUCKDO_WITH_ONNX=ON`), which is
     why this community build does not carry it: keeping the default build
     dependency-free is what lets the example above run with no download at all.
     The extension never ships or redistributes weights - you export the graphs

@@ -19,7 +19,7 @@ FROM do_ate('customers',
 > **Status: every roadmap phase through 9 is implemented.** Estimators, diagnostics, graph
 > identification, the `do()` surface and segmented estimation are cross-checked against EconML and
 > DoWhy. **Two causal foundation models run inside DuckDB** on ONNX Runtime — CausalPFN and Do-PFN.
-> That path is opt-in at build time (`-DDUCKDO_ONNXRUNTIME_ROOT`) so the default build keeps zero
+> That path is opt-in at build time (`-DDUCKDO_WITH_ONNX=ON`) so the default build keeps zero
 > dependencies and needs no downloads.
 
 Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
@@ -153,8 +153,8 @@ costs k times as much.
 Getting either running takes three steps, and the extension never ships or redistributes weights:
 
 ```sh
-# 1. build with ONNX Runtime (download a release from onnxruntime.ai)
-cmake -DDUCKDO_ONNXRUNTIME_ROOT=/path/to/onnxruntime-1.29.0 ...
+# 1. build with ONNX Runtime - the pinned release is fetched and staged for you
+cmake -DDUCKDO_WITH_ONNX=ON ...
 
 # 2. export the graphs yourself, from the upstream checkpoints
 pip install causalpfn
@@ -373,8 +373,10 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 - **Do-PFN accepts only five covariates and a fixed context ladder, and shrinks population effects.**
   Where a covariate budget binds, DuckDo keeps the most outcome-correlated and names the rest in
   `warnings`. `model := 'causalfm'` is not exported.
-- **ONNX Runtime links dynamically.** The community build ships without it; a build that enables it
-  needs `onnxruntime.dll`/`.so` alongside the binary. Static linking is not done.
+- **ONNX Runtime links dynamically.** `-DDUCKDO_WITH_ONNX=ON` fetches the pinned release and stages
+  its libraries next to the binaries, so this is handled rather than manual — but the community
+  build still ships without it, because a shared dependency is exactly what the dependency-free
+  default is protecting. There is no static build to link: none is published upstream.
 
 ## Testing
 

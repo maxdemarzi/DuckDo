@@ -5,7 +5,7 @@
 # Skipped unless DUCKDO_MODEL_DIR points at a directory holding exported graphs:
 #   python scripts/export/export_dopfn.py --repo <Do-PFN checkout> --out build/models
 #   DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
-# It also needs a build configured with -DDUCKDO_ONNXRUNTIME_ROOT.
+# It also needs a build configured with -DDUCKDO_WITH_ONNX=ON.
 
 require duckdo
 

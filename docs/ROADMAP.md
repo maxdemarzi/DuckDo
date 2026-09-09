@@ -693,7 +693,7 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 | 1 | `do_` prefix collides with SQL grammar | High | Medium | Phase 0 spike; `duckdo_*` primary fallback |
 | 2 | CFM checkpoints resist ONNX export | High | Medium | Start with Do-PFN (7.3M params); ship what exports; classical path is independent |
 | 3 | CFMs do not beat classical estimators on real data | Medium | Medium | Phases 2–4 are valuable standalone; publish the comparison honestly |
-| 4 | ONNX Runtime static link breaks a platform | Medium | Medium | Follow `anofox_tabfm`'s excluded-platforms precedent |
+| 4 | ~~ONNX Runtime static link breaks a platform~~ **retired** | Medium | Medium | There is no static link. The official prebuilt is fetched and linked shared, following `anofox_tabfm`. The live risk is now the Windows System32 `onnxruntime.dll` shadowing ours, mitigated by staging (next action 3) |
 | 5 | Statistical errors in hand-rolled estimators | High | Medium | Grade every estimator against EconML/DoWhy before merge |
 | 6 | Users misinterpret correlational output as causal | High | High | Estimand + estimator + warnings in every result row; diagnostics are first-class; docs lead with assumptions |
 | 7 | Community-extension size limit exceeded | Medium | Low | Weight-free graphs; CPU-only flavour for the community build |
@@ -726,7 +726,24 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
 2. **Export CausalFM.** Two of the three models from section 1 now run. CausalFM would add
    *model-based* front-door and IV estimation; the classical versions already exist as `do_iv` and
    `do_frontdoor`, so this is no longer a coherence gap, just an additional engine.
-3. **Statically link ONNX Runtime** so the community build can ship the model path at all.
+3. ~~**Statically link ONNX Runtime**~~ **DONE differently — the premise was wrong.** No official
+   static build of ONNX Runtime is published, building one per platform is a multi-hour job, and
+   the extension this roadmap named as its precedent (`anofox_tabfm`, risk 4) does not static-link
+   either: it fetches the official prebuilt and links it shared. So does DuckDo now.
+
+   The actual blocker was never linkage. It was that the model path only built if you unpacked an
+   archive by hand and passed `-DDUCKDO_ONNXRUNTIME_ROOT`, and on Windows only ran if you then
+   copied `onnxruntime.dll` next to the binaries yourself — an undocumented manual step that had
+   in fact been done by hand in this repo. `-DDUCKDO_WITH_ONNX=ON` now fetches the pinned release
+   for the target platform, links it, and stages its DLLs. `DUCKDO_ONNXRUNTIME_ROOT` still works
+   as an override, `DUCKDO_ORT_URL` points at a mirror where GitHub releases are unreachable, and
+   the default build is still dependency-free.
+
+   The DLL staging is not cosmetic. Windows ships its own `C:\Windows\System32\onnxruntime.dll`
+   with Windows ML — it is present on this machine — and it is old enough to return a null
+   `OrtApi` for the `ORT_API_VERSION` DuckDo compiles against. It does not fail to load; it
+   crashes on the first inference. The loader searches the host executable's directory first, so
+   staging our copy there is what makes ours win.
 4. **Consider retiring or demoting Do-PFN.** CausalPFN is better on every axis measured here —
    licence, covariate budget, dynamic context, and no shrinkage. Do-PFN remains interesting only
    for its explicit treatment of unobserved confounding, which DuckDo does not currently exploit.

@@ -370,9 +370,15 @@ column's own units, not the standardised space the model works in.
 
 ## Causal foundation models
 
-Opt-in at build time (`-DDUCKDO_ONNXRUNTIME_ROOT=<onnxruntime release>`); without it every entry
-point below still exists and says specifically that the build lacks ONNX Runtime, rather than
-falling back to a classical estimator while still claiming to be the model.
+Opt-in at build time (`-DDUCKDO_WITH_ONNX=ON`); without it every entry point below still exists
+and says specifically that the build lacks ONNX Runtime, rather than falling back to a classical
+estimator while still claiming to be the model.
+
+`-DDUCKDO_WITH_ONNX=ON` fetches the pinned ONNX Runtime release for the target platform and, on
+Windows, stages its DLLs next to the shell and test binaries. Three knobs adjust that:
+`-DDUCKDO_ONNXRUNTIME_ROOT=<dir>` uses a release you have already unpacked, `-DDUCKDO_ORT_URL=<url>`
+points at a mirror for networks where GitHub releases are unreachable, and `-DDUCKDO_ORT_VERSION`
+moves the pin.
 
 ### `do_list_models()` / `do_models()`
 

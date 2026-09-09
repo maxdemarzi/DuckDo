@@ -300,7 +300,7 @@ vector<idx_t> SampleContext(const CausalFrame &frame, idx_t size, int64_t seed, 
 
 CfmResult CfmEstimateCate(ClientContext &, const CausalFrame &, const CausalSpec &, const ModelInfo &model) {
 	throw BinderException("duckdo: this build has no ONNX Runtime, so model := '%s' cannot run. Rebuild with "
-	                      "-DDUCKDO_ONNXRUNTIME_ROOT=<path to an onnxruntime release>, or use one of the classical "
+	                      "-DDUCKDO_WITH_ONNX=ON, or use one of the classical "
 	                      "estimators (estimator := 'aipw' is the doubly-robust default)",
 	                      model.id);
 }
@@ -749,7 +749,7 @@ unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBin
 		bool available = false;
 		string detail;
 		if (!OnnxAvailable()) {
-			detail = "this build has no ONNX Runtime; rebuild with -DDUCKDO_ONNXRUNTIME_ROOT";
+			detail = "this build has no ONNX Runtime; rebuild with -DDUCKDO_WITH_ONNX=ON";
 		} else if (!ModelArtifactsPresent(context, model, missing)) {
 			detail = "'" + missing + "' missing from " + dir;
 		} else {
