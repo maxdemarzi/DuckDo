@@ -23,8 +23,9 @@ FROM do_ate('customers',
 > dependencies and needs no downloads.
 
 New here? **[docs/TUTORIAL.md](docs/TUTORIAL.md)** walks one real question end to end in about
-five minutes — a targeted discount campaign where the naive answer is $18.67 and the true one is
-$8.00. **[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** is what every estimate rests on, written for
+five minutes, and **[docs/EXAMPLES.md](docs/EXAMPLES.md)** works three more — — an A/B test nobody complied with, a pricing question where the naive
+answer has the wrong *sign*, and a retention call worth targeting.
+**[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** is what every estimate rests on, written for
 analysts. Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
 
 ## What works today
@@ -472,7 +473,15 @@ Three further dev-only harnesses, none shipped:
 python scripts/crosscheck_econml.py    # grades the estimators against EconML and DoWhy on IHDP
 python scripts/coverage_check.py       # measures do_cate's empirical interval coverage
 python scripts/benchmark.py            # seconds and peak memory, with a gate on both
+python scripts/check_docs.py           # every SQL block in the docs still runs
 ```
+
+`check_docs.py` executes every block in the tutorial and the worked examples, in order,
+against a fresh database — those two documents quote real output, and quoting real output
+is worth nothing if the queries above it have stopped working. The README, assumptions
+guide and function reference use illustrative fragments against tables that do not exist,
+so those are parsed rather than executed, which catches a malformed query but not a stale
+column name.
 
 CI also runs DuckDB's `format` and `tidy` checks. Note that `.clang-format` and `.clang-tidy` in
 this repo are symlinks into `duckdb/`; git checks them out as plain text files on Windows, where

@@ -652,8 +652,17 @@ to leave room for the 2.2x.
    targeting rule); ~~an assumptions guide written for analysts rather than statisticians~~
    **DONE** (`docs/ASSUMPTIONS.md`, organised by whether the data can settle each assumption at
    all); ~~a model catalog with licenses and the Do-PFN attribution notice~~ **DONE** (in the
-   function reference and `do_list_models()`). Still open: a page of worked examples (A/B test
-   with non-compliance, observational pricing, churn intervention).
+   function reference and `do_list_models()`); ~~a page of worked examples (A/B test with
+   non-compliance, observational pricing, churn intervention)~~ **DONE** (`docs/EXAMPLES.md`) —
+   all three, and the naive answer is wrong in a different direction in each: too big (0.1749
+   against 0.12), the wrong sign (+1.49 against -2.5), and too small (-0.0248 against -0.0896).
+
+   `scripts/check_docs.py` keeps them true. The tutorial and the worked examples are executed
+   block by block in document order; the README, assumptions guide and function reference are
+   parsed rather than executed, because they use illustrative fragments against tables that do
+   not exist. The two tiers are named in the output so nobody mistakes the weaker one for the
+   stronger. A deliberately broken query was planted to confirm the checker fails when it
+   should.
 3. **Honest benchmark page.** DuckDo classical vs DuckDo CFM vs Python EconML/DoWhy/CausalPFN, on the standard benchmarks, with the losses shown.
 4. **Reproducibility statement.** What is deterministic, what is not, and how to pin it.
 5. **No telemetry.** Causal analysis runs on sensitive data. Shipping zero telemetry is both the right default and a genuine differentiator worth stating explicitly.
