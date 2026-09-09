@@ -85,6 +85,14 @@ RidgeFit FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const 
 //! whose variance scales with 1/e(x) and 1/(1-e(x)).
 RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda);
 
+//! The sandwich fit with per-row case weights - the estimating equation is
+//! sum_i w_i x_i (y_i - x_i'b) = 0, so the bread is sum w x x' and the meat is
+//! sum w^2 e^2 x x'. This is what a marginal structural model needs: the
+//! inverse-probability weights change both halves, and using the unweighted
+//! sandwich on weighted data understates the variance.
+RidgeFit FitRidgeWeightedWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,
+                                      const vector<double> &weights, double lambda);
+
 //! Logistic regression by iteratively reweighted least squares, with the same
 //! ridge and intercept conventions as FitRidge.
 LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,

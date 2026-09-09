@@ -366,6 +366,57 @@ treatment does not buy it. It removes confounding of treatment-outcome and treat
 leaves mediator-outcome confounding entirely untouched — which is the most common error in applied
 mediation, so it is in the output rather than in a footnote.
 
+### `do_msm`
+
+Treatment that varies over time, when a confounder varies with it — and is itself affected by it.
+Named parameters: `unit`, `period`, `treatment`, `outcome` (all required), `covariates` (the
+time-varying confounders), `baseline` (a subset of `covariates` that is time-invariant), and
+`truncate`.
+
+```sql
+SELECT estimate, ci_low, ci_high, mean_weight, max_weight, effective_n
+FROM do_msm('patient_months', unit := 'patient_id', period := 'month',
+            treatment := 'on_drug', outcome := 'bp', covariates := ['creatinine']);
+-- 2.130 | 1.962 | 2.298 | 0.989 | 81.33 | 6245
+```
+
+Returns one row: `estimand, estimator, estimate, std_error, ci_low, ci_high, n_units, n_periods,
+mean_weight, max_weight, effective_n, warnings`. The estimate is the effect of **one additional
+treated period**.
+
+**Why this needs its own function.** Take a confounder `L` measured each period, which affects
+treatment, affects the outcome, and is itself affected by *earlier* treatment. Leave `L` out of the
+adjustment set and it confounds. Put it in and you block the part of the earlier treatment's effect
+that travels through it. No covariate list is correct. On a DGP built exactly that way, whose true
+effect per treated period is 2.0:
+
+| approach | estimate |
+|---|---|
+| no adjustment | 3.92 |
+| adjust for every measured confounder | 3.47 |
+| **`do_msm`** | **2.13** |
+
+The middle row is the trap: it faithfully recovers the outcome model's coefficient on treatment
+(3.5) and that coefficient is not the causal effect. `do_msm` stops adjusting and reweights
+instead, building a pseudo-population in which treatment at each period is independent of the
+history that predicted it, then fits the outcome on cumulative treated periods in that population.
+
+Weights are **stabilised** — `P(A_t | A_{t-1}, V) / P(A_t | A_{t-1}, L_t, V)`, with both models
+pooled across periods and the period index as a feature. `mean_weight` should sit near 1; a mean
+away from 1 means the treatment model is misspecified, and the result says so rather than leaving
+you to notice.
+
+**`truncate` looks like it helps and does not.** On the same data, `truncate := 0.01` raises
+`effective_n` from 6,245 to 12,101 and cuts the interval by more than half — while moving the
+estimate from 2.13, whose interval covers the true 2.0, to 2.51, whose interval excludes it. Every
+number that looks like a quality signal improves while the answer gets worse. It is off by default,
+and using it adds a warning saying what it traded.
+
+A marginal structural model buys **nothing** against unmeasured confounding. What it buys is
+correct handling of measured confounders that the treatment itself affects — which no amount of
+covariate adjustment can do. The structural model is linear in cumulative treated periods, so it
+assumes every period is worth the same and that only the total matters, not when it happened.
+
 ---
 
 ## Interventions

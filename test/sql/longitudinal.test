@@ -1,0 +1,215 @@
+# name: test/sql/longitudinal.test
+# description: marginal structural models for treatment that varies over time
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.17);
+
+# Robins' setup, and the reason marginal structural models exist. L is a
+# time-varying confounder that the treatment itself affects:
+#
+#   L1 ~ N(0,1);  A1 ~ Bern(sigmoid(1.2*L1))
+#   L2 = 0.8*L1 - 1.5*A1 + e          <-- affected by prior treatment
+#   A2 ~ Bern(sigmoid(1.2*L2))
+#   Y  = 3.5*A1 + 2.0*A2 + 1.0*(L1+L2) + e
+#
+# A1's coefficient is 3.5, but 1.5 of it is cancelled along A1 -> L2 -> Y, so
+# A1's TOTAL effect is 2.0 - the same as A2's. True effect per treated period
+# is therefore exactly 2.0, and no covariate list recovers it: leave L2 out and
+# it confounds A2, put L2 in and it blocks part of A1.
+statement ok
+CREATE TABLE wide AS
+WITH u AS (
+  SELECT i,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS l1,
+    random() AS u1, random() AS u2,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ey
+  FROM range(20000) t(i)),
+ s1 AS (SELECT *, (u1 < 1.0/(1.0+exp(-1.2*l1)))::INT AS a1 FROM u),
+ s2 AS (SELECT *, 0.8*l1 - 1.5*a1 + e2 AS l2 FROM s1),
+ s3 AS (SELECT *, (u2 < 1.0/(1.0+exp(-1.2*l2)))::INT AS a2 FROM s2)
+SELECT i AS id, l1, a1, l2, a2, 3.5*a1 + 2.0*a2 + 1.0*(l1+l2) + ey AS y FROM s3;
+
+statement ok
+CREATE TABLE longdata AS
+SELECT id, 1 AS period, l1 AS l, a1 AS a, NULL::DOUBLE AS y FROM wide
+UNION ALL
+SELECT id, 2 AS period, l2 AS l, a2 AS a, y FROM wide;
+
+# Not adjusting is confounded, well above the truth of 2.0.
+query I
+SELECT regr_slope(y, a1+a2) > 3.5 FROM wide;
+----
+true
+
+# Adjusting for every measured confounder - the obvious thing to do - recovers
+# the structural coefficient 3.5 rather than the causal effect 2.0. This is the
+# failure the whole method exists to fix, so it is asserted rather than assumed.
+query I
+SELECT abs(estimate - 3.5) < 0.15
+FROM do_ate('wide', treatment := 'a1', outcome := 'y', covariates := ['l1', 'l2']);
+----
+true
+
+# Reweighting instead of adjusting recovers it.
+query II
+SELECT abs(estimate - 2.0) < 0.25, ci_low < 2.0 AND 2.0 < ci_high
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l']);
+----
+true	true
+
+query II
+SELECT estimand, estimator
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l']);
+----
+effect per treated period	msm-iptw
+
+# The mean stabilised weight is the cheapest check on the weight model, so it is
+# in the result. Near 1 is what a well-specified model looks like.
+query I
+SELECT abs(mean_weight - 1.0) < 0.05
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l']);
+----
+true
+
+# The weights are heavy-tailed here, and saying so is the point of reporting
+# them: effective n is well below the unit count.
+query I
+SELECT effective_n < n_units
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l']);
+----
+true
+
+# --- truncation is a trap, and the numbers say so ------------------------------
+#
+# Truncating the weights nearly doubles the effective sample size and cuts the
+# interval by more than half. It also moves the estimate from 2.13 - which
+# covers the truth - to 2.51, which does not. Everything that looks like a
+# quality signal improves while the answer gets worse, so truncation is off by
+# default and the result carries a warning when it is used.
+
+query I
+SELECT effective_n > (SELECT effective_n FROM do_msm('longdata', unit := 'id', period := 'period',
+                                                     treatment := 'a', outcome := 'y', covariates := ['l']))
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], truncate := 0.01);
+----
+true
+
+query I
+SELECT ci_low < 2.0 AND 2.0 < ci_high
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], truncate := 0.01);
+----
+false
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%trades variance for bias%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], truncate := 0.01);
+----
+true
+
+# Without truncation the result points at it rather than staying silent about a
+# heavy tail.
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%truncate := 0.01 would clamp%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l']);
+----
+true
+
+# --- the assumption it does not buy --------------------------------------------
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%buys nothing against unmeasured confounding%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l']);
+----
+true
+
+# Omitting covariates entirely is legal but says what it really is.
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%unadjusted estimate wearing a marginal structural model%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y');
+----
+true
+
+# --- error paths ----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_msm('longdata', period := 'period', treatment := 'a', outcome := 'y');
+----
+requires unit
+
+statement error
+SELECT * FROM do_msm('longdata', unit := 'id', treatment := 'a', outcome := 'y');
+----
+requires period
+
+statement error
+SELECT * FROM do_msm('longdata', unit := 'id', period := 'period', outcome := 'y');
+----
+requires treatment
+
+statement error
+SELECT * FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a');
+----
+requires outcome
+
+statement error
+SELECT * FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l'], truncate := 0.7);
+----
+truncate := must be in [0, 0.5)
+
+# The numerator and denominator models have to be nested, so a baseline
+# covariate that is not also in covariates := is refused rather than silently
+# producing weights that do not stabilise.
+statement error
+SELECT * FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l'], baseline := ['not_listed']);
+----
+must also appear in covariates
+
+statement ok
+CREATE TABLE oneperiod AS SELECT id, 1 AS period, l1 AS l, a1 AS a, y FROM wide;
+
+statement error
+SELECT * FROM do_msm('oneperiod', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l']);
+----
+needs at least two periods
+
+statement ok
+CREATE TABLE tinypanel AS SELECT * FROM longdata WHERE id < 10;
+
+statement error
+SELECT * FROM do_msm('tinypanel', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l']);
+----
+needs at least twenty units
+
+# Every unit treated in both periods: no dose to respond to.
+statement ok
+CREATE TABLE constant_dose AS SELECT id, period, l, 1 AS a, y FROM longdata;
+
+statement error
+SELECT * FROM do_msm('constant_dose', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l']);
+----
+no dose-response is estimable
+
+# Both names are registered.
+query I
+SELECT count(*) FROM duckdo_msm('longdata', unit := 'id', period := 'period', treatment := 'a',
+                                outcome := 'y', covariates := ['l']);
+----
+1

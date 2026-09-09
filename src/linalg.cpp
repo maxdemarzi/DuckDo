@@ -257,7 +257,7 @@ LinearModel FitLogistic(const Matrix &X, const vector<double> &y, const vector<i
 //! Accumulate the penalised Gram matrix A = X'X + lambda*I (intercept
 //! unpenalised) and, optionally, the meat B = sum r_i^2 x_i x_i'.
 static void BuildGram(const Matrix &X, const vector<idx_t> &rows, double lambda, const vector<double> *residuals,
-                      vector<double> &gram, vector<double> &meat) {
+                      const vector<double> *case_weights, vector<double> &gram, vector<double> &meat) {
 	const idx_t p = X.cols + 1;
 	gram.assign(p * p, 0.0);
 	if (residuals) {
@@ -271,12 +271,17 @@ static void BuildGram(const Matrix &X, const vector<idx_t> &rows, double lambda,
 		for (idx_t j = 0; j < X.cols; j++) {
 			row[j + 1] = src[j];
 		}
-		const double weight = residuals ? (*residuals)[idx] * (*residuals)[idx] : 0.0;
+		// Bread accumulates w*x*x'; meat accumulates w^2*e^2*x*x'. With unit
+		// weights both reduce to the ordinary HC1 sandwich, so the OLS callers
+		// are unchanged.
+		const double w = case_weights ? (*case_weights)[idx] : 1.0;
+		const double resid_sq = residuals ? (*residuals)[idx] * (*residuals)[idx] : 0.0;
+		const double meat_scale = w * w * resid_sq;
 		for (idx_t a = 0; a < p; a++) {
 			for (idx_t b = 0; b < p; b++) {
-				gram[a * p + b] += row[a] * row[b];
+				gram[a * p + b] += w * row[a] * row[b];
 				if (residuals) {
-					meat[a * p + b] += weight * row[a] * row[b];
+					meat[a * p + b] += meat_scale * row[a] * row[b];
 				}
 			}
 		}
@@ -308,10 +313,15 @@ static bool InvertSpd(const vector<double> &matrix, idx_t p, vector<double> &inv
 }
 
 RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda) {
+	return FitRidgeWeightedWithSandwich(X, y, rows, {}, lambda);
+}
+
+RidgeFit FitRidgeWeightedWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,
+                                      const vector<double> &weights, double lambda) {
 	RidgeFit out;
 	const idx_t p = X.cols + 1;
 	out.dim = p;
-	out.model = FitRidge(X, y, rows, {}, lambda);
+	out.model = FitRidge(X, y, rows, weights, lambda);
 	out.cov.assign(p * p, 0.0);
 	if (rows.size() <= p) {
 		return out;
@@ -324,7 +334,7 @@ RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const ve
 	}
 
 	vector<double> gram, meat;
-	BuildGram(X, rows, lambda, &residuals, gram, meat);
+	BuildGram(X, rows, lambda, &residuals, weights.empty() ? nullptr : &weights, gram, meat);
 	vector<double> inverse;
 	if (!InvertSpd(gram, p, inverse)) {
 		return out;
