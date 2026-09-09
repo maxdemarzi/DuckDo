@@ -239,6 +239,7 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.refute_method = OptionalString(named, "method", "placebo_treatment");
 	spec.id_column = OptionalString(named, "id", "");
 	spec.policy_column = OptionalString(named, "policy", "");
+	spec.grid = OptionalIdx(named, "grid", 20);
 	spec.threshold = OptionalDouble(named, "threshold", 0.0);
 	spec.depth = OptionalIdx(named, "depth", 2);
 	spec.treated_label = OptionalString(named, "treated", "");
@@ -392,9 +393,19 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 
 	const string t_quoted = QuoteIdentifier(names[t_idx]);
 
-	// 3. Map the treatment onto {0, 1}.
+	// 3. Map the treatment. A continuous dose is passed through on its own
+	//    scale; everything else is mapped onto {0, 1}.
 	string t_expr;
-	if (types[t_idx].id() == LogicalTypeId::BOOLEAN) {
+	if (spec.continuous_treatment) {
+		if (!types[t_idx].IsNumeric()) {
+			throw BinderException("duckdo: a continuous treatment must be numeric; '%s' has type %s", spec.treatment,
+			                      types[t_idx].ToString());
+		}
+		frame.continuous_treatment = true;
+		t_expr = "CAST(" + t_quoted + " AS DOUBLE)";
+		frame.control_label = "dose";
+		frame.treated_label = "dose";
+	} else if (types[t_idx].id() == LogicalTypeId::BOOLEAN) {
 		t_expr = "CASE WHEN " + t_quoted + " THEN 1.0 ELSE 0.0 END";
 		frame.control_label = "false";
 		frame.treated_label = "true";
@@ -406,9 +417,9 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		                      "inspecting treatment column " + spec.treatment);
 		const auto distinct = probe->GetValue(0, 0).GetValue<int64_t>();
 		if (distinct != 2) {
-			throw BinderException("duckdo: treatment '%s' has %lld distinct non-NULL values; DuckDo v0 supports binary "
-			                      "treatments only. Continuous and multi-valued treatments are planned. Derive a "
-			                      "binary column, or pass treated := / control := to pick two levels",
+			throw BinderException("duckdo: treatment '%s' has %lld distinct non-NULL values, so this function cannot "
+			                      "use it. For a dose, use do_ape() or do_dose_response(); otherwise derive a binary "
+			                      "column, or pass treated := / control := to pick two levels",
 			                      spec.treatment, static_cast<long long>(distinct));
 		}
 		const double lo = probe->GetValue(1, 0).GetValue<double>();
@@ -753,6 +764,16 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		for (idx_t i = 0; i < frame.n; i++) {
 			frame.X.At(i, j) = kept[j].values[i];
 		}
+	}
+
+	if (frame.continuous_treatment) {
+		frame.dose_sorted = frame.t;
+		std::sort(frame.dose_sorted.begin(), frame.dose_sorted.end());
+		if (!(StdDev(frame.t) > 1e-12)) {
+			throw BinderException("duckdo: the treatment '%s' does not vary, so no dose-response is estimable",
+			                      spec.treatment);
+		}
+		return frame;
 	}
 
 	for (idx_t i = 0; i < frame.n; i++) {

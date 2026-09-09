@@ -1,0 +1,125 @@
+# name: test/sql/continuous.test
+# description: continuous treatments - average partial effect and dose response
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.2);
+
+# Confounded dose: x1 drives both the dose and the outcome, so a naive
+# regression of y on d must overstate the slope. The true average partial
+# effect is exactly 2.0, and the response is linear in the dose.
+statement ok
+CREATE TABLE dose AS
+WITH u AS (
+  SELECT i,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2
+  FROM range(20000) t(i))
+SELECT i AS id, x1, x2,
+       1.0*x1 + e1 AS d,
+       2.0 + 1.5*x1 + 0.7*x2 + 2.0*(1.0*x1 + e1) + e2 AS y
+FROM u;
+
+# The confounding is real: an unadjusted slope is well above the truth.
+query I
+SELECT regr_slope(y, d) > 2.5 FROM dose;
+----
+true
+
+# --- do_ape ------------------------------------------------------------------
+
+query I
+SELECT abs(estimate - 2.0) < 0.05
+FROM do_ape('dose', treatment := 'd', outcome := 'y', exclude := ['id']);
+----
+true
+
+query I
+SELECT ci_low < 2.0 AND 2.0 < ci_high
+FROM do_ape('dose', treatment := 'd', outcome := 'y', exclude := ['id']);
+----
+true
+
+query II
+SELECT estimand, estimator FROM do_ape('dose', treatment := 'd', outcome := 'y', exclude := ['id']);
+----
+APE	dml
+
+# The dose range is reported, because an average partial effect over a range you
+# have not looked at is easy to misread.
+query I
+SELECT dose_min < -3 AND dose_max > 3
+FROM do_ape('dose', treatment := 'd', outcome := 'y', exclude := ['id']);
+----
+true
+
+# --- do_dose_response --------------------------------------------------------
+
+query I
+SELECT count(*) FROM do_dose_response('dose', treatment := 'd', outcome := 'y',
+                                      exclude := ['id'], grid := 7);
+----
+7
+
+# The grid sits on dose quantiles, so it never runs past the observed support.
+query I
+SELECT min(dose) >= (SELECT min(d) FROM dose) AND max(dose) <= (SELECT max(d) FROM dose)
+FROM do_dose_response('dose', treatment := 'd', outcome := 'y', exclude := ['id'], grid := 9);
+----
+true
+
+# The response is linear here, so the slope across the interior of the curve
+# has to come back at the true 2.0.
+query I
+SELECT abs((max(mu) - min(mu)) / (max(dose) - min(dose)) - 2.0) < 0.15
+FROM do_dose_response('dose', treatment := 'd', outcome := 'y', exclude := ['id'], grid := 9)
+WHERE grid_point BETWEEN 1 AND 7;
+----
+true
+
+query I
+SELECT bool_and(mu_low < mu AND mu < mu_high)
+FROM do_dose_response('dose', treatment := 'd', outcome := 'y', exclude := ['id'], grid := 9);
+----
+true
+
+# --- the two families stay separate -----------------------------------------
+
+# A binary estimator must refuse a dose, and say where to go instead.
+statement error
+SELECT * FROM do_ate('dose', treatment := 'd', outcome := 'y', exclude := ['id']);
+----
+do_ape() or do_dose_response()
+
+statement error
+SELECT * FROM do_ape('dose', treatment := 'd', outcome := 'y', exclude := ['id'], model := 'causalpfn');
+----
+no foundation-model backend
+
+# A constant dose is not estimable and says so.
+statement ok
+CREATE TABLE flat AS SELECT i AS id, 1.0 AS d, (i % 13) * 1.0 AS x, i * 0.5 AS y FROM range(500) r(i);
+
+statement error
+SELECT * FROM do_ape('flat', treatment := 'd', outcome := 'y', exclude := ['id']);
+----
+does not vary
+
+# A binary treatment still works through the continuous path, where the average
+# partial effect coincides with the ATE.
+statement ok
+CREATE TABLE bin AS
+WITH u AS (SELECT i, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+                     sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS n,
+                     random() AS dr FROM range(8000) t(i)),
+     p AS (SELECT *, 1.0/(1.0+exp(-(0.9*x1))) AS ps FROM u)
+SELECT i AS id, x1, (dr < ps)::INTEGER AS t, 2.0 + 1.5*x1 + 3.0*((dr < ps)::INTEGER) + n AS y FROM p;
+
+query I
+SELECT abs(estimate - 3.0) < 0.2 FROM do_ape('bin', treatment := 't', outcome := 'y', exclude := ['id']);
+----
+true

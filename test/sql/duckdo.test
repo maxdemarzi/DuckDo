@@ -49,8 +49,9 @@ SELECT * FROM do_ate('tiny', treatment := 't', outcome := 'y', model := 'gpt_cau
 ----
 unknown model
 
-# A non-binary treatment is refused rather than silently binarised.
+# A non-binary treatment is refused rather than silently binarised, and the
+# error points at the continuous-treatment functions.
 statement error
 SELECT * FROM do_ate('tiny', treatment := 'x', outcome := 'y', covariates := ['t']);
 ----
-binary treatments only
+do_ape() or do_dose_response()

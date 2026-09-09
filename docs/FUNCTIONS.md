@@ -85,6 +85,40 @@ columns. A group too small to estimate yields a row with NULL estimates and the
 reason in `warnings`, rather than failing the whole query. Capped by
 `duckdo_max_groups`.
 
+### `do_ape`
+
+The average partial effect of a **continuous** treatment: what one more unit of the dose buys, on
+average. A partially linear double-ML estimator — residualise the outcome and the dose on the
+covariates, then regress one residual on the other.
+
+```sql
+SELECT * FROM do_ape('pricing', treatment := 'price', outcome := 'revenue');
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, p_value, n, dose_mean, dose_sd,
+dose_min, dose_max, warnings`. The dose range is reported because an average partial effect over a
+range you have not looked at is easy to misread — which is what `do_dose_response` is for.
+
+Works on a binary treatment too, where the average partial effect coincides with the ATE.
+
+### `do_dose_response`
+
+The curve behind that average. Extra parameter: `grid` (BIGINT, default 20, capped at 200).
+
+```sql
+SELECT * FROM do_dose_response('pricing', treatment := 'price', outcome := 'revenue', grid := 20);
+```
+
+Returns `grid_point, dose, mu, mu_low, mu_high, n_within_decile`. `mu` is E[Y(d)] by g-computation
+over a model quadratic in the dose, averaged across the covariate distribution at each point;
+intervals come from the model's HC1 sandwich covariance, exact for a linear model.
+
+Grid points sit on **dose quantiles**, not on an even spacing, so the curve never extrapolates past
+the observed support. `n_within_decile` reports how many rows sit near each point — treat a grid
+point with thin support as decoration.
+
+The binary estimators (`do_ate` and friends) refuse a continuous treatment and point here.
+
 ---
 
 ## Diagnostics
@@ -319,14 +353,14 @@ logit-level agreement without moving the number anyone reads.
 | Setting | Default | Meaning |
 |---|---|---|
 | `duckdo_default_estimator` | `aipw` | Used when `estimator :=` is omitted |
-| `duckdo_max_rows` | 100000 | Refuse frames larger than this |
+| `duckdo_max_rows` | 1000000 | Refuse frames larger than this. The frame is held in memory as doubles, so 1M × 50 covariates is roughly 400 MB |
 | `duckdo_max_features` | 500 | Refuse encodings wider than this |
 | `duckdo_max_categorical_levels` | 32 | Drop categoricals with more levels, with a warning |
 | `duckdo_max_groups` | 1000 | Cap on `do_ate_by` groups |
 | `duckdo_seed` | 42 | Global seed |
 | `duckdo_bootstrap_reps` | 200 | Bootstrap replicates |
 | `duckdo_model_dir` | `~/.cache/duckdo` | Where exported model graphs and weights live |
-| `duckdo_threads` | 4 | Intra-op threads for model inference |
+| `duckdo_threads` | 0 | Threads for model inference and the dense accumulations inside every estimator; 0 means one per hardware thread |
 | `duckdo_query_chunk` | 512 | Rows scored per model forward pass |
 
 Every guardrail names the setting to raise when it trips, rather than silently

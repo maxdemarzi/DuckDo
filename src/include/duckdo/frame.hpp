@@ -42,6 +42,12 @@ struct CausalSpec {
 	double threshold = 0.0;
 	//! Maximum depth of the tree do_optimal_policy searches.
 	idx_t depth = 2;
+	//! Set by the continuous-treatment entry points. A binary function seeing a
+	//! continuous treatment must still refuse, so this is opt-in per function
+	//! rather than inferred from the data.
+	bool continuous_treatment = false;
+	//! Grid points for a dose-response curve.
+	idx_t grid = 20;
 	//! Explicit two-level mapping when the treatment is not already 0/1.
 	string treated_label;
 	string control_label;
@@ -78,8 +84,13 @@ struct CausalFrame {
 	idx_t n = 0;
 	//! n x p encoded covariates, standardised.
 	Matrix X;
-	//! Treatment indicator, 0.0 or 1.0.
+	//! Treatment. 0.0 or 1.0 for a binary treatment; the dose on its own scale
+	//! when continuous_treatment is set.
 	vector<double> t;
+	//! True when `t` holds a dose rather than an arm indicator.
+	bool continuous_treatment = false;
+	//! Dose quantiles, ascending, for choosing a well-supported grid.
+	vector<double> dose_sorted;
 	//! Outcome on its original scale.
 	vector<double> y;
 	//! Row index in the source relation, so per-row output can be aligned.

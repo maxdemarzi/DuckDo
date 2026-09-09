@@ -133,6 +133,27 @@ PyTorch runs a fused attention kernel where ONNX Runtime decomposes it: over 12 
 **0.00087** with a CATE correlation of **0.9994**. Gating on the number a user actually reads is
 the honest test.
 
+### Continuous treatments - a dose has a curve, not a number
+
+```sql
+-- What does one more unit of the dose buy, on average?
+SELECT estimand, estimate, ci_low, ci_high, dose_min, dose_max
+FROM do_ape('pricing', treatment := 'price', outcome := 'revenue');
+-- APE | 2.0019 | 1.9921 | 2.0118 | -5.91 | 5.40
+
+-- And the whole response, so you can see whether that average means anything.
+SELECT dose, mu, mu_low, mu_high, n_within_decile
+FROM do_dose_response('pricing', treatment := 'price', outcome := 'revenue', grid := 20);
+```
+
+`do_ape` is the average partial effect from a partially linear double-ML model — residualise both
+the outcome and the dose on the covariates, then regress one residual on the other.
+`do_dose_response` is g-computation over a model quadratic in the dose, averaged across the
+covariate distribution at each grid point. The grid sits on **dose quantiles**, so it never
+extrapolates past where data exists, and `n_within_decile` says how much support each point has.
+
+The binary estimators still refuse a dose outright, and point here.
+
 ### Interventions - querying a world that did not happen
 
 ```sql
@@ -234,8 +255,10 @@ The 1M × 50 case was 101 s single-threaded before the accumulation was parallel
 
 Stated plainly, because a causal tool that hides its limits is worse than none.
 
-- **Binary treatments only.** Continuous and multi-valued treatments are refused with an explicit
-  error rather than silently binarised. Planned for Phase 10.
+- **Binary treatments for the effect estimators; continuous ones only through `do_ape` and
+  `do_dose_response`.** The binary path refuses a dose rather than silently binarising it, and says
+  where to go. Multi-valued categorical treatments are still unsupported, and the dose-response
+  model is quadratic in the dose, so a sharply non-monotone response will be smoothed.
 - **`do_cate` intervals run a touch narrow under heavy confounding.** Measured 95% coverage is
   0.973 / 0.935 / 0.945 across randomised, confounded and strongly-confounded DGPs
   (`scripts/coverage_check.py`). The interval uses an HC1 sandwich, because the doubly-robust

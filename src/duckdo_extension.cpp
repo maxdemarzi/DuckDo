@@ -53,6 +53,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterSettings(loader.GetDatabaseInstance());
 	duckdo::RegisterEstimationFunctions(loader);
 	duckdo::RegisterInterventionFunctions(loader);
+	duckdo::RegisterContinuousFunctions(loader);
 	duckdo::RegisterDiagnosticFunctions(loader);
 	duckdo::RegisterGraphFunctions(loader);
 	duckdo::RegisterModelFunctions(loader);
