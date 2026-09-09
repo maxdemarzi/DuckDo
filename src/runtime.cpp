@@ -248,7 +248,13 @@ vector<idx_t> SelectFeatures(const CausalFrame &frame, idx_t budget) {
 }
 
 //! Seeded, arm-stratified context sample of exactly `size` rows.
-vector<idx_t> SampleContext(const CausalFrame &frame, idx_t size, int64_t seed) {
+//!
+//! With `resample` the draw is taken with replacement. That matters: when the
+//! table already fits inside the model's context window, sampling without
+//! replacement returns every row no matter the seed, so an ensemble of such
+//! draws is identical and measures nothing. A bootstrap of the context is the
+//! honest way to ask how much the answer depends on which rows the model saw.
+vector<idx_t> SampleContext(const CausalFrame &frame, idx_t size, int64_t seed, bool resample = false) {
 	std::mt19937_64 rng(static_cast<uint64_t>(seed) ^ 0xC0FFEEULL);
 	vector<idx_t> treated = frame.ArmRows(1.0);
 	vector<idx_t> control = frame.ArmRows(0.0);
@@ -265,8 +271,24 @@ vector<idx_t> SampleContext(const CausalFrame &frame, idx_t size, int64_t seed) 
 		want_treated = std::min(size - want_control, treated.size());
 	}
 	vector<idx_t> rows;
-	rows.insert(rows.end(), treated.begin(), treated.begin() + want_treated);
-	rows.insert(rows.end(), control.begin(), control.begin() + want_control);
+	if (resample) {
+		// Draw with replacement within each arm, preserving the arm proportions.
+		if (!treated.empty()) {
+			std::uniform_int_distribution<idx_t> pick(0, treated.size() - 1);
+			for (idx_t i = 0; i < want_treated; i++) {
+				rows.push_back(treated[pick(rng)]);
+			}
+		}
+		if (!control.empty()) {
+			std::uniform_int_distribution<idx_t> pick(0, control.size() - 1);
+			for (idx_t i = 0; i < want_control; i++) {
+				rows.push_back(control[pick(rng)]);
+			}
+		}
+	} else {
+		rows.insert(rows.end(), treated.begin(), treated.begin() + want_treated);
+		rows.insert(rows.end(), control.begin(), control.begin() + want_control);
+	}
 	// Stable order so a repeat run feeds the model identical context.
 	std::sort(rows.begin(), rows.end());
 	return rows;
@@ -336,7 +358,7 @@ struct Prepared {
 };
 
 Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model,
-                       idx_t context_size) {
+                       idx_t context_size, bool resample) {
 	Prepared out;
 	out.features = SelectFeatures(frame, model.max_covariates);
 	if (frame.X.cols > model.max_covariates) {
@@ -346,7 +368,7 @@ Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const M
 		    static_cast<unsigned long long>(out.features.size()),
 		    static_cast<unsigned long long>(frame.X.cols)));
 	}
-	out.context_rows = SampleContext(frame, context_size, spec.seed);
+	out.context_rows = SampleContext(frame, context_size, spec.seed, resample);
 	return out;
 }
 
@@ -377,7 +399,7 @@ CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const Causa
 	}
 	result.ladder_rung = rung;
 
-	auto prepared = PrepareCommon(frame, spec, model, rung);
+	auto prepared = PrepareCommon(frame, spec, model, rung, spec.ensemble > 1);
 	result.warnings = prepared.warnings;
 	for (auto j : prepared.features) {
 		result.features_used.push_back(frame.features[j].name);
@@ -494,7 +516,7 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
                        const ModelInfo &model, const string &dir) {
 	CfmResult result;
 	const idx_t context_size = std::min(frame.n, model.max_context);
-	auto prepared = PrepareCommon(frame, spec, model, context_size);
+	auto prepared = PrepareCommon(frame, spec, model, context_size, spec.ensemble > 1);
 	result.warnings = prepared.warnings;
 	for (auto j : prepared.features) {
 		result.features_used.push_back(frame.features[j].name);
@@ -592,8 +614,85 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 		                      "`python scripts/export/%s`",
 		                      model.id, missing, dir, StringUtil::Format(script, dir));
 	}
-	auto result = model.kind == ModelKind::CAUSALPFN ? RunCausalPfn(context, frame, spec, model, dir)
-	                                                 : RunDoPfn(context, frame, spec, model, dir);
+
+	const idx_t draws = std::min<idx_t>(std::max<idx_t>(spec.ensemble, 1), 25);
+	auto run_once = [&](const CausalSpec &draw_spec) {
+		return model.kind == ModelKind::CAUSALPFN ? RunCausalPfn(context, frame, draw_spec, model, dir)
+		                                          : RunDoPfn(context, frame, draw_spec, model, dir);
+	};
+
+	auto result = run_once(spec);
+	result.draws = 1;
+
+	if (draws > 1) {
+		// Which rows land in the context is a real source of uncertainty, and it
+		// is one a single forward pass cannot see. Re-drawing the context and
+		// looking at the spread measures it directly. It is not full model
+		// uncertainty - the weights are fixed - and the variance method says so.
+		vector<vector<double>> all;
+		all.reserve(draws);
+		all.push_back(result.cate);
+		vector<double> ate_draws;
+		double sum = 0.0;
+		for (auto v : result.cate) {
+			sum += v;
+		}
+		ate_draws.push_back(sum / static_cast<double>(frame.n));
+
+		for (idx_t d = 1; d < draws; d++) {
+			CausalSpec draw_spec = spec;
+			draw_spec.seed = spec.seed + static_cast<int64_t>(d) * 7919;
+			auto extra = run_once(draw_spec);
+			double draw_sum = 0.0;
+			for (auto v : extra.cate) {
+				draw_sum += v;
+			}
+			ate_draws.push_back(draw_sum / static_cast<double>(frame.n));
+			all.push_back(std::move(extra.cate));
+		}
+
+		result.draws = draws;
+		result.cate.assign(frame.n, 0.0);
+		result.cate_se.assign(frame.n, 0.0);
+		for (idx_t i = 0; i < frame.n; i++) {
+			double mean = 0.0;
+			for (auto &draw : all) {
+				mean += draw[i];
+			}
+			mean /= static_cast<double>(draws);
+			double variance = 0.0;
+			for (auto &draw : all) {
+				const double diff = draw[i] - mean;
+				variance += diff * diff;
+			}
+			variance /= static_cast<double>(draws - 1);
+			result.cate[i] = mean;
+			result.cate_se[i] = std::sqrt(variance);
+		}
+
+		const double ate_mean = Mean(ate_draws);
+		double ate_var = 0.0;
+		for (auto v : ate_draws) {
+			const double diff = v - ate_mean;
+			ate_var += diff * diff;
+		}
+		result.ate_between_draw_se = std::sqrt(ate_var / static_cast<double>(draws - 1));
+		if (!(result.ate_between_draw_se > 1e-12)) {
+			// Every draw came back identical, so the ensemble learned nothing and
+			// the interval it would imply is fiction.
+			result.draws = 1;
+			result.cate_se.clear();
+			result.ate_between_draw_se = 0.0;
+			result.warnings.push_back("the context draws were identical, so the ensemble measured no uncertainty "
+			                          "and no interval is reported");
+		} else {
+			result.warnings.push_back(StringUtil::Format(
+			    "%llu bootstrapped context draws; the interval covers context selection and sampling, not the "
+			    "model's own parameter uncertainty",
+			    static_cast<unsigned long long>(draws)));
+		}
+	}
+
 	if (model.attribution_required) {
 		result.warnings.push_back(model.id + " is " + model.license + "; attribution is required downstream");
 	}

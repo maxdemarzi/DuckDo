@@ -109,6 +109,21 @@ FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model :=
 **Start with CausalPFN.** It targets the backdoor setting directly rather than hedging under a
 non-identifiable prior, and it does not exhibit the shrinkage Do-PFN does.
 
+**Ask for an interval.** A single forward pass cannot see how much its answer depends on which rows
+landed in the model's context, so it reports an interval that is far too narrow. `ensemble := k`
+re-draws the context k times and folds the spread in:
+
+```sql
+SELECT estimate, ci_low, ci_high, variance_method
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            model := 'causalpfn', ensemble := 8);
+-- 3.0637 | 3.007 | 3.121 | context ensemble, 8 draws (no parameter uncertainty)
+```
+
+On a DGP with a true effect of 3.0, the single-draw interval is `[3.035, 3.048]` — it **excludes the
+truth**. The 8-draw interval `[3.007, 3.121]` contains it. Each draw is a full forward pass, so this
+costs k times as much.
+
 Getting either running takes three steps, and the extension never ships or redistributes weights:
 
 ```sh
@@ -299,11 +314,14 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 - **Graphs live in process memory**, not the DuckDB catalog, so they do not survive a restart.
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
   not visible to an estimation call.
-- **Foundation models are opt-in and return point estimates.** Neither model produces a calibrated
-  interval, and `do_ate` labels its variance method `effect dispersion (no model uncertainty)` so
-  nobody mistakes one for the other. Do-PFN additionally accepts only five covariates and a fixed
-  context ladder, and shrinks population effects. Where a covariate budget binds, DuckDo keeps the
-  most outcome-correlated and names the rest in `warnings`. `model := 'causalfm'` is not exported.
+- **Foundation model intervals need `ensemble :=`, and still miss parameter uncertainty.** A single
+  forward pass reports only the dispersion of its own point estimates, which is far too narrow —
+  on the DGP above the single-draw interval is [3.035, 3.048] and **excludes the true 3.0**, while
+  `ensemble := 8` gives [3.007, 3.121] and covers it. Even then the interval covers context
+  selection and sampling, not the model's own weights, and it costs one forward pass per draw.
+- **Do-PFN accepts only five covariates and a fixed context ladder, and shrinks population effects.**
+  Where a covariate budget binds, DuckDo keeps the most outcome-correlated and names the rest in
+  `warnings`. `model := 'causalfm'` is not exported.
 - **ONNX Runtime links dynamically.** The community build ships without it; a build that enables it
   needs `onnxruntime.dll`/`.so` alongside the binary. Static linking is not done.
 

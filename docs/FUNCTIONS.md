@@ -365,8 +365,26 @@ What the runtime does, and reports in `warnings`:
 - **The intervention.** Query rows are run twice, forced to treated and to control. That is
   `do(T = t)` for every row, not a filter on rows where `T` happened to equal `t`.
 
-`do_ate` with a model reports `variance_method = 'effect dispersion (no model uncertainty)'`, and
-`do_cate` returns `cate_low = cate_high = cate`. Neither is a calibrated interval, and both say so.
+### Intervals: `ensemble :=`
+
+With a single forward pass, `do_ate` reports `variance_method = 'effect dispersion (no model
+uncertainty)'` and `do_cate` returns `cate_low = cate_high = cate`. Neither is a calibrated
+interval, and both say so — because a single pass cannot see how much the answer depends on which
+rows landed in the model's context.
+
+`ensemble := k` (or `SET duckdo_ensemble_draws = k`) takes k bootstrapped context draws and folds
+the spread across them into the interval. The population standard error becomes
+`sqrt(sampling_var + between_draw_var)`, and `do_cate` gets a real per-row interval.
+
+Measured on a DGP with a true effect of 3.0: the single-draw interval is `[3.035, 3.048]`, which
+excludes the truth; `ensemble := 8` gives `[3.007, 3.121]`, which contains it. Per-row intervals
+covered the truth for 88% of rows — still short of nominal, because the model's own weights are
+fixed and their uncertainty is not measured.
+
+Each draw is a full forward pass, so the cost is linear in `k`. If every draw comes back identical —
+which happens when the table already fits inside the model's context window and there is nothing to
+resample — the ensemble is dropped and a warning says so, rather than reporting an interval that
+measured nothing.
 
 Measured on a heterogeneous DGP with true ATE 2.9806: `aipw` 3.0628, `causalpfn` 3.0610,
 `do_pfn` 2.6307. Do-PFN's shrinkage is a documented property of its model class, not a bug in the
@@ -406,6 +424,7 @@ logit-level agreement without moving the number anyone reads.
 | `duckdo_model_dir` | `~/.cache/duckdo` | Where exported model graphs and weights live |
 | `duckdo_threads` | 0 | Threads for model inference and the dense accumulations inside every estimator; 0 means one per hardware thread |
 | `duckdo_query_chunk` | 512 | Rows scored per model forward pass |
+| `duckdo_ensemble_draws` | 1 | Context draws a foundation model takes; more than one funds an interval |
 
 Every guardrail names the setting to raise when it trips, rather than silently
 truncating.

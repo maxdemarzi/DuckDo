@@ -144,3 +144,57 @@ SELECT (SELECT estimate FROM do_ate('het', treatment := 't', outcome := 'y', exc
                                     model := 'do_pfn'));
 ----
 true
+
+# --- context ensemble ---------------------------------------------------------
+#
+# One forward pass cannot see how much the answer depends on which rows landed in
+# the model's context. Re-drawing the context and looking at the spread measures
+# exactly that. On this DGP the single-draw interval is roughly 0.01 wide and
+# excludes the truth; the ensemble interval is an order of magnitude wider and
+# contains it. That is the whole point.
+
+query I
+SELECT variance_method LIKE 'context ensemble%'
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'causalpfn', ensemble := 6);
+----
+true
+
+query I
+SELECT (SELECT std_error FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                     exclude := ['customer_id'], model := 'causalpfn', ensemble := 6))
+     > (SELECT std_error FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+                                     exclude := ['customer_id'], model := 'causalpfn'));
+----
+true
+
+# The wider interval is the one that actually covers the truth.
+query I
+SELECT ci_low < 3.0 AND 3.0 < ci_high
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'causalpfn', ensemble := 6);
+----
+true
+
+# A single draw still reports no per-row interval rather than a fabricated one.
+query I
+SELECT bool_and(cate_low = cate_high)
+FROM do_cate('customers', treatment := 'discount', outcome := 'revenue',
+             exclude := ['customer_id'], model := 'causalpfn');
+----
+true
+
+query I
+SELECT avg(cate_high - cate_low) > 0.05
+FROM do_cate('customers', treatment := 'discount', outcome := 'revenue',
+             exclude := ['customer_id'], model := 'causalpfn', ensemble := 6);
+----
+true
+
+# The interval says what it does and does not cover.
+query I
+SELECT list_contains(warnings, '6 bootstrapped context draws; the interval covers context selection and sampling, not the model''s own parameter uncertainty')
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
+            exclude := ['customer_id'], model := 'causalpfn', ensemble := 6);
+----
+true

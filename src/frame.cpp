@@ -240,6 +240,7 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.id_column = OptionalString(named, "id", "");
 	spec.policy_column = OptionalString(named, "policy", "");
 	spec.grid = OptionalIdx(named, "grid", 20);
+	spec.ensemble = OptionalIdx(named, "ensemble", GetSettingIdx(context, "duckdo_ensemble_draws", 1));
 	spec.threshold = OptionalDouble(named, "threshold", 0.0);
 	spec.depth = OptionalIdx(named, "depth", 2);
 	spec.treated_label = OptionalString(named, "treated", "");

@@ -74,6 +74,14 @@ vector<string> AvailableDevices();
 //! Per-row conditional effects from a causal foundation model.
 struct CfmResult {
 	vector<double> cate;
+	//! Standard error of each row's effect across the context ensemble. Empty
+	//! when only one draw was taken, because one draw funds no interval.
+	vector<double> cate_se;
+	//! Context draws actually taken.
+	idx_t draws = 1;
+	//! Standard error of the population effect across draws, which is the part
+	//! a single draw cannot see at all.
+	double ate_between_draw_se = 0.0;
 	//! Context rows actually fed to the model.
 	idx_t context_used = 0;
 	//! Ladder rung selected.

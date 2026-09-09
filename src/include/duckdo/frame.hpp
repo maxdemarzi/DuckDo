@@ -48,6 +48,9 @@ struct CausalSpec {
 	bool continuous_treatment = false;
 	//! Grid points for a dose-response curve.
 	idx_t grid = 20;
+	//! Independent context draws for a foundation model. One means a single
+	//! draw and no interval; more than one funds a real one.
+	idx_t ensemble = 1;
 	//! Explicit two-level mapping when the treatment is not already 0/1.
 	string treated_label;
 	string control_label;

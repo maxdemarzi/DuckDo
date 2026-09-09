@@ -96,7 +96,6 @@ EffectResult CfmEffect(ClientContext &context, const CausalFrame &frame, const C
 	}
 	EffectResult result;
 	result.estimator = model.id;
-	result.variance_method = "effect dispersion (no model uncertainty)";
 	double sum = 0.0;
 	for (auto i : target) {
 		sum += cfm.cate[i];
@@ -107,9 +106,21 @@ EffectResult CfmEffect(ClientContext &context, const CausalFrame &frame, const C
 		const double d = cfm.cate[i] - result.estimate;
 		variance += d * d;
 	}
+	double sampling_var = 0.0;
 	if (target.size() > 1) {
 		variance /= static_cast<double>(target.size() - 1);
-		result.std_error = std::sqrt(variance / static_cast<double>(target.size()));
+		sampling_var = variance / static_cast<double>(target.size());
+	}
+	if (cfm.draws > 1) {
+		// Two independent sources: which rows the model saw, and which rows we
+		// happened to estimate over. They add.
+		const double between = cfm.ate_between_draw_se;
+		result.std_error = std::sqrt(sampling_var + between * between);
+		result.variance_method = StringUtil::Format("context ensemble, %llu draws (no parameter uncertainty)",
+		                                            static_cast<unsigned long long>(cfm.draws));
+	} else {
+		result.std_error = std::sqrt(sampling_var);
+		result.variance_method = "effect dispersion (no model uncertainty)";
 	}
 	result.warnings.push_back(StringUtil::Format(
 	    "%s ran with a %llu-row context (ladder rung %llu); the interval carries sampling spread only",
@@ -183,15 +194,27 @@ unique_ptr<FunctionData> BindCate(ClientContext &context, TableFunctionBindInput
 		const auto &model = RequireModel(spec);
 		auto cfm = CfmEstimateCate(context, frame, spec, model);
 		cate.cate = std::move(cfm.cate);
-		// The model returns point estimates; reporting a fabricated interval
-		// would be worse than reporting none.
 		cate.lo.assign(frame.n, 0.0);
 		cate.hi.assign(frame.n, 0.0);
-		for (idx_t i = 0; i < frame.n; i++) {
-			cate.lo[i] = cate.hi[i] = cate.cate[i];
+		if (cfm.draws > 1 && cfm.cate_se.size() == frame.n) {
+			for (idx_t i = 0; i < frame.n; i++) {
+				cate.lo[i] = cate.cate[i] - Z95 * cfm.cate_se[i];
+				cate.hi[i] = cate.cate[i] + Z95 * cfm.cate_se[i];
+			}
+			cate.interval_method = StringUtil::Format("context ensemble, %llu draws, pointwise 95%%",
+			                                          static_cast<unsigned long long>(cfm.draws));
+		} else {
+			// One draw funds no interval, and reporting a fabricated one would be
+			// worse than reporting none.
+			for (idx_t i = 0; i < frame.n; i++) {
+				cate.lo[i] = cate.hi[i] = cate.cate[i];
+			}
+			cate.interval_method = "none";
 		}
 		cate.learner = model.id;
-		cate.interval_method = "none";
+		for (auto &w : cfm.warnings) {
+			cate.warnings.push_back(w);
+		}
 	}
 
 	names = {"row_id", "id", "treatment", "outcome", "cate", "cate_low", "cate_high", "learner"};
@@ -339,6 +362,7 @@ void AddCommonNamedParameters(TableFunction &fn) {
 	fn.named_parameters["folds"] = LogicalType::BIGINT;
 	fn.named_parameters["bootstrap_reps"] = LogicalType::BIGINT;
 	fn.named_parameters["trim"] = LogicalType::DOUBLE;
+	fn.named_parameters["ensemble"] = LogicalType::BIGINT;
 }
 
 void RegisterUnderBothNames(ExtensionLoader &loader, TableFunction fn, const string &bare_name) {

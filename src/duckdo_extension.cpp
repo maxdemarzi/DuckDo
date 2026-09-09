@@ -38,6 +38,10 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "Threads for model inference and for the dense accumulations inside every "
 	                          "estimator; 0 means one per hardware thread",
 	                          LogicalType::BIGINT, Value::BIGINT(0));
+	config.AddExtensionOption("duckdo_ensemble_draws",
+	                          "Independent context draws a foundation model takes. One is a single pass with no "
+	                          "interval; more than one funds one from the spread across draws",
+	                          LogicalType::BIGINT, Value::BIGINT(1));
 	config.AddExtensionOption("duckdo_query_chunk",
 	                          "Rows scored per model forward pass", LogicalType::BIGINT, Value::BIGINT(512));
 	config.AddExtensionOption("duckdo_seed", "Seed for fold assignment, bootstrap and every other random draw",

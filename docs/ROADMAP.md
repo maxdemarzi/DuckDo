@@ -673,10 +673,12 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 
 Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in order:
 
-1. **Give the CFM path an interval.** Both models return point estimates today, and `do_ate` labels
-   its variance method `effect dispersion (no model uncertainty)` so nobody mistakes one for a
-   calibrated interval. CausalPFN's own package ships a calibration routine that DuckDo does not
-   yet reimplement.
+1. ~~**Give the CFM path an interval.**~~ **DONE** via `ensemble := k`, the context-ensemble
+   strategy this document already specified in Phase 6. On a DGP with a true effect of 3.0 the
+   single-draw interval `[3.035, 3.048]` excludes the truth and the 8-draw interval
+   `[3.007, 3.121]` contains it. What remains is the model's *own* parameter uncertainty, which the
+   ensemble does not touch — CausalPFN's package ships a calibration routine DuckDo has not
+   reimplemented.
 2. **Export CausalFM.** Two of the three models from section 1 now run; CausalFM adds front-door
    and instrumental-variable settings, which `do_identify` can already recommend but nothing can
    yet estimate.
