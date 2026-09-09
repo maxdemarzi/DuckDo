@@ -547,6 +547,18 @@ Windows, stages its DLLs next to the shell and test binaries. Three knobs adjust
 points at a mirror for networks where GitHub releases are unreachable, and `-DDUCKDO_ORT_VERSION`
 moves the pin.
 
+When a model's covariate budget binds, `ensemble := k` also varies **which** covariates each draw
+uses — sampled without replacement, weighted by outcome correlation — so the interval covers the
+choice of covariates rather than treating it as free. Where the budget does not bind this is a
+no-op, since every draw gets every covariate.
+
+That widening is honest but it is not a repair. On twelve contributing covariates with a true
+effect of 3.0, against Do-PFN's budget of five, the interval goes from ±0.006 to ±0.31 and still
+does not cover the truth — because a correctly specified AIPW restricted to those same five
+covariates returns 4.07. **Dropped confounders are bias, and no resampling interval covers bias.**
+When more covariates are dropped than kept, the result says so and points at a model whose budget
+fits; CausalPFN returns 2.984 on the same data.
+
 ### `do_list_models()` / `do_models()`
 
 `model, setting, license, commercial, attribution_required, max_features, context_ladder,

@@ -59,6 +59,10 @@ struct CausalSpec {
 	//! Independent context draws for a foundation model. One means a single
 	//! draw and no interval; more than one funds a real one.
 	idx_t ensemble = 1;
+	//! Which draw of that ensemble is being run. Draw 0 is the single-pass
+	//! behaviour and must stay deterministic; later draws vary the context and,
+	//! where the model's covariate budget binds, the covariate subset.
+	idx_t draw_index = 0;
 	//! Explicit two-level mapping when the treatment is not already 0/1.
 	string treated_label;
 	string control_label;

@@ -805,8 +805,31 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
 4. **Consider retiring or demoting Do-PFN.** CausalPFN is better on every axis measured here —
    licence, covariate budget, dynamic context, and no shrinkage. Do-PFN remains interesting only
    for its explicit treatment of unobserved confounding, which DuckDo does not currently exploit.
-5. **Ensemble over covariate subsets** where a model's budget binds, instead of keeping only the
-   most outcome-correlated.
+   The covariate-subset work above sharpened this: on twelve covariates Do-PFN returns 5.24 against
+   a truth of 3.0 purely because five is not enough, while CausalPFN returns 2.984. The five-column
+   budget is not a detail, it is disqualifying on any real table, and the docs should stop treating
+   the two models as peers.
+5. ~~**Ensemble over covariate subsets**~~ **DONE, and it measured its own limits.** Where a
+   model's covariate budget binds, each ensemble draw now samples a different subset weighted by
+   outcome correlation, instead of every draw using the same top-k. The interval therefore covers
+   *which covariates were chosen*, which a single top-k pass treats as free.
+
+   On a DGP with twelve contributing covariates and a true effect of 3.0, against Do-PFN's budget
+   of five, the interval widens from ±0.006 to ±0.31 — and still does not cover the truth:
+
+   | | estimate |
+   |---|---|
+   | AIPW, all twelve | 2.939 |
+   | CausalPFN, budget 99 | 2.984 |
+   | AIPW restricted to the five Do-PFN keeps | 4.071 |
+   | Do-PFN, single draw | 4.970 |
+   | Do-PFN, ensemble of 8 | 5.242 ± 0.31 |
+
+   A correctly specified estimator restricted to the same five covariates returns 4.07, so the
+   budget rather than the model accounts for most of the damage. **Dropping confounders is bias,
+   and no interval built by resampling can cover bias.** The result now says that explicitly when
+   more covariates are dropped than kept, because that is exactly when a healthier-looking interval
+   is most likely to be believed.
 6. ~~**Spill past `duckdo_max_memory`.**~~ **DONE, by enforcing rather than spilling.** The
    setting is now a real ceiling with an actionable message, and the measured peak for the 1M x 50
    frame fell from 1,645 MB to 882 MB against a 400 MB matrix. Spilling was considered and

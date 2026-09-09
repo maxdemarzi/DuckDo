@@ -437,9 +437,12 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   on the DGP above the single-draw interval is [3.035, 3.048] and **excludes the true 3.0**, while
   `ensemble := 8` gives [3.007, 3.121] and covers it. Even then the interval covers context
   selection and sampling, not the model's own weights, and it costs one forward pass per draw.
-- **Do-PFN accepts only five covariates and a fixed context ladder, and shrinks population effects.**
-  Where a covariate budget binds, DuckDo keeps the most outcome-correlated and names the rest in
-  `warnings`. `model := 'causalfm'` is not exported.
+- **Do-PFN's five-covariate budget is disqualifying on a real table.** On twelve contributing
+  covariates with a true effect of 3.0 it returns 5.24, while CausalPFN returns 2.984 — and a
+  correctly specified AIPW restricted to the same five covariates returns 4.07, so the budget
+  rather than the model does most of the damage. `ensemble := k` spreads the choice of covariates
+  across draws, which widens the interval from ±0.006 to ±0.31, but dropped confounders are bias
+  and no resampling interval covers bias. Use CausalPFN. `model := 'causalfm'` is not exported.
 - **ONNX Runtime links dynamically.** `-DDUCKDO_WITH_ONNX=ON` fetches the pinned release and stages
   its libraries next to the binaries, so this is handled rather than manual — but the community
   build still ships without it, because a shared dependency is exactly what the dependency-free

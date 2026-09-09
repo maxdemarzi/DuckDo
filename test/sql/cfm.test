@@ -193,8 +193,83 @@ true
 
 # The interval says what it does and does not cover.
 query I
-SELECT list_contains(warnings, '6 bootstrapped context draws; the interval covers context selection and sampling, not the model''s own parameter uncertainty')
+SELECT list_contains(warnings, '6 bootstrapped draws; the interval covers context selection and sampling, not the model''s own parameter uncertainty')
 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
             exclude := ['customer_id'], model := 'causalpfn', ensemble := 6);
+----
+true
+
+# --- a covariate budget that binds -----------------------------------------------
+#
+# Twelve covariates that all contribute, against Do-PFN's budget of five. A
+# single pass keeps the five most outcome-correlated and discards the other
+# seven; an ensemble spreads that choice across draws instead, so the interval
+# covers which covariates were picked rather than treating that as free.
+
+statement ok
+SELECT setseed(0.37);
+
+statement ok
+CREATE TABLE wide12 AS
+WITH u AS (SELECT i,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x3,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x4,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x5,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x6,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x7,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x8,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x9,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x10,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x11,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x12,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e,
+    random() AS d
+  FROM range(1200) r(i)),
+ p AS (SELECT *, 1.0/(1.0+exp(-(0.85*x1 + 0.80*x2 + 0.75*x3 + 0.70*x4 + 0.65*x5 + 0.60*x6 + 0.55*x7 + 0.50*x8 + 0.45*x9 + 0.40*x10 + 0.35*x11 + 0.30*x12))) AS ps FROM u)
+SELECT i AS cid, x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12,
+       (d<ps)::INT AS trt,
+       2.0 + (0.85*x1 + 0.80*x2 + 0.75*x3 + 0.70*x4 + 0.65*x5 + 0.60*x6 + 0.55*x7 + 0.50*x8 + 0.45*x9 + 0.40*x10 + 0.35*x11 + 0.30*x12) + 3.0*((d<ps)::INT) + e AS rev
+FROM p;
+
+# The ensemble interval is far wider than the single-draw one, because varying
+# the covariate subset exposes uncertainty a single top-k pass cannot see.
+query I
+SELECT (SELECT std_error FROM do_ate('wide12', treatment:='trt', outcome:='rev',
+                                     exclude:=['cid'], model:='do_pfn', ensemble:=4))
+     > 10 * (SELECT std_error FROM do_ate('wide12', treatment:='trt', outcome:='rev',
+                                          exclude:=['cid'], model:='do_pfn'));
+----
+true
+
+# But a wider interval is not a correct one. Dropping seven confounders is bias,
+# and the result says so instead of letting the healthier-looking interval imply
+# otherwise. A correctly specified AIPW restricted to the same five covariates
+# returns 4.07 against a truth of 3.0, so most of the damage is the budget.
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%confounding bias, not sampling variance%')) = 1
+FROM do_ate('wide12', treatment:='trt', outcome:='rev', exclude:=['cid'], model:='do_pfn', ensemble:=4);
+----
+true
+
+query I
+SELECT abs(estimate - 4.07) < 0.3
+FROM do_ate('wide12', treatment:='trt', outcome:='rev', covariates:=['x1','x2','x3','x4','x5']);
+----
+true
+
+# The model whose budget actually fits recovers it.
+query I
+SELECT abs(estimate - 3.0) < 0.2
+FROM do_ate('wide12', treatment:='trt', outcome:='rev', exclude:=['cid'], model:='causalpfn');
+----
+true
+
+# Where the budget does not bind, subset ensembling is a no-op: every draw gets
+# every covariate, so no such warning appears.
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%different subset weighted by%')) = 0
+FROM do_ate('wide12', treatment:='trt', outcome:='rev', exclude:=['cid'], model:='causalpfn', ensemble:=3);
 ----
 true

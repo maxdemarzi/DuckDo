@@ -221,7 +221,16 @@ BarDistribution LoadBorders(const string &dir, const string &manifest) {
 //! Rank covariates by |correlation| with the outcome and keep the budget the
 //! model allows. Do-PFN accepts six columns total and the first is the
 //! treatment, so five covariates survive.
-vector<idx_t> SelectFeatures(const CausalFrame &frame, idx_t budget) {
+//!
+//! Draw 0 keeps the top `budget` deterministically - that is the single-pass
+//! behaviour and it does not change. Later draws of an ensemble sample the
+//! budget without replacement, with weight proportional to that same
+//! correlation, so a covariate just outside the cut still gets to speak. Two
+//! things follow: the ensemble mean sees information a single top-k pass throws
+//! away entirely, and the spread across draws covers the *choice* of covariates
+//! instead of pretending it was free. Where the budget does not bind this is a
+//! no-op, because every draw gets every covariate.
+vector<idx_t> SelectFeatures(const CausalFrame &frame, idx_t budget, int64_t seed = 0, idx_t draw = 0) {
 	vector<std::pair<double, idx_t>> scored;
 	const double y_sd = StdDev(frame.y);
 	const double y_mean = Mean(frame.y);
@@ -238,9 +247,51 @@ vector<idx_t> SelectFeatures(const CausalFrame &frame, idx_t budget) {
 	std::stable_sort(
 	    scored.begin(), scored.end(),
 	    [](const std::pair<double, idx_t> &a, const std::pair<double, idx_t> &b) { return a.first > b.first; });
+
 	vector<idx_t> kept;
-	for (idx_t i = 0; i < scored.size() && kept.size() < budget; i++) {
-		kept.push_back(scored[i].second);
+	if (draw == 0 || scored.size() <= budget) {
+		for (idx_t i = 0; i < scored.size() && kept.size() < budget; i++) {
+			kept.push_back(scored[i].second);
+		}
+		std::sort(kept.begin(), kept.end());
+		return kept;
+	}
+
+	// Weighted sampling without replacement. The floor keeps a covariate that
+	// happens to be uncorrelated with the outcome from being unreachable: it can
+	// still be a confounder, and being uncorrelated with Y marginally is not
+	// evidence that it is not.
+	std::mt19937_64 rng(static_cast<uint64_t>(seed) ^ (draw * 0x9E3779B97F4A7C15ULL));
+	double floor_weight = 0.0;
+	for (auto &entry : scored) {
+		floor_weight += entry.first;
+	}
+	floor_weight = 0.1 * (floor_weight / static_cast<double>(scored.size())) + 1e-12;
+
+	vector<double> weight(scored.size(), 0.0);
+	for (idx_t i = 0; i < scored.size(); i++) {
+		weight[i] = scored[i].first + floor_weight;
+	}
+	for (idx_t pick = 0; pick < budget; pick++) {
+		double total = 0.0;
+		for (auto w : weight) {
+			total += w;
+		}
+		if (!(total > 0.0)) {
+			break;
+		}
+		std::uniform_real_distribution<double> uniform(0.0, total);
+		double target = uniform(rng);
+		idx_t chosen = 0;
+		for (idx_t i = 0; i < weight.size(); i++) {
+			target -= weight[i];
+			if (target <= 0.0) {
+				chosen = i;
+				break;
+			}
+		}
+		kept.push_back(scored[chosen].second);
+		weight[chosen] = 0.0;
 	}
 	std::sort(kept.begin(), kept.end());
 	return kept;
@@ -359,12 +410,37 @@ struct Prepared {
 Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model, idx_t context_size,
                        bool resample) {
 	Prepared out;
-	out.features = SelectFeatures(frame, model.max_covariates);
+	out.features = SelectFeatures(frame, model.max_covariates, spec.seed, spec.draw_index);
 	if (frame.X.cols > model.max_covariates) {
-		out.warnings.push_back(StringUtil::Format(
-		    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu", model.id.c_str(),
-		    static_cast<unsigned long long>(model.max_covariates), static_cast<unsigned long long>(out.features.size()),
-		    static_cast<unsigned long long>(frame.X.cols)));
+		if (spec.ensemble > 1) {
+			out.warnings.push_back(StringUtil::Format(
+			    "%s accepts %llu covariates out of %llu, so each ensemble draw uses a different subset weighted by "
+			    "outcome correlation - the interval therefore covers which covariates were chosen, not only which "
+			    "rows",
+			    model.id.c_str(), static_cast<unsigned long long>(model.max_covariates),
+			    static_cast<unsigned long long>(frame.X.cols)));
+		} else {
+			out.warnings.push_back(StringUtil::Format(
+			    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu. The rest are "
+			    "discarded entirely - ensemble := k spreads the choice across draws instead",
+			    model.id.c_str(), static_cast<unsigned long long>(model.max_covariates),
+			    static_cast<unsigned long long>(out.features.size()),
+			    static_cast<unsigned long long>(frame.X.cols)));
+		}
+		// Dropping confounders produces BIAS, and no interval built by resampling
+		// can cover bias. Measured on a DGP with twelve contributing covariates
+		// and a true effect of 3.0: adjusting for all twelve gives 2.94, and a
+		// correctly specified AIPW restricted to the five this model keeps gives
+		// 4.07 - the budget, not the model, accounts for most of that. Saying so
+		// matters more when the ensemble has just made the interval look healthier.
+		if (frame.X.cols > 2 * model.max_covariates) {
+			out.warnings.push_back(StringUtil::Format(
+			    "more covariates were dropped (%llu) than kept (%llu). What that leaves behind is confounding bias, "
+			    "not sampling variance, so no interval here can cover it - prefer a model whose budget fits, such "
+			    "as causalpfn at %llu",
+			    static_cast<unsigned long long>(frame.X.cols - model.max_covariates),
+			    static_cast<unsigned long long>(model.max_covariates), 99ULL));
+		}
 	}
 	out.context_rows = SampleContext(frame, context_size, spec.seed, resample);
 	return out;
@@ -640,6 +716,7 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 		for (idx_t d = 1; d < draws; d++) {
 			CausalSpec draw_spec = spec;
 			draw_spec.seed = spec.seed + static_cast<int64_t>(d) * 7919;
+			draw_spec.draw_index = d;
 			auto extra = run_once(draw_spec);
 			double draw_sum = 0.0;
 			for (auto v : extra.cate) {
@@ -685,9 +762,10 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 			                          "and no interval is reported");
 		} else {
 			result.warnings.push_back(StringUtil::Format(
-			    "%llu bootstrapped context draws; the interval covers context selection and sampling, not the "
-			    "model's own parameter uncertainty",
-			    static_cast<unsigned long long>(draws)));
+			    "%llu bootstrapped draws; the interval covers context selection and sampling%s, not the model's own "
+			    "parameter uncertainty",
+			    static_cast<unsigned long long>(draws),
+			    frame.X.cols > model.max_covariates ? " and the covariate subset" : ""));
 		}
 	}
 
