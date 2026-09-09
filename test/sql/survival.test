@@ -1,0 +1,175 @@
+# name: test/sql/survival.test
+# description: time-to-event outcomes as a difference in restricted mean survival time
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.29);
+
+# Exponential survival with hazard lambda = exp(-1.0 + 0.5*x - 0.7*a). Treatment
+# lowers the hazard, so treated subjects last longer; x drives both treatment
+# assignment and the hazard, so the unadjusted contrast is confounded. For an
+# exponential, RMST(tau) = (1 - exp(-lambda*tau))/lambda, so the truth is
+# computable in closed form from these very rows - both the causal contrast and
+# the confounded one an unadjusted analysis converges to.
+statement ok
+CREATE TABLE surv AS
+WITH u AS (
+  SELECT i,
+    sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+    random() AS ua, random() AS ut, random() AS uc
+  FROM range(20000) r(i)),
+ a AS (SELECT *, (ua < 1.0/(1.0+exp(-0.8*x)))::INT AS trt FROM u),
+ h AS (SELECT *, exp(-1.0 + 0.5*x - 0.7*trt) AS lam FROM a)
+SELECT i AS id, x, trt, -ln(ut+1e-12)/lam AS t_event, -ln(uc+1e-12)/0.12 AS t_cens FROM h;
+
+statement ok
+CREATE TABLE obs AS
+SELECT id, x, trt, least(t_event, t_cens) AS followup, (t_event <= t_cens)::INT AS observed FROM surv;
+
+# Causal truth at tau = 5 is 0.9239; the confounded contrast converges to 0.4638.
+# Confounding halves the apparent benefit here, so this is a real test of the
+# weighting rather than a formality.
+query I
+SELECT abs(estimate - 0.9239) < 0.06
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+query I
+SELECT ci_low < 0.9239 AND 0.9239 < ci_high
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+# Without adjustment it lands on the confounded value instead, which is what
+# makes the adjusted number worth having.
+query I
+SELECT abs(estimate - 0.4638) < 0.06
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := [], horizon := 5.0);
+----
+true
+
+query III
+SELECT estimand, estimator, rmst_treated > rmst_control
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+RMST difference	iptw-kaplan-meier	true
+
+# Both arms' restricted means are reported, because the difference alone does not
+# say whether 0.9 is a lot.
+query I
+SELECT abs(rmst_treated - 3.218) < 0.15 AND abs(rmst_control - 2.315) < 0.15
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+query I
+SELECT abs(censored_fraction - 0.328) < 0.02
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+# --- the horizon is part of the estimand ---------------------------------------
+#
+# The obvious default - the last time both arms were observed - lands at 33.3
+# here, where a handful of subjects remain and the tail of the curve is noise
+# that the restricted mean then integrates. The default instead stops where both
+# arms still have 5% of their subjects at risk.
+
+query I
+SELECT horizon > 5.0 AND horizon < 15.0
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], exclude := ['id']);
+----
+true
+
+query I
+SELECT horizon < (SELECT max(followup) FROM obs) / 3
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], exclude := ['id']);
+----
+true
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%horizon defaulted to%')) = 1
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], exclude := ['id']);
+----
+true
+
+# A horizon past the end of the data is allowed but says what it is doing.
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%extrapolated flat past that point%')) = 1
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 500.0);
+----
+true
+
+# --- what it refuses to report --------------------------------------------------
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%not a hazard ratio, and that is deliberate%')) = 1
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%censoring is assumed independent%')) = 1
+FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+# --- error paths ----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_rmst('obs', treatment := 'trt', event := 'observed');
+----
+requires duration
+
+statement error
+SELECT * FROM do_rmst('obs', treatment := 'trt', duration := 'followup');
+----
+requires event
+
+statement error
+SELECT * FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
+                      covariates := ['x'], horizon := -1.0);
+----
+horizon := must be positive
+
+statement ok
+CREATE TABLE negative AS SELECT id, x, trt, -followup AS followup, observed FROM obs;
+
+statement error
+SELECT * FROM do_rmst('negative', treatment := 'trt', duration := 'followup', event := 'observed',
+                      covariates := ['x']);
+----
+must be a non-negative finite time
+
+# An arm with no observed events has a curve that never falls, so there is
+# nothing to compare.
+statement ok
+CREATE TABLE noevents AS
+SELECT id, x, trt, followup, CASE WHEN trt = 1 THEN 0 ELSE observed END AS observed FROM obs;
+
+statement error
+SELECT * FROM do_rmst('noevents', treatment := 'trt', duration := 'followup', event := 'observed',
+                      covariates := ['x']);
+----
+has no observed events
+
+query I
+SELECT count(*) FROM duckdo_rmst('obs', treatment := 'trt', duration := 'followup',
+                                 event := 'observed', covariates := ['x'], horizon := 5.0);
+----
+1

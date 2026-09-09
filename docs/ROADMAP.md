@@ -663,7 +663,19 @@ Roughly in order of value per unit of effort:
    halves the interval while moving the estimate off the truth — every quality signal improving as
    the answer gets worse. Causal longitudinal PFNs as a model backend, and history-dependent
    structural models beyond "cumulative periods treated", are still open.
-4. **Survival outcomes** — time-to-event treatment effects.
+4. ~~**Survival outcomes** — time-to-event treatment effects.~~ **DONE**: `do_rmst` returns the
+   difference in restricted mean survival time, from inverse-probability-weighted Kaplan-Meier
+   curves. On an exponential DGP with a closed-form truth of 0.9239 it returns 0.904 with an
+   interval covering it, against 0.443 unadjusted — confounding hides more than half the benefit
+   there.
+
+   It deliberately reports no hazard ratio. A hazard ratio conditions on being still at risk, and
+   treatment changes who is still at risk, so the comparison stops being causal after the first
+   events even under randomisation. The horizon is treated as part of the estimand and defaults to
+   the last time both arms still had 5% of their subjects at risk — the obvious default, the last
+   time both arms were observed at all, lands where a handful of people remain and makes the
+   restricted mean integrate over noise. Competing risks and time-varying treatment within the
+   survival setting are still open.
 5. ~~**Mediation analysis** — natural direct and indirect effects.~~ **DONE**: `do_mediate`
    returns the natural direct and indirect effects and the proportion mediated, with a row-level
    bootstrap so the three intervals are mutually consistent and the total is exactly direct plus

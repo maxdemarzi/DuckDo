@@ -151,6 +151,25 @@ is not the causal effect — and `do_msm` gives **2.13**.
 default because on this data it raises effective *n* from 6,245 to 12,101 and halves the interval
 while moving the estimate from one that covers the truth to one that excludes it.
 
+### Time-to-event outcomes
+
+```sql
+SELECT estimate, ci_low, ci_high, horizon, rmst_treated, rmst_control
+FROM do_rmst('trial', treatment := 'arm', duration := 'days_followed', event := 'relapsed',
+             covariates := ['age', 'stage']);
+-- 0.904 | 0.851 | 0.957 | 5.0 | 3.218 | 2.315
+```
+
+The difference in **restricted mean survival time** — how much longer a treated subject stays
+event-free within the horizon. There is deliberately no hazard ratio: a hazard ratio compares
+subjects still at risk, treatment changes who is still at risk, and the comparison stops being
+causal after the first events even under randomisation.
+
+On an exponential DGP whose closed-form truth is 0.9239 this returns 0.904 with an interval
+covering it; unadjusted it returns 0.443, so confounding hides more than half the benefit. The
+horizon is part of the estimand and defaults to the last time both arms still had 5% of subjects
+at risk, because the obvious default lands where a handful of people remain.
+
 ### Causal foundation models
 
 ```sql
@@ -433,9 +452,9 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-264 assertions in the dependency-free build, 289 with the foundation-model path enabled, across
+315 assertions in the dependency-free build, 340 with the foundation-model path enabled, across
 estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
-time-varying treatment, the `do()` surface and end-to-end inference for both models.
+time-varying treatment, survival, the `do()` surface and end-to-end inference for both models.
 
 Three further dev-only harnesses, none shipped:
 

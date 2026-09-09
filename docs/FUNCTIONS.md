@@ -417,6 +417,65 @@ correct handling of measured confounders that the treatment itself affects — w
 covariate adjustment can do. The structural model is linear in cumulative treated periods, so it
 assumes every period is worth the same and that only the total matters, not when it happened.
 
+### `do_rmst`
+
+Time-to-event outcomes. Named parameters: `duration` (observed follow-up time) and `event`
+(1 where the event happened, 0 where the subject was censored), both required, plus `horizon`.
+
+```sql
+SELECT estimate, ci_low, ci_high, horizon, rmst_treated, rmst_control, censored_fraction
+FROM do_rmst('trial', treatment := 'arm', duration := 'days_followed', event := 'relapsed',
+             covariates := ['age', 'stage']);
+-- 0.904 | 0.851 | 0.957 | 5.0 | 3.218 | 2.315 | 0.328
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, horizon, rmst_treated,
+rmst_control, n, n_events, censored_fraction, warnings`. The estimate is the difference in
+**restricted mean survival time**: how much longer, on average, a treated subject stays event-free
+within the first `horizon` units of the clock.
+
+**There is deliberately no hazard ratio.** A hazard ratio compares subjects still at risk at each
+moment, and treatment changes who is still at risk — so after the first events the two risk sets
+are no longer comparable, even under perfect randomisation. That is not a bug adjustment can fix;
+it is what the estimand means. RMST has no such problem, and it comes out in units a
+non-statistician can act on.
+
+Confounding is handled by inverse-probability weighting the two Kaplan–Meier curves rather than by
+modelling the hazard, which keeps the estimand marginal. On an exponential DGP whose closed-form
+truth is 0.9239, `do_rmst` returns 0.904 with an interval covering it, while the same call with
+`covariates := []` returns 0.443 — the confounded value, which here is less than half the real
+benefit.
+
+**`horizon` is part of the estimand, not a display option.** A different horizon is a different
+quantity. The default is the last time *both* arms still had at least 5% of their subjects at
+risk. The obvious alternative — the last time both arms were observed at all — is a trap: on
+20,000 subjects it lands where a handful of people remain, and the restricted mean then integrates
+over a stretch of curve that is almost pure noise. A `horizon` past the end of the data is allowed
+and warns that it is extrapolating flat.
+
+Censoring is assumed independent of the event time given the covariates. Nothing in the data can
+check that, and it fails exactly when subjects leave because they are getting worse.
+
+### `do_frame_summary`
+
+What the encoder did, one row per encoded feature. Takes the same arguments as `do_ate`.
+
+```sql
+SELECT feature, source, kind, level, center, scale, n_rows_with_missing
+FROM do_frame_summary('customers', treatment := 'discount', outcome := 'revenue');
+-- tenure          | tenure | numeric            | NULL  | 2.995 | 1.794 | 80
+-- tenure__missing | tenure | missing_indicator  | NULL  | 0.200 | 0.401 | 80
+-- colour=green    | colour | one_hot            | green | 0.333 | 0.472 | 80
+-- colour=red      | colour | one_hot            | red   | 0.335 | 0.473 | 80
+```
+
+Every estimator runs on this frame, so which columns were adjusted for, which categoricals became
+one-hot columns and which reference level was dropped, where NULLs were filled and how many rows
+that touched, and what standardisation the reported coefficients are on, should all be answerable
+without reading the source. `n`, `n_features`, `n_treated`, `n_rows_with_missing`,
+`treated_label`, `control_label` and `warnings` repeat on every row so one call answers both
+"what is in here" and "what became of column X".
+
 ---
 
 ## Interventions
