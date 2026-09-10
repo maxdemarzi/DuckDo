@@ -12,7 +12,7 @@
 extension:
   name: duckdo
   description: Causal inference inside DuckDB - average and conditional treatment effects, assumption diagnostics, refutation tests, DAG-based identification and interventional do() queries, all in SQL with no Python and no model downloads
-  version: '2026.09.08'
+  version: '2026.09.09'
   language: C++
   build: cmake
   license: MIT
@@ -147,10 +147,17 @@ docs:
     SELECT * FROM do_dose_response(...);  -- the curve, on a quantile grid
     SELECT * FROM do_did(...);            -- Callaway-Sant'Anna group-time effects
     SELECT * FROM do_event_study(...);    -- the pre-trend check
+    SELECT * FROM do_msm(...);            -- time-varying treatment, stabilised IPTW
+    SELECT * FROM do_rmst(...);           -- time-to-event, without a hazard ratio
     ```
 
     Two-way fixed effects is deliberately absent: it misweights under staggered
-    adoption.
+    adoption. `do_msm` handles the case that has no correct adjustment set at all
+    - a confounder the treatment itself affects - where adjusting for everything
+    measured gives 3.47 against a truth of 2.0 and the marginal structural model
+    gives 2.13. `do_rmst` returns a difference in restricted mean survival time
+    rather than a hazard ratio, which is not a causal quantity because the risk
+    sets stop being comparable the moment the treatment works.
 
     ### Interventions and policies
 
@@ -174,7 +181,13 @@ docs:
     | heterogeneous | 2.9936 | 2.9847 | 2.9716 | 2.9662 |
     | IHDP npci-1 | 4.0161 | 3.8766 | 3.9555 | 4.0287 |
 
-    Reproduce with `scripts/crosscheck_econml.py`.
+    Across all ten IHDP replications available from the CEVAE mirror, mean
+    absolute ATE error is 0.137 for `aipw` and 0.147 for econml's `LinearDML`.
+    On Lalonde NSW, where treatment was randomised so the unadjusted difference
+    *is* the effect, every method lands within 13% of the 1794.3 benchmark.
+
+    Reproduce with `scripts/crosscheck_econml.py` and
+    `scripts/bench_headtohead.py`.
 
     ### Limits, stated plainly
 
@@ -201,10 +214,13 @@ docs:
     yourself from the upstream checkpoint with `scripts/export/export_dopfn.py`,
     which refuses to finish unless every graph reproduces PyTorch to within 1e-4.
 
-    On a heterogeneous DGP with a true ATE of 2.9806, CausalPFN returns 3.0610
-    beside AIPW's 3.0628, with a CATE correlation of 0.9995. Do-PFN returns
-    2.6307 - it ranks individuals well but shrinks the population average, the
-    documented weakness of that model class, reproduced rather than hidden.
+    On a linear DGP CausalPFN matches AIPW and cannot do better: 3.0610 beside
+    3.0628 against a truth of 2.9806. On IHDP, where the covariate structure is
+    real and nobody specified it in advance, it wins decisively - mean PEHE
+    0.416 against 2.161 for the best classical method measured, a factor of five
+    on per-row effects. Do-PFN ranks individuals well but shrinks the population
+    average, the documented weakness of that model class, reproduced rather than
+    hidden, and its five-covariate budget is disqualifying on a real table.
     Start with CausalPFN.
 
     Every function is registered twice: the short `do_*` name and the
