@@ -42,7 +42,10 @@ const vector<ModelInfo> &ModelCatalog() {
 		causalpfn.kind = ModelKind::CAUSALPFN;
 		causalpfn.id = "causalpfn";
 		causalpfn.setting = "backdoor (ignorability)";
-		causalpfn.license = "Apache-2.0";
+		// The upstream LICENSE is titled "CausalPFN License, Version 1.0". Its terms
+		// are Apache-2.0's, but it is not Apache-2.0 by name, and a catalog that
+		// says otherwise is misreporting the thing a user checks before using it.
+		causalpfn.license = "CausalPFN License 1.0";
 		causalpfn.source = "https://github.com/vdblm/CausalPFN";
 		causalpfn.commercial = true;
 		causalpfn.attribution_required = false;
@@ -54,16 +57,32 @@ const vector<ModelInfo> &ModelCatalog() {
 		causalpfn.decode_graph = "causalpfn_decode.onnx";
 		causalpfn.decode_weights = "causalpfn_decode.weights.bin";
 		causalpfn.manifest_file = "causalpfn.manifest.json";
+		// Hosted alongside the upstream licence, a NOTICE naming every changed file,
+		// and the authors' citation. The URL is pinned to one revision, so the bytes
+		// behind it cannot change under a published DuckDo, and each file is checked
+		// against these digests before it is installed.
+		causalpfn.default_source = "https://huggingface.co/maxdemarzi/duckdo-causalpfn/resolve/3bbb1bd6b44d5deb51e0f246d45199eb11e5f2d5";
+		causalpfn.pinned_sha256 = {
+		    {"causalpfn_encode.onnx", "63872a723e825a461c5256cdfa5d35215697ed00fa1eab12b583be93157ffb83"},
+		    {"causalpfn_encode.weights.bin", "96c815bc6c73bfde6b862a79684d2fecb5677ac53dcbd68edb060ff500dd5b72"},
+		    {"causalpfn_decode.onnx", "0c8e23951988b0a21366c7e5d557d682b4040c68c91d0972f1cb516f96b915a4"},
+		    {"causalpfn_decode.weights.bin", "efb48fd595e942a6cffe9620a32f3178a54e1b6cc1eaa5cb02707406dd6af7ec"},
+		    {"causalpfn.manifest.json", "6756dc4890bf5a797acee4c66845f1ed1ff0c8ad45db0836c9312c7d322bf366"},
+		};
 		models.push_back(std::move(causalpfn));
 
 		ModelInfo dopfn;
 		dopfn.kind = ModelKind::DOPFN;
 		dopfn.id = "do_pfn";
 		dopfn.setting = "non-identifiable prior";
-		dopfn.license = "CC BY 4.0";
+		// The upstream repository has no LICENSE file and its README states no
+		// terms. This catalog used to say CC BY 4.0, which nothing upstream
+		// grants. With no licence the weights are all rights reserved, so this is
+		// reported as it is and the weights are never redistributed.
+		dopfn.license = "none stated upstream";
 		dopfn.source = "https://github.com/jr2021/Do-PFN";
-		dopfn.commercial = true;
-		dopfn.attribution_required = true;
+		dopfn.commercial = false;
+		dopfn.attribution_required = false;
 		dopfn.max_covariates = 5;
 		dopfn.num_buckets = 100;
 		dopfn.context_ladder = {128, 512, 1024, 2048};
@@ -810,7 +829,10 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 		}
 	}
 
-	if (model.attribution_required) {
+	if (!model.commercial) {
+		result.warnings.push_back(model.id + "'s upstream repository states no licence: its weights are all rights "
+		                                     "reserved, and whether you may use them is between you and its authors");
+	} else if (model.attribution_required) {
 		result.warnings.push_back(model.id + " is " + model.license + "; attribution is required downstream");
 	}
 	return result;
@@ -879,7 +901,9 @@ unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBin
 			available = true;
 			detail = "ready in " + dir;
 		}
-		if (model.attribution_required) {
+		if (!model.commercial) {
+			detail += "; the upstream repository states no licence, so its weights are all rights reserved";
+		} else if (model.attribution_required) {
 			detail += "; " + model.license + " requires attribution downstream";
 		}
 		bind->rows.push_back(
@@ -913,8 +937,9 @@ unique_ptr<FunctionData> BindDevices(ClientContext &, TableFunctionBindInput &, 
 // DuckDo contains no HTTP client, and this does not add one. Every byte goes
 // through DuckDB's own virtual file system, which hands a local path to the
 // local file system and an HTTPS URL to the httpfs extension. So the network
-// is reachable from here only when the user calls this function with a URL, and
-// only through an extension DuckDB loads - nothing in DuckDo opens a socket.
+// is reachable from here only when the user calls this function - with a URL,
+// or with no source for a model DuckDo hosts - and only through an extension
+// DuckDB loads. Nothing in DuckDo opens a socket.
 
 void EnsureDirectory(FileSystem &fs, const string &dir) {
 	if (dir.empty() || dir.back() == ':' || fs.DirectoryExists(dir)) {
@@ -937,7 +962,10 @@ string HexDigest(duckdb_mbedtls::MbedTlsWrapper::SHA256State &sha) {
 //! that is renamed only once the copy has finished, so an interrupted download
 //! can never be mistaken for a model - which matters here, because an artifact
 //! that exists is an artifact do_list_models reports as ready.
-std::pair<int64_t, string> CopyAndHash(FileSystem &fs, const string &from, const string &to) {
+//! With `expected` set, the digest is checked before the rename, so a file that
+//! fails verification is never installed - not even briefly.
+std::pair<int64_t, string> CopyAndHash(FileSystem &fs, const string &from, const string &to,
+                                       const string &expected) {
 	const string part = to + ".part";
 	int64_t total = 0;
 	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
@@ -963,11 +991,18 @@ std::pair<int64_t, string> CopyAndHash(FileSystem &fs, const string &from, const
 		}
 		throw BinderException("duckdo: could not copy '%s': %s", from, ex.what());
 	}
+	const string digest = HexDigest(sha);
+	if (!expected.empty() && digest != expected) {
+		fs.RemoveFile(part);
+		throw BinderException("duckdo: '%s' has SHA-256 %s, but the pinned release expects %s. Nothing was "
+		                      "installed from it; the model directory holds what it held before",
+		                      from, digest, expected);
+	}
 	if (fs.FileExists(to)) {
 		fs.RemoveFile(to);
 	}
 	fs.MoveFile(part, to);
-	return {total, HexDigest(sha)};
+	return {total, digest};
 }
 
 std::pair<int64_t, string> HashFile(FileSystem &fs, const string &path) {
@@ -1011,18 +1046,46 @@ unique_ptr<FunctionData> BindDownload(ClientContext &context, TableFunctionBindI
 	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
 		overwrite = entry->second.GetValue<bool>();
 	}
-	if (source.empty()) {
-		// No hosted copy of the weights exists, so there is no default to fall
-		// back on - and a default URL is exactly the kind of network request a
-		// user should never make by accident.
-		const char *script =
-		    model->kind == ModelKind::CAUSALPFN ? "export_causalpfn.py" : "export_dopfn.py --repo <Do-PFN checkout>";
-		throw BinderException("duckdo: do_download needs source := '<directory or URL>' holding %s's exported "
-		                      "artifacts. There is no default: no hosted copy exists. Export them yourself with "
-		                      "`python scripts/export/%s --out <dir>`, then point source at that directory or at "
-		                      "wherever someone has already put them",
-		                      id, script);
+	const bool use_default = source.empty();
+	if (use_default) {
+		if (model->default_source.empty()) {
+			const char *script = model->kind == ModelKind::CAUSALPFN ? "export_causalpfn.py"
+			                                                          : "export_dopfn.py --repo <Do-PFN checkout>";
+			const string why = model->commercial
+			                       ? string("nothing is hosted for it")
+			                       : string("its upstream repository states no licence, so its weights cannot be "
+			                                "redistributed");
+			throw BinderException("duckdo: do_download needs source := '<directory or URL>' for %s: %s. Export the "
+			                      "artifacts yourself with `python scripts/export/%s --out <dir>`, then point source "
+			                      "at that directory",
+			                      id, why, script);
+		}
+		source = model->default_source;
 	}
+	// Verification is on by default exactly when the bytes come from DuckDo's
+	// own pinned release. An export someone ran themselves has different bytes,
+	// and there is nothing to verify it against.
+	bool verify = use_default;
+	entry = input.named_parameters.find("verify");
+	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
+		verify = entry->second.GetValue<bool>();
+	}
+	if (verify && model->pinned_sha256.empty()) {
+		throw BinderException("duckdo: %s has no pinned checksums to verify against; verify := false copies without "
+		                      "verification",
+		                      id);
+	}
+	auto expected_for = [&](const string &name) {
+		if (!verify) {
+			return string();
+		}
+		for (auto &pin : model->pinned_sha256) {
+			if (pin.first == name) {
+				return pin.second;
+			}
+		}
+		throw BinderException("duckdo: no pinned checksum for %s's file '%s'", id, name);
+	};
 	while (source.size() > 1 && (source.back() == '/' || source.back() == '\\')) {
 		source.pop_back();
 	}
@@ -1052,15 +1115,23 @@ unique_ptr<FunctionData> BindDownload(ClientContext &context, TableFunctionBindI
 	for (auto &name : files) {
 		const string from = source + "/" + name;
 		const string to = dir + "/" + name;
+		const string expected = expected_for(name);
 		if (!overwrite && fs.FileExists(to)) {
 			auto kept = HashFile(fs, to);
+			if (!expected.empty() && kept.second != expected) {
+				throw BinderException("duckdo: '%s' is already in the model directory but differs from the pinned "
+				                      "release (SHA-256 %s, expected %s). overwrite := true replaces it",
+				                      to, kept.second, expected);
+			}
 			bind->rows.push_back({Value(id), Value(name), Value::BIGINT(kept.first), Value(kept.second),
-			                      Value("kept: already present; overwrite := true replaces it"), Value(from)});
+			                      Value(verify ? "kept: already present, verified"
+			                                   : "kept: already present; overwrite := true replaces it"),
+			                      Value(from)});
 			continue;
 		}
-		auto copied = CopyAndHash(fs, from, to);
+		auto copied = CopyAndHash(fs, from, to, expected);
 		bind->rows.push_back({Value(id), Value(name), Value::BIGINT(copied.first), Value(copied.second),
-		                      Value("downloaded"), Value(from)});
+		                      Value(verify ? "downloaded, verified" : "downloaded"), Value(from)});
 	}
 	return std::move(bind);
 }
@@ -1071,6 +1142,7 @@ void RegisterModelFunctions(ExtensionLoader &loader) {
 	TableFunction download("", {LogicalType::VARCHAR}, EmitRows, BindDownload, InitGlobal);
 	download.named_parameters["source"] = LogicalType::VARCHAR;
 	download.named_parameters["overwrite"] = LogicalType::BOOLEAN;
+	download.named_parameters["verify"] = LogicalType::BOOLEAN;
 	RegisterUnderBothNames(loader, download, "download");
 
 	TableFunction models("", vector<LogicalType>(), EmitRows, BindListModels, InitGlobal);

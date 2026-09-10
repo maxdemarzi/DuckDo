@@ -7,7 +7,9 @@ DuckDo makes DuckDB an in-process causal engine: treatment effects, assumption d
 graph-based identification expressed as ordinary SQL over ordinary tables. No Python, no training
 loop, no data leaving the process, and **no network request you did not ask for by name**: no
 usage ping, no version check. The one function that can reach the network is `do_download`, and it
-does so only when you hand it a URL. Causal analysis runs on the data that is worth analysing.
+does so only when you call it: with a URL, or with no source for CausalPFN, the one model DuckDo
+hosts, fetched from a pinned revision and checked against compiled-in checksums. Causal analysis runs
+on the data that is worth analysing.
 
 ```sql
 SELECT estimand, estimator, round(estimate, 2) AS estimate, round(ci_low, 2), round(ci_high, 2)
@@ -185,8 +187,8 @@ at risk, because the obvious default lands where a handful of people remain.
 
 ```sql
 SELECT model, setting, license, max_covariates, available FROM do_list_models();
--- causalpfn | backdoor (ignorability) | Apache-2.0 | 99 | true
--- do_pfn    | non-identifiable prior  | CC BY 4.0  |  5 | true
+-- causalpfn | backdoor (ignorability) | CausalPFN License 1.0 | 99 | true
+-- do_pfn    | non-identifiable prior  | none stated upstream  |  5 | true
 
 -- Same SQL, different engine. The result names the model, not a classical estimator.
 SELECT estimator, estimate, variance_method
@@ -198,7 +200,7 @@ FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model :=
 |---|---|---|
 | Parameters | 18.8M | 7.3M |
 | Identification setting | backdoor (ignorability) | non-identifiable prior |
-| Licence | Apache-2.0, no obligation | CC BY 4.0, **attribution required** |
+| Licence | CausalPFN License 1.0 (Apache-2.0's terms) | **none stated upstream**: all rights reserved |
 | Covariates accepted | 99 | 5 |
 | Context length | dynamic to 4096 | fixed ladder: 128/512/1024/2048 |
 | Shrinks the ATE? | no | **yes, materially** |
@@ -221,22 +223,33 @@ On a DGP with a true effect of 3.0, the single-draw interval is `[3.035, 3.048]`
 truth**. The 8-draw interval `[3.007, 3.121]` contains it. Each draw is a full forward pass, so this
 costs k times as much.
 
-Getting either running takes three steps, and the extension never ships or redistributes weights:
+The extension itself never ships weights. Getting a model running takes two steps:
 
 ```sh
 # 1. build with ONNX Runtime - the pinned release is fetched and staged for you
 cmake -DDUCKDO_WITH_ONNX=ON ...
-
-# 2. export the graphs yourself, from the upstream checkpoints
-pip install causalpfn
-python scripts/export/export_causalpfn.py --out ~/.cache/duckdo
-
-git clone https://github.com/jr2021/Do-PFN            # optional, second model
-python scripts/export/export_dopfn.py --repo ./Do-PFN --out ~/.cache/duckdo
-
-# 3. point DuckDo at them
-SET duckdo_model_dir = '~/.cache/duckdo';
 ```
+
+```sql
+-- 2. fetch CausalPFN's hosted export: pinned to one revision, every file checked
+--    against a SHA-256 compiled into the extension before it is installed
+SELECT file, status FROM do_download('causalpfn');
+```
+
+The export is published at [maxdemarzi/duckdo-causalpfn](https://huggingface.co/maxdemarzi/duckdo-causalpfn),
+with the upstream licence, a notice of every changed file, and the authors' citation. To build it
+yourself instead, run `pip install causalpfn` and then
+`python scripts/export/export_causalpfn.py --out ~/.cache/duckdo`.
+
+Do-PFN's upstream repository states no licence, so its weights are all rights reserved and DuckDo
+does not host them. If you have the right to use them, export them for yourself:
+
+```sh
+git clone https://github.com/jr2021/Do-PFN
+python scripts/export/export_dopfn.py --repo ./Do-PFN --out ~/.cache/duckdo
+```
+
+Files go to `duckdo_model_dir`, which defaults to `~/.cache/duckdo`.
 
 Both exports refuse to finish unless the graph reproduces PyTorch. Do-PFN is gated on logits, to
 **1e-4** (measured 4.3e-06 to 8.1e-06). CausalPFN is gated on the *estimand* instead, because

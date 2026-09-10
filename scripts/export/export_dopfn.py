@@ -24,7 +24,8 @@ for any real table regardless. The runtime picks the largest rung that fits.
 
 Weights are written as external data, so the extension can compile in a
 weight-free graph and download the weights separately under the model's own
-licence (CC BY 4.0 - attribution required).
+licence - which is none: the upstream repository states no licence, so the
+weights are all rights reserved and are exported for your own use only.
 
 Dev-only; the extension ships the graph, never the weights.
 
@@ -231,8 +232,8 @@ def main():
     manifest = {
         "model": "dopfn",
         "source": "https://github.com/jr2021/Do-PFN",
-        "license": "CC BY 4.0",
-        "attribution_required": True,
+        "license": "none stated upstream",
+        "attribution_required": False,
         "setting": "non-identifiable prior",
         "opset": args.opset,
         "max_features": features,

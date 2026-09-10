@@ -59,9 +59,9 @@ SELECT estimator, variance_method FROM do_ate('customers', treatment := 'discoun
 ----
 do_pfn	effect dispersion (no model uncertainty)
 
-# The CC BY 4.0 attribution obligation travels with the result.
+# That Do-PFN's upstream grants no licence travels with the result.
 query I
-SELECT list_contains(warnings, 'do_pfn is CC BY 4.0; attribution is required downstream')
+SELECT len(list_filter(warnings, w -> w LIKE 'do_pfn''s upstream repository states no licence%')) = 1
 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
             exclude := ['customer_id'], model := 'do_pfn');
 ----
@@ -118,9 +118,9 @@ SELECT estimator, variance_method FROM do_ate('customers', treatment := 'discoun
 ----
 causalpfn	effect dispersion (no model uncertainty)
 
-# Apache-2.0 carries no attribution obligation, so no such warning is attached.
+# CausalPFN's licence puts no obligation on a result, so no licence warning is attached.
 query I
-SELECT NOT list_contains(warnings, 'causalpfn is Apache-2.0; attribution is required downstream')
+SELECT len(list_filter(warnings, w -> w LIKE '%licen%')) = 0
 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
             exclude := ['customer_id'], model := 'causalpfn');
 ----

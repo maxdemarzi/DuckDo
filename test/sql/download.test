@@ -62,12 +62,42 @@ SELECT count(*) FROM duckdo_download('causalpfn', source := '__TEST_DIR__');
 ----
 5
 
-# No default source: a URL the user did not type is a network request they did
-# not make.
+# do_download('causalpfn') with no source fetches DuckDo's pinned release over
+# the network, which a dependency-free suite cannot exercise. What it can
+# exercise is everything around it.
+
+# do_pfn has no hosted copy, and the refusal says why: its upstream states no
+# licence, so its weights cannot be redistributed.
 statement error
-SELECT * FROM do_download('causalpfn');
+SELECT * FROM do_download('do_pfn');
 ----
-source :=
+states no licence
+
+# Verification checks every file against the digest pinned in the extension,
+# before it is installed. These stand-ins are not the release, so the first
+# file is refused - and nothing is installed from it, not even briefly.
+statement error
+SELECT * FROM do_download('causalpfn', source := '__TEST_DIR__', overwrite := true, verify := true);
+----
+the pinned release expects
+
+query II
+SELECT count(*), (SELECT count(*) FROM glob('__TEST_DIR__/downloaded/models/*.part'))
+FROM read_blob('__TEST_DIR__/downloaded/models/*');
+----
+5	0
+
+# A file already present is verified too, and refused if it is not the release.
+statement error
+SELECT * FROM do_download('causalpfn', source := '__TEST_DIR__', verify := true);
+----
+differs from the pinned release
+
+# do_pfn has nothing pinned, so there is nothing to verify against.
+statement error
+SELECT * FROM do_download('do_pfn', source := '__TEST_DIR__', verify := true);
+----
+no pinned checksums
 
 statement error
 SELECT * FROM do_download('no_such_model', source := '__TEST_DIR__');

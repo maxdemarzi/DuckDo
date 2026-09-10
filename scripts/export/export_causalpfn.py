@@ -413,7 +413,9 @@ def main():
     manifest = {
         "model": "causalpfn",
         "source": "https://github.com/vdblm/CausalPFN",
-        "license": "Apache-2.0",
+        # The upstream LICENSE is titled "CausalPFN License, Version 1.0": Apache-2.0's
+        # terms, under its own name.
+        "license": "CausalPFN License 1.0",
         "attribution_required": False,
         "setting": "backdoor (ignorability)",
         "opset": args.opset,

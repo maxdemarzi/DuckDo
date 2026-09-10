@@ -16,16 +16,17 @@ SELECT count(*) >= 2 FROM do_list_models();
 true
 
 # Two families, and the licence difference between them is the first thing a
-# user needs: Apache-2.0 carries no downstream obligation, CC BY 4.0 does.
+# user needs. CausalPFN's upstream licence permits use and redistribution;
+# Do-PFN's upstream states no licence at all, which reserves every right.
 query IIII
 SELECT model, license, attribution_required, max_covariates FROM do_list_models() WHERE model = 'do_pfn';
 ----
-do_pfn	CC BY 4.0	true	5
+do_pfn	none stated upstream	false	5
 
 query IIII
 SELECT model, license, attribution_required, max_covariates FROM do_list_models() WHERE model = 'causalpfn';
 ----
-causalpfn	Apache-2.0	false	99
+causalpfn	CausalPFN License 1.0	false	99
 
 query II
 SELECT model, setting FROM do_list_models() ORDER BY model;
@@ -41,7 +42,7 @@ true
 
 # The licence obligation is surfaced, not buried.
 query I
-SELECT detail LIKE '%attribution%' FROM do_list_models() WHERE model = 'do_pfn';
+SELECT detail LIKE '%states no licence%' FROM do_list_models() WHERE model = 'do_pfn';
 ----
 true
 

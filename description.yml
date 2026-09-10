@@ -215,9 +215,12 @@ docs:
     That path is **opt-in at build time** (`-DDUCKDO_WITH_ONNX=ON`), which is
     why this community build does not carry it: keeping the default build
     dependency-free is what lets the example above run with no download at all.
-    The extension never ships or redistributes weights - you export the graphs
-    yourself from the upstream checkpoint with `scripts/export/export_dopfn.py`,
-    which refuses to finish unless every graph reproduces PyTorch to within 1e-4.
+    The extension never ships weights. CausalPFN's exported graphs are hosted
+    with their licence and a notice of changes, so `do_download('causalpfn')`
+    fetches them from a pinned revision and verifies every file's SHA-256.
+    Do-PFN's upstream states no licence, so it is never redistributed: export
+    it yourself with `scripts/export/export_dopfn.py`, which refuses to finish
+    unless every graph reproduces PyTorch to within 1e-4.
 
     On a linear DGP CausalPFN matches AIPW and cannot do better: 3.0610 beside
     3.0628 against a truth of 2.9806. On IHDP, where the covariate structure is

@@ -36,9 +36,15 @@ struct ModelInfo {
 	string setting;
 	string license;
 	string source;
-	//! CC BY 4.0 is commercially usable but obliges attribution downstream.
+	//! False when the upstream grants no licence for commercial use - including
+	//! when it states no licence at all, which leaves every right reserved.
 	bool commercial = true;
 	bool attribution_required = false;
+	//! Where do_download fetches from when no source := is given: a URL pinned to
+	//! one immutable revision. Empty when nothing is hosted.
+	string default_source;
+	//! Expected SHA-256 of every artifact at default_source, by file name.
+	vector<std::pair<string, string>> pinned_sha256;
 	//! Covariates the graph accepts, treatment excluded.
 	idx_t max_covariates = 0;
 	//! Bar-distribution buckets. Zero when the model returns a mean directly.

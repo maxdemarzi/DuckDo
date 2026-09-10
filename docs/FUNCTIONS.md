@@ -816,31 +816,48 @@ available, detail`. `detail` says why a model is unavailable and what to do abou
 
 | model | setting | licence | covariates | context |
 |---|---|---|---|---|
-| `causalpfn` | backdoor (ignorability) | Apache-2.0 | 99 | dynamic, to 4096 |
-| `do_pfn` | non-identifiable prior | CC BY 4.0 (attribution required) | 5 | fixed ladder: 128 / 512 / 1024 / 2048 |
+| `causalpfn` | backdoor (ignorability) | CausalPFN License 1.0 (Apache-2.0's terms) | 99 | dynamic, to 4096 |
+| `do_pfn` | non-identifiable prior | none stated upstream: all rights reserved | 5 | fixed ladder: 128 / 512 / 1024 / 2048 |
 
 **Start with `causalpfn`.** It targets the backdoor setting directly, accepts twenty times the
-covariates, has no fixed context ladder, carries no licence obligation, and does not shrink the
-population effect the way `do_pfn` does.
+covariates, has no fixed context ladder, puts no licence obligation on your results, and does not
+shrink the population effect the way `do_pfn` does.
 
-### `do_download(model, source := ..., overwrite := false)`
+The licences are reported as they stand in each upstream repository, not as they are usually
+described. CausalPFN's `LICENSE` is titled "CausalPFN License, Version 1.0". Its terms are
+Apache-2.0's, but that is not its name. Do-PFN's repository has no licence file, and its README
+states no terms. Without a licence, every right is reserved, so `do_pfn` is marked non-commercial,
+every result that uses it says so, and DuckDo never redistributes it. Whether you may use it is
+between you and its authors.
+
+### `do_download(model, source := ..., overwrite := false, verify := ...)`
 
 Copies every artifact the catalog names for `model` (graphs, weights and manifest) from `source`
 into `duckdo_model_dir`, and returns one row per file: `model, file, bytes, sha256, status, source`.
 
 ```sql
+SELECT file, bytes, status FROM do_download('causalpfn');                  -- the hosted release
 SELECT file, bytes, status FROM do_download('causalpfn', source := '/mnt/shared/duckdo-models');
 ```
 
-- `source` is a directory or a URL, and there is **no default**. No hosted copy of the weights
-  exists, and a URL you did not type is a network request you did not make. A URL is read through
-  DuckDB's file system, so it needs DuckDB's `httpfs` extension; DuckDo itself opens no connection.
+- **With no `source`, `causalpfn` comes from DuckDo's hosted release,**
+  [maxdemarzi/duckdo-causalpfn](https://huggingface.co/maxdemarzi/duckdo-causalpfn) on Hugging
+  Face. The files are published there with the upstream licence, a `NOTICE` naming every changed
+  file, and the authors' citation. The URL is pinned to one commit, so the bytes behind it cannot
+  change under a released DuckDo, and every file is checked against a SHA-256 compiled into the
+  extension before it is installed.
+- **`do_pfn` has no hosted copy.** Its upstream states no licence, so its weights cannot be
+  redistributed. Export them yourself and pass `source :=`.
+- **`source`** is a directory or a URL. A URL is read through DuckDB's file system, so it needs
+  DuckDB's `httpfs` extension. DuckDo itself opens no connection.
+- **`verify`** checks each file against the pinned digests before installing it. It defaults to
+  true exactly when no `source` is given. An export you ran yourself has different bytes and
+  nothing to be checked against. A file that fails is never installed, and a file already present
+  that differs from the release is refused.
 - Each file is written to a `.part` file, hashed on the way, and renamed only once complete, so an
   interrupted copy never looks like a model to `do_list_models()`.
 - Files already present are kept, with their hash reported, unless you pass `overwrite := true`.
-- `sha256` is the digest of the bytes that landed. Compare it against a checksum you trust from
-  wherever the files came from. DuckDo does not pin checksums, because there is no canonical copy to
-  pin them to yet.
+- `sha256` is the digest of the bytes that landed.
 
 ### `do_devices()`
 

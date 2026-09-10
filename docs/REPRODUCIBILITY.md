@@ -15,21 +15,25 @@ relative, which is rounding. And DuckDo sends nothing anywhere, ever.
 **DuckDo makes no network request you did not ask for by name.**
 
 Not a usage report, not a crash report, not a version check, not an analytics ping.
-The extension contains no HTTP client and no socket code; the only two URLs in the
-source are attribution strings naming where each model came from, printed by
-`do_list_models()` and never fetched. Model weights are exported on your own
-machine by `scripts/export/`, from a package you installed yourself, and read from
-a local directory.
+The extension contains no HTTP client and no socket code. The source contains three
+URLs. Two are attribution strings naming where each model came from; `do_list_models()`
+prints them and nothing fetches them. The third is the pinned address of the hosted
+CausalPFN release, fetched only when you call `do_download('causalpfn')` with no
+source. Model weights are always read from a local directory, whether you downloaded
+them that way or exported them yourself with `scripts/export/`.
 
-One function can reach the network: `do_download(model, source := ...)`, and only
-when `source` is a URL you typed. Even then DuckDo does not open the connection. It
+One function can reach the network: `do_download`, and only when you call it. Pass
+a `source` URL you typed, or give no source for `causalpfn` to fetch DuckDo's
+pinned release. Even then DuckDo does not open the connection. It
 reads through DuckDB's own file system, which passes a URL to DuckDB's `httpfs`
 extension, so the request is DuckDB's, made by an extension you can see in
 `duckdb_extensions()`. If extension autoloading is enabled, as it is in DuckDB's
 default builds, DuckDB may *install* `httpfs` the first time a URL is opened. That
 is DuckDB's behaviour and a network fetch of its own, and it is worth knowing about.
-There is deliberately no default source, so no URL is ever reached that you did not
-write. Pointed at a directory, `do_download` touches no network at all.
+The one default source, CausalPFN's, is pinned to a single commit, and every file is
+checked against a SHA-256 compiled into the extension before it is installed. So
+the bytes cannot change under you, and a file that fails the check is never
+installed. Pointed at a directory, `do_download` touches no network at all.
 
 You do not have to take that on trust — it is one grep:
 
