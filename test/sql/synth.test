@@ -1,0 +1,101 @@
+# name: test/sql/synth.test
+# description: synthetic control, where parallel trends fails but a convex combination of donors does not
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.61);
+
+# A one-factor panel. Each unit loads on a common trend by its own mu, so units
+# with different mu trend at different rates and parallel trends fails. The
+# treated unit's mu (1.8) sits inside the donors' range (0 to 2) but far from
+# their average (1.0): no comparison group trends like it, while a convex
+# combination of donors does. Effect 5.0 from period 21 of 30.
+statement ok
+CREATE TABLE synth_panel AS
+WITH units AS (
+  SELECT u, CASE WHEN u = 0 THEN 1.8 ELSE (u - 1) / 9.5 END AS mu FROM range(21) t(u)),
+ grid AS (SELECT * FROM units, range(1, 31) g(p))
+SELECT 'unit_' || lpad(u::VARCHAR, 2, '0') AS unit, p AS period, mu,
+       (u = 0 AND p >= 21) AS treated,
+       10.0 + 0.3*p + mu*(1.0 + 0.3*p) + 5.0*((u = 0 AND p >= 21)::INT)
+         + 0.2*sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS y
+FROM grid;
+
+# Plain DiD compares against the average donor, which trends too slowly.
+query I
+SELECT abs(estimate - 5.0) > 0.8
+FROM do_did('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+query IIII
+SELECT count(*), bool_and(abs(estimate - 5.0) < 0.3), bool_and(pre_rmspe < 0.5), bool_and(n_donors = 20)
+FROM do_synth('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+1	true	true	true
+
+# In-space placebos: no donor, treated as if it had been, shows a post/pre ratio
+# anywhere near the real unit's, so it ranks first.
+query I
+SELECT p_value < 0.1
+FROM do_synth('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+# The weights are a convex combination...
+query II
+SELECT abs(list_sum(map_values(weights)) - 1.0) < 1e-3, list_min(map_values(weights)) >= 0
+FROM do_synth('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true	true
+
+# ...and they reproduce the treated unit's loading, which is what matching its
+# pre-treatment path requires in a one-factor model.
+query I
+WITH w AS (
+  SELECT e.key AS donor, e.value AS weight
+  FROM (SELECT unnest(map_entries(weights)) AS e
+        FROM do_synth('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y')))
+SELECT abs(sum(w.weight * p.mu) - 1.8) < 0.1
+FROM w JOIN synth_panel p ON p.unit = w.donor AND p.period = 1;
+----
+true
+
+# The path: pre-treatment gaps near zero, post-treatment gaps near the effect.
+query III
+SELECT count(*), max(abs(gap)) FILTER (WHERE is_pre_treatment) < 0.8,
+       abs(avg(gap) FILTER (WHERE NOT is_pre_treatment) - 5.0) < 0.3
+FROM do_synth_path('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+30	true	true
+
+query I
+SELECT min(relative_period) FILTER (WHERE NOT is_pre_treatment)
+FROM do_synth_path('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+0
+
+query I
+SELECT count(*) FROM duckdo_synth('synth_panel', unit := 'unit', period := 'period', treatment := 'treated',
+                                  outcome := 'y');
+----
+1
+
+# Covariates are refused rather than silently ignored.
+statement error
+SELECT * FROM do_synth('synth_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+                       covariates := ['mu']);
+----
+does not take covariates
+
+# Every unit eventually treated: no donors to build a synthetic control from.
+statement ok
+CREATE TABLE all_treated AS
+SELECT unit, period, (period >= 10 + CAST(right(unit, 2) AS INT) % 10) AS treated, y FROM synth_panel;
+
+statement error
+SELECT * FROM do_synth('all_treated', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+never-treated

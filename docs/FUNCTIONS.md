@@ -220,6 +220,56 @@ post-treatment numbers do not mean what they appear to.
 
 ## Diagnostics
 
+### `do_synth`
+
+```sql
+SELECT unit, estimate, pre_rmspe, rmspe_ratio, p_value, weights
+FROM do_synth('regions', unit := 'region', period := 'quarter',
+              treatment := 'policy', outcome := 'sales');
+```
+
+Returns one row per treated unit: `unit, adoption_period, estimand, estimator, estimate, pre_rmspe,
+post_rmspe, rmspe_ratio, p_value, n_donors, n_pre_periods, n_post_periods, weights, warnings`.
+
+For each treated unit this fits a synthetic control (Abadie, Diamond and Hainmueller 2010):
+non-negative weights over the never-treated units, summing to one, that best reproduce the treated
+unit's outcome before treatment. `estimate` is the mean gap between the unit and its synthetic
+control after treatment. `weights` is a `MAP` from donor to weight, largest first, holding every
+donor above 1e-4, so `weights['store_07']` works.
+
+- **Donors** are never-treated units observed in every period. Units missing any period are left
+  out, with a warning, and at least two donors are needed.
+- **Treated units** need at least two pre-treatment periods and every period observed. Units that
+  fail this are skipped, with a warning. Each treated unit is fitted on its own.
+- **Inference is by in-space placebos.** Each donor is treated as if it had been, at the same
+  period, and matched from the other donors. `p_value` is the share of runs, counting the real
+  unit's, whose post/pre RMSPE ratio is at least the real unit's. With J donors the smallest
+  attainable value is 1/(J+1), and a warning states it. Past 100 donors, a seeded subset of 100 is
+  used.
+- **There is no intercept.** A treated unit whose outcome lies outside every donor's cannot be
+  matched by any convex combination, and a warning counts the pre-periods where that happens. Read
+  `pre_rmspe` before `estimate`: a synthetic control that did not track the unit beforehand says
+  nothing about afterwards.
+- **There are no covariates.** Matching on every pre-treatment outcome already absorbs what
+  covariates predict about them. `covariates :=` is refused rather than ignored. For conditional
+  parallel trends, use `do_did(..., covariates := [...])`.
+
+The weights solve a simplex-constrained least-squares problem: accelerated projected gradient, then
+an exact solve on the support. `scripts/synth_check.py` grades the solver against scipy's SLSQP,
+and the two agree to 1.6e-8 in the weights.
+
+### `do_synth_path`
+
+```sql
+SELECT period, actual, synthetic, gap, is_pre_treatment
+FROM do_synth_path('regions', unit := 'region', period := 'quarter',
+                   treatment := 'policy', outcome := 'sales');
+```
+
+Returns `unit, period, relative_period, actual, synthetic, gap, is_pre_treatment`: one row per
+treated unit and period, from the same fit as `do_synth`. This is the plot to look at. The gap
+should hover near zero before treatment and open afterwards.
+
 ### `do_balance`
 
 Per encoded feature: `covariate, feature, smd_raw, smd_weighted, variance_ratio,

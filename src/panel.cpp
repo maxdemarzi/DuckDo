@@ -686,6 +686,500 @@ unique_ptr<FunctionData> BindEventStudy(ClientContext &context, TableFunctionBin
 	return std::move(bind);
 }
 
+// --- synthetic control ---------------------------------------------------------
+//
+// Difference-in-differences needs the comparison group to trend the way the
+// treated group would have. Synthetic control trades that for a different
+// assumption: some convex combination of untreated units tracks the treated
+// unit's outcome before treatment, and would have kept tracking it after
+// (Abadie, Diamond and Hainmueller 2010). The weights are non-negative and sum
+// to one, fitted on pre-treatment outcomes alone, with no intercept. So a
+// treated unit outside the donors' range cannot be matched, and the output says
+// when that is happening rather than hiding it. Inference is by in-space
+// placebos: each donor is treated as if it had been, and the treated unit's
+// post/pre RMSPE ratio is ranked among theirs.
+
+//! Project onto the probability simplex {w >= 0, sum w = 1} (Duchi et al. 2008).
+void ProjectToSimplex(vector<double> &v) {
+	vector<double> sorted(v);
+	std::sort(sorted.begin(), sorted.end(), [](double a, double b) { return a > b; });
+	double cumulative = 0.0, theta = 0.0;
+	for (idx_t k = 0; k < sorted.size(); k++) {
+		cumulative += sorted[k];
+		const double candidate = (cumulative - 1.0) / static_cast<double>(k + 1);
+		if (sorted[k] > candidate) {
+			theta = candidate;
+		}
+	}
+	for (auto &x : v) {
+		x = std::max(x - theta, 0.0);
+	}
+}
+
+//! Solve A x = b for a small dense square system by Gaussian elimination with
+//! partial pivoting. The KKT systems below are symmetric but indefinite, which
+//! rules out the Cholesky solve the rest of DuckDo uses. False when singular.
+bool SolveDense(vector<double> A, idx_t n, vector<double> b, vector<double> &x) {
+	double scale = 0.0;
+	for (auto value : A) {
+		scale = std::max(scale, std::fabs(value));
+	}
+	const double tiny = 1e-13 * std::max(scale, 1.0);
+	for (idx_t col = 0; col < n; col++) {
+		idx_t pivot = col;
+		for (idx_t r = col + 1; r < n; r++) {
+			if (std::fabs(A[r * n + col]) > std::fabs(A[pivot * n + col])) {
+				pivot = r;
+			}
+		}
+		if (std::fabs(A[pivot * n + col]) < tiny) {
+			return false;
+		}
+		if (pivot != col) {
+			for (idx_t c = 0; c < n; c++) {
+				std::swap(A[col * n + c], A[pivot * n + c]);
+			}
+			std::swap(b[col], b[pivot]);
+		}
+		for (idx_t r = col + 1; r < n; r++) {
+			const double factor = A[r * n + col] / A[col * n + col];
+			for (idx_t c = col; c < n; c++) {
+				A[r * n + c] -= factor * A[col * n + c];
+			}
+			b[r] -= factor * b[col];
+		}
+	}
+	x.assign(n, 0.0);
+	for (idx_t r = n; r-- > 0;) {
+		double s = b[r];
+		for (idx_t c = r + 1; c < n; c++) {
+			s -= A[r * n + c] * x[c];
+		}
+		x[r] = s / A[r * n + r];
+	}
+	return true;
+}
+
+//! Finish the job exactly. A simplex-constrained least-squares optimum is the
+//! equality-constrained solution on its support, so once the iterative solver
+//! has found roughly the right support a small KKT solve gives the optimum to
+//! rounding: drop any weight the solve makes negative, admit any excluded donor
+//! whose multiplier says it belongs, stop when the KKT conditions hold. If that
+//! does not settle - a singular system, typically more donors than
+//! pre-periods - the iterative answer stands.
+//!
+//! Without this step the solver agreed with scipy's SLSQP to 1e-6 of the
+//! objective and 7e-4 in the weights. That is statistically nothing, but it is
+//! visible at three decimals in the weights DuckDo prints, and the cross-check
+//! in scripts/synth_check.py exists to certify the solver, not to be argued with.
+void PolishOnSupport(const vector<double> &G, const vector<double> &h, idx_t J, vector<double> &w) {
+	double scale = 1.0;
+	for (auto value : h) {
+		scale = std::max(scale, 2.0 * std::fabs(value));
+	}
+	vector<uint8_t> in(J, 0);
+	for (idx_t i = 0; i < J; i++) {
+		in[i] = w[i] > 1e-7 ? 1 : 0;
+	}
+	for (int round = 0; round < 100; round++) {
+		vector<idx_t> support;
+		for (idx_t i = 0; i < J; i++) {
+			if (in[i]) {
+				support.push_back(i);
+			}
+		}
+		const idx_t k = support.size();
+		if (k == 0) {
+			return;
+		}
+		// Stationarity on the support plus the sum-to-one constraint:
+		//   [ 2 G_S  1 ] [ w  ]   [ 2 h_S ]
+		//   [ 1'     0 ] [ nu ] = [ 1     ]
+		const idx_t n = k + 1;
+		vector<double> A(n * n, 0.0), rhs(n, 0.0), solution;
+		for (idx_t a = 0; a < k; a++) {
+			for (idx_t b = 0; b < k; b++) {
+				A[a * n + b] = 2.0 * G[support[a] * J + support[b]];
+			}
+			A[a * n + k] = 1.0;
+			A[k * n + a] = 1.0;
+			rhs[a] = 2.0 * h[support[a]];
+		}
+		rhs[k] = 1.0;
+		if (!SolveDense(A, n, rhs, solution)) {
+			return;
+		}
+		bool dropped = false;
+		for (idx_t a = 0; a < k; a++) {
+			if (solution[a] < 0.0) {
+				in[support[a]] = 0;
+				dropped = true;
+			}
+		}
+		if (dropped) {
+			continue;
+		}
+		vector<double> candidate(J, 0.0);
+		for (idx_t a = 0; a < k; a++) {
+			candidate[support[a]] = solution[a];
+		}
+		// An excluded donor belongs in the support when its multiplier,
+		// 2(Gw - h)_j + nu, is negative: moving weight onto it lowers the loss.
+		const double nu = solution[k];
+		double most_negative = -1e-10 * scale;
+		idx_t enter = J;
+		for (idx_t j = 0; j < J; j++) {
+			if (in[j]) {
+				continue;
+			}
+			double g = 0.0;
+			for (idx_t b = 0; b < J; b++) {
+				g += G[j * J + b] * candidate[b];
+			}
+			const double multiplier = 2.0 * (g - h[j]) + nu;
+			if (multiplier < most_negative) {
+				most_negative = multiplier;
+				enter = j;
+			}
+		}
+		if (enter == J) {
+			w = candidate;
+			return;
+		}
+		in[enter] = 1;
+	}
+}
+
+//! Minimise ||a - B w||^2 over the simplex, given G = B'B (J x J) and h = B'a.
+//! Accelerated projected gradient, with the step set from the largest
+//! eigenvalue of G by power iteration, then an exact polish on the support.
+//! Deterministic: fixed start, fixed cap.
+vector<double> SimplexLeastSquares(const vector<double> &G, const vector<double> &h, idx_t J) {
+	vector<double> v(J, 1.0), Gv(J, 0.0);
+	double largest = 0.0;
+	for (int it = 0; it < 100; it++) {
+		double norm = 0.0;
+		for (idx_t i = 0; i < J; i++) {
+			double s = 0.0;
+			for (idx_t j = 0; j < J; j++) {
+				s += G[i * J + j] * v[j];
+			}
+			Gv[i] = s;
+			norm += s * s;
+		}
+		norm = std::sqrt(norm);
+		if (!(norm > 0.0)) {
+			break;
+		}
+		for (idx_t i = 0; i < J; i++) {
+			v[i] = Gv[i] / norm;
+		}
+		largest = norm;
+	}
+	const double step = 1.0 / (2.0 * std::max(largest, 1e-12) * 1.05);
+
+	vector<double> w(J, 1.0 / static_cast<double>(J)), y(w), next(J, 0.0), grad(J, 0.0);
+	double t = 1.0;
+	for (idx_t iter = 0; iter < 20000; iter++) {
+		for (idx_t i = 0; i < J; i++) {
+			double s = 0.0;
+			for (idx_t j = 0; j < J; j++) {
+				s += G[i * J + j] * y[j];
+			}
+			grad[i] = 2.0 * (s - h[i]);
+		}
+		for (idx_t i = 0; i < J; i++) {
+			next[i] = y[i] - step * grad[i];
+		}
+		ProjectToSimplex(next);
+		const double t_next = 0.5 * (1.0 + std::sqrt(1.0 + 4.0 * t * t));
+		double change = 0.0;
+		for (idx_t i = 0; i < J; i++) {
+			change = std::max(change, std::fabs(next[i] - w[i]));
+			y[i] = next[i] + ((t - 1.0) / t_next) * (next[i] - w[i]);
+		}
+		w = next;
+		t = t_next;
+		if (change < 1e-12) {
+			break;
+		}
+	}
+	PolishOnSupport(G, h, J, w);
+	return w;
+}
+
+struct SynthFit {
+	vector<double> weights;   // one per donor, in donor order
+	vector<double> synthetic; // one per period
+	double pre_rmspe = 0.0;
+	double post_rmspe = 0.0;
+	double att = 0.0;
+};
+
+//! Every unit passed here is observed in every period; the caller guarantees it.
+SynthFit FitSynthetic(const Panel &panel, idx_t treated, const vector<idx_t> &donors, idx_t adoption) {
+	SynthFit fit;
+	const idx_t J = donors.size();
+	const idx_t T = panel.n_periods;
+	vector<double> G(J * J, 0.0), h(J, 0.0);
+	for (idx_t t = 0; t < adoption; t++) {
+		for (idx_t i = 0; i < J; i++) {
+			const double bi = panel.Y(donors[i], t);
+			h[i] += bi * panel.Y(treated, t);
+			for (idx_t j = i; j < J; j++) {
+				G[i * J + j] += bi * panel.Y(donors[j], t);
+			}
+		}
+	}
+	for (idx_t i = 0; i < J; i++) {
+		for (idx_t j = 0; j < i; j++) {
+			G[i * J + j] = G[j * J + i];
+		}
+	}
+	fit.weights = SimplexLeastSquares(G, h, J);
+	fit.synthetic.assign(T, 0.0);
+	for (idx_t t = 0; t < T; t++) {
+		for (idx_t i = 0; i < J; i++) {
+			fit.synthetic[t] += fit.weights[i] * panel.Y(donors[i], t);
+		}
+	}
+	double pre = 0.0, post = 0.0, gap_sum = 0.0;
+	for (idx_t t = 0; t < T; t++) {
+		const double gap = panel.Y(treated, t) - fit.synthetic[t];
+		if (t < adoption) {
+			pre += gap * gap;
+		} else {
+			post += gap * gap;
+			gap_sum += gap;
+		}
+	}
+	fit.pre_rmspe = std::sqrt(pre / static_cast<double>(adoption));
+	fit.post_rmspe = std::sqrt(post / static_cast<double>(T - adoption));
+	fit.att = gap_sum / static_cast<double>(T - adoption);
+	return fit;
+}
+
+struct UnitSynth {
+	idx_t unit = 0;
+	idx_t adoption = 0;
+	SynthFit fit;
+	double ratio = 0.0;
+	double p_value = 1.0;
+	idx_t placebos = 0;
+	idx_t outside_range = 0;
+};
+
+struct SynthRun {
+	Panel panel;
+	vector<idx_t> donors;
+	vector<UnitSynth> units;
+	vector<string> warnings;
+};
+
+SynthRun RunSynth(ClientContext &context, TableFunctionBindInput &input, const char *fn) {
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		throw BinderException("duckdo: %s takes a table name or a query as its first argument", fn);
+	}
+	const string relation = input.inputs[0].ToString();
+	const string unit = RequireColumn(input.named_parameters, "unit", fn);
+	const string period = RequireColumn(input.named_parameters, "period", fn);
+	const string treatment = RequireColumn(input.named_parameters, "treatment", fn);
+	const string outcome = RequireColumn(input.named_parameters, "outcome", fn);
+	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
+	if (!spec.covariates.empty()) {
+		// Refused rather than ignored: accepting a parameter and not reading it
+		// is exactly the bug do_did had until the doubly robust cells went in.
+		throw BinderException("duckdo: %s matches on pre-treatment outcomes and does not take covariates :=. "
+		                      "Matching every pre-period outcome already absorbs what covariates predict about "
+		                      "them; for covariate-conditional trends use do_did(..., covariates := [...])",
+		                      fn);
+	}
+
+	SynthRun run;
+	run.panel = LoadPanel(context, relation, unit, period, treatment, outcome, fn);
+	auto &panel = run.panel;
+	auto complete = [&](idx_t u) {
+		for (idx_t t = 0; t < panel.n_periods; t++) {
+			if (!panel.Seen(u, t)) {
+				return false;
+			}
+		}
+		return true;
+	};
+
+	idx_t dropped = 0;
+	for (idx_t u = 0; u < panel.n_units; u++) {
+		if (panel.first_treated[u] == NEVER_TREATED) {
+			if (complete(u)) {
+				run.donors.push_back(u);
+			} else {
+				dropped++;
+			}
+		}
+	}
+	if (dropped > 0) {
+		run.warnings.push_back(StringUtil::Format("%llu never-treated units were missing some period and were left "
+		                                          "out of the donor pool",
+		                                          static_cast<unsigned long long>(dropped)));
+	}
+	if (run.donors.size() < 2) {
+		throw BinderException("duckdo: %s needs at least two never-treated units observed in every period to build a "
+		                      "synthetic control from; '%s' has %llu",
+		                      fn, relation, static_cast<unsigned long long>(run.donors.size()));
+	}
+
+	// Placebos refit the whole problem once per donor. Past a hundred donors a
+	// seeded subset carries the same information at a fraction of the cost.
+	const idx_t max_placebos = 100;
+	vector<idx_t> placebo_units = run.donors;
+	if (placebo_units.size() > max_placebos) {
+		std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x51A7C0DEULL);
+		std::shuffle(placebo_units.begin(), placebo_units.end(), rng);
+		placebo_units.resize(max_placebos);
+		run.warnings.push_back(StringUtil::Format("placebo inference used a seeded subset of %llu of the %llu donors",
+		                                          static_cast<unsigned long long>(max_placebos),
+		                                          static_cast<unsigned long long>(run.donors.size())));
+	}
+
+	idx_t skipped = 0;
+	for (idx_t u = 0; u < panel.n_units; u++) {
+		const idx_t adoption = panel.first_treated[u];
+		if (adoption == NEVER_TREATED) {
+			continue;
+		}
+		if (adoption < 2 || !complete(u)) {
+			skipped++;
+			continue;
+		}
+		UnitSynth result;
+		result.unit = u;
+		result.adoption = adoption;
+		result.fit = FitSynthetic(panel, u, run.donors, adoption);
+		result.ratio = result.fit.post_rmspe / std::max(result.fit.pre_rmspe, 1e-12);
+		for (idx_t t = 0; t < adoption; t++) {
+			double lo = panel.Y(run.donors[0], t), hi = lo;
+			for (auto d : run.donors) {
+				lo = std::min(lo, panel.Y(d, t));
+				hi = std::max(hi, panel.Y(d, t));
+			}
+			if (panel.Y(u, t) < lo || panel.Y(u, t) > hi) {
+				result.outside_range++;
+			}
+		}
+		idx_t at_least = 0;
+		for (auto d : placebo_units) {
+			vector<idx_t> others;
+			for (auto o : run.donors) {
+				if (o != d) {
+					others.push_back(o);
+				}
+			}
+			auto placebo = FitSynthetic(panel, d, others, adoption);
+			if (placebo.post_rmspe / std::max(placebo.pre_rmspe, 1e-12) >= result.ratio) {
+				at_least++;
+			}
+		}
+		result.placebos = placebo_units.size();
+		result.p_value = (1.0 + static_cast<double>(at_least)) / (1.0 + static_cast<double>(result.placebos));
+		run.units.push_back(std::move(result));
+	}
+	if (skipped > 0) {
+		run.warnings.push_back(StringUtil::Format(
+		    "%llu treated units were skipped: synthetic control needs at least two pre-treatment periods and every "
+		    "period observed",
+		    static_cast<unsigned long long>(skipped)));
+	}
+	if (run.units.empty()) {
+		throw BinderException("duckdo: no treated unit in '%s' has at least two pre-treatment periods and every period "
+		                      "observed, so there is nothing to build a synthetic control for",
+		                      relation);
+	}
+	return run;
+}
+
+unique_ptr<FunctionData> BindSynth(ClientContext &context, TableFunctionBindInput &input,
+                                   vector<LogicalType> &return_types, vector<string> &names) {
+	auto run = RunSynth(context, input, "do_synth");
+	auto &panel = run.panel;
+	names = {"unit",          "adoption_period", "estimand",       "estimator", "estimate",
+	         "pre_rmspe",     "post_rmspe",      "rmspe_ratio",    "p_value",   "n_donors",
+	         "n_pre_periods", "n_post_periods",  "weights",        "warnings"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::BIGINT,
+	                LogicalType::MAP(LogicalType::VARCHAR, LogicalType::DOUBLE),
+	                LogicalType::LIST(LogicalType::VARCHAR)};
+	auto bind = make_uniq<ResultBindData>();
+	for (auto &result : run.units) {
+		// Donors carrying real weight, largest first. A MAP keeps that order and
+		// lets a caller write weights['store_07'].
+		vector<std::pair<double, idx_t>> order;
+		for (idx_t i = 0; i < result.fit.weights.size(); i++) {
+			if (result.fit.weights[i] > 1e-4) {
+				order.push_back({result.fit.weights[i], i});
+			}
+		}
+		std::sort(order.begin(), order.end(), [](const std::pair<double, idx_t> &a, const std::pair<double, idx_t> &b) {
+			return a.first > b.first || (a.first == b.first && a.second < b.second);
+		});
+		vector<Value> keys, values;
+		for (auto &entry : order) {
+			keys.push_back(Value(panel.units[run.donors[entry.second]]));
+			values.push_back(Value::DOUBLE(entry.first));
+		}
+
+		vector<Value> warnings;
+		warnings.push_back(Value("synthetic control (Abadie): non-negative weights summing to one, fitted on "
+		                         "pre-treatment outcomes only, with no intercept"));
+		for (auto &w : run.warnings) {
+			warnings.push_back(Value(w));
+		}
+		if (result.outside_range > 0) {
+			warnings.push_back(Value(StringUtil::Format(
+			    "in %llu of %llu pre-treatment periods this unit's outcome lies outside every donor's, where no "
+			    "convex combination can reach it - read pre_rmspe before the estimate",
+			    static_cast<unsigned long long>(result.outside_range),
+			    static_cast<unsigned long long>(result.adoption))));
+		}
+		warnings.push_back(Value(StringUtil::Format(
+		    "%llu placebo runs, so the smallest attainable p-value is %.4f",
+		    static_cast<unsigned long long>(result.placebos), 1.0 / (1.0 + static_cast<double>(result.placebos)))));
+
+		bind->rows.push_back(
+		    {Value(panel.units[result.unit]), Value(panel.period_labels[result.adoption]), Value("ATT"),
+		     Value("synthetic control"), Value::DOUBLE(result.fit.att), Value::DOUBLE(result.fit.pre_rmspe),
+		     Value::DOUBLE(result.fit.post_rmspe), Value::DOUBLE(result.ratio), Value::DOUBLE(result.p_value),
+		     Value::BIGINT(static_cast<int64_t>(run.donors.size())),
+		     Value::BIGINT(static_cast<int64_t>(result.adoption)),
+		     Value::BIGINT(static_cast<int64_t>(panel.n_periods - result.adoption)),
+		     Value::MAP(LogicalType::VARCHAR, LogicalType::DOUBLE, std::move(keys), std::move(values)),
+		     Value::LIST(LogicalType::VARCHAR, std::move(warnings))});
+	}
+	return std::move(bind);
+}
+
+unique_ptr<FunctionData> BindSynthPath(ClientContext &context, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	auto run = RunSynth(context, input, "do_synth_path");
+	auto &panel = run.panel;
+	names = {"unit", "period", "relative_period", "actual", "synthetic", "gap", "is_pre_treatment"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BOOLEAN};
+	auto bind = make_uniq<ResultBindData>();
+	for (auto &result : run.units) {
+		for (idx_t t = 0; t < panel.n_periods; t++) {
+			const double actual = panel.Y(result.unit, t);
+			const double synthetic = result.fit.synthetic[t];
+			bind->rows.push_back({Value(panel.units[result.unit]), Value(panel.period_labels[t]),
+			                      Value::BIGINT(static_cast<int64_t>(t) - static_cast<int64_t>(result.adoption)),
+			                      Value::DOUBLE(actual), Value::DOUBLE(synthetic), Value::DOUBLE(actual - synthetic),
+			                      Value::BOOLEAN(t < result.adoption)});
+		}
+	}
+	return std::move(bind);
+}
+
 } // namespace
 
 void RegisterPanelFunctions(ExtensionLoader &loader) {
@@ -693,7 +1187,10 @@ void RegisterPanelFunctions(ExtensionLoader &loader) {
 		const char *name;
 		table_function_bind_t bind;
 	};
-	const Entry entries[] = {{"did", BindDid}, {"event_study", BindEventStudy}};
+	const Entry entries[] = {{"did", BindDid},
+	                         {"event_study", BindEventStudy},
+	                         {"synth", BindSynth},
+	                         {"synth_path", BindSynthPath}};
 	for (auto &entry : entries) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);

@@ -334,6 +334,29 @@ pre-periods sit at −0.08 and −0.02 and the post-periods stay between 1.74 an
 the diagnostic that catches this, which is why `do_event_study` takes the same `covariates :=`.
 Until now both functions accepted `covariates :=` and silently ignored it.
 
+**When no comparison group trends like the treated unit, build one.** `do_synth` fits a synthetic
+control (Abadie, Diamond and Hainmueller): non-negative donor weights, summing to one, that reproduce
+the treated unit's pre-treatment path. The effect is then read off the gap after treatment.
+Inference is by in-space placebos: each donor is treated as if it had been, and the real unit's
+post/pre fit ratio is ranked among theirs.
+
+```sql
+SELECT estimate, pre_rmspe, rmspe_ratio, p_value, weights
+FROM do_synth('regions', unit := 'region', period := 'quarter',
+              treatment := 'policy', outcome := 'sales');
+-- 5.053 | 0.154 | 32.9 | 0.0476 | {unit_20=0.409, unit_17=0.29, unit_19=0.214, ...}
+
+SELECT period, actual, synthetic, gap, is_pre_treatment
+FROM do_synth_path('regions', unit := 'region', period := 'quarter',
+                   treatment := 'policy', outcome := 'sales');
+```
+
+Take a one-factor panel where the treated unit trends faster than the average donor, with a true
+effect of 5.0. `do_did` gives 6.277. `do_synth` gives 5.053, with a pre-period RMSPE of 0.154, and
+the real unit ranks first of 21 placebo runs, the smallest p-value that 20 donors allow. The weight
+solver is certified against scipy's SLSQP: on a strictly convex fit they agree to 1.6e-8 in the
+weights and 6e-14 in the objective (`scripts/synth_check.py`).
+
 ### Interventions - querying a world that did not happen
 
 ```sql
