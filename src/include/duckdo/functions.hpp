@@ -33,6 +33,7 @@ void RegisterInterventionFunctions(ExtensionLoader &loader);
 void RegisterContinuousFunctions(ExtensionLoader &loader);
 void RegisterMultiLevelFunctions(ExtensionLoader &loader);
 void RegisterDiscoveryFunctions(ExtensionLoader &loader);
+void RegisterFederatedFunctions(ExtensionLoader &loader);
 void RegisterPanelFunctions(ExtensionLoader &loader);
 void RegisterIdentificationFunctions(ExtensionLoader &loader);
 void RegisterMediationFunctions(ExtensionLoader &loader);

@@ -401,6 +401,29 @@ rows. `cluster :=` makes the customer the unit for cross-fitting folds, standard
 bootstrap resamples, and gives back the customers' own answer. A repeated `id :=` is the one sign
 DuckDo can see without being told, so any function given one warns when its values repeat.
 
+**When the data can't leave the site, pool the answers instead.** Each site runs `do_ate` on its
+own rows and publishes the one row it gets back. `do_ate_pool` combines those rows into the effect
+over every site's population together. The pooling is exact: an AIPW estimate is a mean of
+per-row influence values, so the size-weighted mean of site estimates is the pooled mean.
+
+```sql
+SELECT estimate, ci_low, ci_high, i_squared FROM do_ate_pool('site_results');
+```
+
+Take three sites of 2,000, 1,000 and 3,000 units, with effects of 1, 2 and 3, so the effect over
+all of them is 2.167:
+
+| method | estimate | 95% interval |
+|---|---|---|
+| `do_ate_pool`, no rows shared | 2.138 | [2.084, 2.192] |
+| inverse-variance weighting | 1.991 | [1.978, 2.004] |
+| `do_ate` with every row in one place | 2.134 | [2.070, 2.198] |
+
+Inverse-variance weighting is the meta-analysis default, and here it is precise and wrong. The
+middle site's outcome is nearly noiseless, so its tiny standard error outvotes the other two.
+`do_ate_pool` uses precision weights only for its heterogeneity test. Here I² is 0.998, so the
+result warns that the pooled number averages three different effects.
+
 ### Interventions - querying a world that did not happen
 
 ```sql

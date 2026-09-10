@@ -26,6 +26,7 @@ set(EXTENSION_SOURCES
     src/continuous.cpp
     src/multi.cpp
     src/discover.cpp
+    src/federated.cpp
     src/panel.cpp
     src/identification.cpp
     src/mediation.cpp

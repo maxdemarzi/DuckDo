@@ -1,0 +1,135 @@
+# name: test/sql/federated.test
+# description: pooling effects estimated at separate sites, without moving rows between them
+# group: [duckdo]
+
+require duckdo
+
+# --- exact arithmetic, against scipy (values from scipy.stats.chi2) -------------
+
+statement ok
+CREATE TABLE two_sites AS SELECT * FROM (VALUES (1.0, 0.1, 100), (2.0, 0.2, 300)) v(estimate, std_error, n);
+
+query IIIIII
+SELECT estimate = 1.75, abs(std_error - 0.152069063257456) < 1e-12, abs(q - 20) < 1e-9,
+       abs(q_p_value / 7.7442164310441e-06 - 1) < 1e-9, abs(i_squared - 0.95) < 1e-12, n
+FROM do_ate_pool('two_sites');
+----
+true	true	true	true	true	400
+
+statement ok
+CREATE TABLE four_sites AS SELECT * FROM (VALUES
+  (1.9, 0.21, 500), (2.3, 0.14, 1200), (1.6, 0.18, 800), (2.1, 0.09, 2500)) v(estimate, std_error, n);
+
+query IIIII
+SELECT abs(estimate - 2.048) < 1e-12, abs(std_error - 0.0665161634491948) < 1e-12,
+       abs(q - 10.2458591375981) < 1e-9, abs(q_p_value - 0.0165877995533058) < 1e-12,
+       abs(i_squared - 0.707198785410663) < 1e-12
+FROM do_ate_pool('four_sites');
+----
+true	true	true	true	true
+
+# Sites that agree are not called disagreeing.
+query III
+SELECT abs(q_p_value - 0.938630544688968) < 1e-12, i_squared,
+       len(list_filter(warnings, w -> w LIKE '%disagree%'))
+FROM do_ate_pool('(SELECT * FROM (VALUES (2.00, 0.1, 1000), (2.03, 0.1, 1000), (1.98, 0.1, 1000)) v(estimate, std_error, n))');
+----
+true	0.0	0
+
+# The chi-square tail on both sides of the incomplete gamma's branch point.
+# Unit standard errors and centred estimates make Q the sum of squares, so
+# these tables have Q = 30 and Q = 60 on 40 degrees of freedom, and 0.5 on 7.
+query III
+SELECT
+  (SELECT abs(q_p_value - 0.875218784967475) < 1e-12 FROM do_ate_pool('(SELECT sqrt(30/5740)*(i-20) AS estimate, 1.0 AS std_error, 100 AS n FROM range(41) r(i))')),
+  (SELECT abs(q_p_value - 0.0218734684413909) < 1e-12 FROM do_ate_pool('(SELECT sqrt(60/5740)*(i-20) AS estimate, 1.0 AS std_error, 100 AS n FROM range(41) r(i))')),
+  (SELECT abs(q_p_value - 0.999446481390425) < 1e-12 FROM do_ate_pool('(SELECT sqrt(0.5/42)*(i-3.5) AS estimate, 1.0 AS std_error, 100 AS n FROM range(8) r(i))'));
+----
+true	true	true
+
+# --- three sites, estimated separately and pooled ---------------------------------
+#
+# Different sizes, different effects, different noise. The effect over all
+# 6,000 units is (2000*1 + 1000*2 + 3000*3) / 6000 = 2.1667. Site B's outcome is
+# nearly noiseless, so its standard error is tiny, and inverse-variance
+# weighting - the meta-analysis default - lets it outvote the other two.
+
+statement ok
+SELECT setseed(0.52);
+
+statement ok
+CREATE TABLE sites AS
+WITH base AS (
+  SELECT CASE WHEN i < 2000 THEN 'A' WHEN i < 3000 THEN 'B' ELSE 'C' END AS site,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e
+  FROM range(6000) r(i)),
+ shaped AS (
+  SELECT site, x + CASE site WHEN 'A' THEN -0.5 WHEN 'B' THEN 0.0 ELSE 0.7 END AS x, e FROM base)
+SELECT site, x, t,
+       CASE site WHEN 'A' THEN 1.0 WHEN 'B' THEN 2.0 ELSE 3.0 END * t + x
+         + CASE site WHEN 'B' THEN 0.1 ELSE 1.0 END * e AS y
+FROM (SELECT *, (random() < 1/(1+exp(-x)))::INT AS t FROM shaped);
+
+query II
+WITH per_site AS (
+  SELECT * FROM do_ate_by('sites', treatment := 't', outcome := 'y', covariates := ['x'], by := ['site'])),
+pooled AS (
+  SELECT * FROM do_ate_pool('(SELECT * FROM do_ate_by(''sites'', treatment := ''t'', outcome := ''y'', covariates := [''x''], by := [''site'']))')),
+iv AS (SELECT sum(estimate / std_error^2) / sum(1 / std_error^2) AS estimate FROM per_site)
+SELECT abs(pooled.estimate - 13000.0/6000) < 0.05, abs(iv.estimate - 13000.0/6000) > 0.1
+FROM pooled, iv;
+----
+true	true
+
+# Three different effects are called what they are.
+query II
+SELECT n_sites, len(list_filter(warnings, w -> w LIKE 'the sites disagree%'))
+FROM do_ate_pool('(SELECT * FROM do_ate_by(''sites'', treatment := ''t'', outcome := ''y'', covariates := [''x''], by := [''site'']))');
+----
+3	1
+
+# --- the estimand decides the weights -------------------------------------------
+
+# A population ATT weights each site by its treated rows, not all of its rows.
+query II
+SELECT estimand, estimate
+FROM do_ate_pool('(SELECT * FROM (VALUES (''ATT'', 1.0, 0.1, 100, 10), (''ATT'', 3.0, 0.1, 100, 30)) v(estimand, estimate, std_error, n, n_treated))');
+----
+ATT	2.5
+
+statement error
+SELECT * FROM do_ate_pool('(SELECT * FROM (VALUES (''ATT'', 1.0, 0.1, 100), (''ATT'', 3.0, 0.1, 100)) v(estimand, estimate, std_error, n))');
+----
+n_treated
+
+statement error
+SELECT * FROM do_ate_pool('(SELECT * FROM (VALUES (''ATE'', 1.0, 0.1, 100), (''ATT'', 3.0, 0.1, 100)) v(estimand, estimate, std_error, n))');
+----
+mixes estimands
+
+# --- the rest of the contract -------------------------------------------------------
+
+# A group do_ate_by could not estimate reports NULLs; it is left out, and said so.
+query II
+SELECT n_sites, len(list_filter(warnings, w -> w LIKE '%NULL estimate%'))
+FROM do_ate_pool('(SELECT * FROM (VALUES (1.0, 0.1, 100), (2.0, 0.2, 300), (NULL, NULL, 50)) v(estimate, std_error, n))');
+----
+2	1
+
+# Column names can be mapped.
+query I
+SELECT estimate FROM do_ate_pool('(SELECT * FROM (VALUES (1.0, 0.1, 100), (2.0, 0.2, 300)) v(effect, se, units))',
+                                 estimate := 'effect', std_error := 'se', n := 'units');
+----
+1.75
+
+statement error
+SELECT * FROM do_ate_pool('(SELECT * FROM (VALUES (1.0, 0.1, 100)) v(estimate, std_error, n))');
+----
+at least two sites
+
+statement error
+SELECT * FROM do_ate_pool('(SELECT * FROM (VALUES (1.0, 0.1), (2.0, 0.2)) v(estimate, std_error))');
+----
+needs a column 'n'

@@ -233,7 +233,7 @@ src/
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
-| 10 | Frontier | post-1.0 | — | **IN PROGRESS** — continuous and multi-valued treatments, panel/DiD (plain and doubly robust), synthetic control, longitudinal MSMs, survival (RMST), mediation, causal discovery and cluster-robust estimation across one-to-many joins landed; federated pooling across sites outstanding |
+| 10 | Frontier | post-1.0 | — | **DONE** — continuous and multi-valued treatments, panel/DiD (plain and doubly robust), synthetic control, longitudinal MSMs, survival (RMST), mediation, causal discovery, cluster-robust estimation across one-to-many joins, and federated pooling across sites (`do_ate_pool`) landed. All seven items are done; what each leaves open is listed under Phase 10 below |
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
 
@@ -766,7 +766,7 @@ Roughly in order of value per unit of effort:
    Comments are now skipped, and an undirected edge is an error that names both ends. That same error is how the proposal's unoriented edges are made impossible to skip.
 
    Still open: tests for non-Gaussian or mixed data, and FCI for hidden confounders. FCI is the honest answer to the assumption real data breaks most often.
-7. **Federated / multi-table estimation** — effects across joins without materializing the join. **DONE for effects across joins**; federated pooling is still open.
+7. **Federated / multi-table estimation** — effects across joins without materializing the join. **DONE**, in two parts: correct inference across one-to-many joins, and pooling across sites that cannot share rows.
 
    Taken literally, "without materializing the join" is not a goal DuckDo should have. Cross-fitted nuisance models need row-level data, so the frame is materialised by design, and a join is already a valid first argument. What actually went wrong across joins was correctness. A one-to-many join, such as customers joined to their orders, turns one unit into several rows, and every estimator treated them as independent. On 4,000 units joined to three orders each, the estimate was unchanged, but the standard error fell from 0.0352 to 0.0203: an interval 42% too narrow, with no warning. `id :=` did not help, because it was never checked for repeats.
 
@@ -779,7 +779,13 @@ Roughly in order of value per unit of effort:
 
    The parameter is registered only on the functions that honour it, so everywhere else it is rejected rather than ignored. Unclustered results are bitwise identical to before, across all nine estimators, ATT, ATC and `do_ate_by`, confirmed by diffing 17 values recorded at full precision. A repeated `id :=` now warns everywhere, since it is the one sign of the problem DuckDo can see without being told.
 
-   Still open: federated estimation across sites. Each site would share only (n, Σψ, Σψ²), and those pool exactly into an AIPW estimate and standard error. Clustering in the remaining functions (`do_cate`, the IV, mediation and survival estimators) is also still open.
+   Federated estimation is `do_ate_pool`. Each site runs `do_ate`, or a group runs `do_ate_by`, and publishes one row: n, estimate and standard error. The pooled estimate is the size-weighted mean of those rows, and its variance is Σ(wₛ/W)²·seₛ². Both are exact for influence-function estimators with models fitted per site, since a site's estimate is the mean of its ψ and its squared standard error is var(ψ)/n. For ATT the weight is the treated count, and for ATC the control count; mixing estimands is refused.
+
+   Inverse-variance weighting, the meta-analysis default, is used only for the heterogeneity test (Cochran's Q, p-value, I²). It weights by precision rather than population. Take three sites of 2,000, 1,000 and 3,000 units with effects of 1, 2 and 3, where the population effect is 2.167. Inverse-variance weighting gives 1.991 with an interval of roughly [1.978, 2.004], precise and wrong, because the middle site's near-noiseless outcome outvotes the others. `do_ate_pool` gives 2.138 [2.084, 2.192]. Centralising every row gives 2.134 [2.070, 2.198].
+
+   The chi-square tail is a hand-written regularised incomplete gamma, checked against scipy to 1e-12 in both branches (series and continued fraction). The pooled estimates and standard errors are checked against scipy to the same tolerance.
+
+   Still open: clustering in the remaining functions (`do_cate`, the IV, mediation and survival estimators), and a secure-aggregation protocol. `do_ate_pool` trusts the rows it is given.
 
 ---
 

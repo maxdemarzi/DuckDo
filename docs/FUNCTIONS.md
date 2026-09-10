@@ -124,6 +124,43 @@ is worse than none.
 DuckDo cannot detect the problem on its own: a join leaves no trace in the rows. The one sign it
 can see is a repeated `id :=`, and any function given one warns when its values repeat.
 
+### `do_ate_pool`
+
+```sql
+-- Each site runs this on its own data and publishes the one row it returns:
+SELECT estimand, estimate, std_error, n, n_treated
+FROM do_ate('local_patients', treatment := 'drug', outcome := 'recovery');
+
+-- Anyone holding the published rows pools them:
+SELECT estimate, ci_low, ci_high, q_p_value, i_squared
+FROM do_ate_pool('site_results');
+```
+
+This combines effects estimated at separate sites, without moving any rows between them. It
+returns `estimand, estimate, std_error, ci_low, ci_high, p_value, n_sites, n, q, q_p_value,
+i_squared, warnings`. The input is a table with one row per site. The columns `do_ate` and
+`do_ate_by` return already fit it, so `do_ate_pool('(SELECT * FROM do_ate_by(...))')` works as it
+stands. Use `estimate :=`, `std_error :=` and `n :=` to map other column names.
+
+The result is the effect over every site's population taken together. An AIPW estimate is the
+mean of per-row influence values, so the pooled estimate is exactly the size-weighted mean of the
+site estimates, and its variance is exactly Σ(wₛ/W)²·seₛ². The weight is the site's `n` for an
+ATE, its `n_treated` for an ATT, and its control count for an ATC. A table that mixes estimands
+is refused. A table with no `estimand` column is treated as ATEs, with a warning.
+
+- **Inverse-variance weighting is used only for the heterogeneity test.** It is the
+  meta-analysis default, but it weights sites by precision rather than by population, so a small
+  site with a quiet outcome can outvote the rest. That gives the effect in no population anyone
+  asked about.
+- **Heterogeneity** is reported as Cochran's Q, its chi-square p-value and I². When the sites
+  clearly disagree, a warning says the pooled number averages different effects. It is still the
+  effect across all the sites, but report the sites as well. Below five sites, a warning says
+  the test has little power.
+- **Rows with a NULL estimate** are left out and counted in `warnings`. `do_ate_by` reports those
+  for a group it could not estimate.
+- **Assumptions:** the sites are independent samples, and no unit appears at two of them. Models
+  are fitted per site, so each site's estimate has to stand on its own data.
+
 ### `do_ape`
 
 The average partial effect of a **continuous** treatment: what one more unit of the dose buys, on

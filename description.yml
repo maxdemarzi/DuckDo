@@ -145,6 +145,7 @@ docs:
     ```sql
     SELECT * FROM do_ape(...);            -- average partial effect, continuous treatment
     SELECT * FROM do_ate_levels(...);     -- three or more arms, each against a reference
+    SELECT * FROM do_ate_pool(...);       -- sites estimated apart, pooled without their rows
     SELECT * FROM do_dose_response(...);  -- the curve, on a quantile grid
     SELECT * FROM do_did(...);            -- Callaway-Sant'Anna group-time effects
     SELECT * FROM do_event_study(...);    -- the pre-trend check
