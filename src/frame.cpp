@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace duckdb {
 namespace duckdo {
@@ -25,19 +26,81 @@ const char *EstimandName(Estimand e) {
 	}
 }
 
-vector<idx_t> CausalFrame::AllRows() const {
-	vector<idx_t> rows(n);
+void BuildCanonicalOrder(CausalFrame &frame) {
+	const idx_t n = frame.n;
+	const idx_t cols = frame.X.cols;
+	frame.canonical.resize(n);
 	for (idx_t i = 0; i < n; i++) {
-		rows[i] = i;
+		frame.canonical[i] = i;
 	}
-	return rows;
+
+	// Order lexicographically rather than by a hash of the row.
+	//
+	// Hashing was the first attempt and it does not work, for a reason worth
+	// recording. `X` is standardised, so every value carries a mean and a
+	// standard deviation that were themselves summed in storage order. Permuting
+	// the table moves those by an ulp, which moves every standardised value by
+	// an ulp, which changes every hash completely - so a hash-ordered sort is
+	// *more* sensitive to row order than the thing it was meant to fix.
+	//
+	// A comparison does not have that problem. Standardising is subtract-then-
+	// divide, which is monotone within a column, so an ulp of drift in the mean
+	// cannot reorder two distinct values. The order below therefore depends on
+	// what the rows contain and not on where they sit.
+	//
+	// `y` leads because it is usually continuous and settles almost every pair
+	// on the first comparison. A binary outcome makes it useless and the
+	// covariates do the work instead, which is slower and still correct.
+	auto tie_break = [&](idx_t a, idx_t b) {
+		if (frame.t[a] != frame.t[b]) {
+			return frame.t[a] < frame.t[b];
+		}
+		if (frame.has_aux && frame.aux[a] != frame.aux[b]) {
+			return frame.aux[a] < frame.aux[b];
+		}
+		for (idx_t j = 0; j < cols; j++) {
+			const double left = frame.X.At(a, j), right = frame.X.At(b, j);
+			if (left != right) {
+				return left < right;
+			}
+		}
+		// Every value an estimator can see is identical, so which of the two
+		// goes first cannot change any result. Storage index breaks the tie
+		// only here, where it is free to.
+		return a < b;
+	};
+
+	// Sort (outcome, row) pairs rather than bare row indices. Sorting indices
+	// means every comparison chases `y` at a random offset, and at a million
+	// rows that is a cache miss per comparison - measured at 3 s of the 17 s
+	// the 1M x 50 case takes. Carrying the key alongside the index keeps the
+	// common comparison contiguous and gives most of that back.
+	vector<std::pair<double, idx_t>> keyed(n);
+	for (idx_t i = 0; i < n; i++) {
+		keyed[i] = {frame.y[i], i};
+	}
+	std::sort(keyed.begin(), keyed.end(), [&](const std::pair<double, idx_t> &a, const std::pair<double, idx_t> &b) {
+		if (a.first != b.first) {
+			return a.first < b.first;
+		}
+		return tie_break(a.second, b.second);
+	});
+	for (idx_t i = 0; i < n; i++) {
+		frame.canonical[i] = keyed[i].second;
+	}
+}
+
+vector<idx_t> CausalFrame::AllRows() const {
+	return canonical;
 }
 
 vector<idx_t> CausalFrame::ArmRows(double arm) const {
 	vector<idx_t> rows;
-	for (idx_t i = 0; i < n; i++) {
-		if (t[i] == arm) {
-			rows.push_back(i);
+	rows.reserve(arm == 1.0 ? n_treated : n - n_treated);
+	for (idx_t rank = 0; rank < n; rank++) {
+		const idx_t row = canonical[rank];
+		if (t[row] == arm) {
+			rows.push_back(row);
 		}
 	}
 	return rows;
@@ -872,6 +935,9 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 			throw BinderException("duckdo: the treatment '%s' does not vary, so no dose-response is estimable",
 			                      spec.treatment);
 		}
+		// The continuous path returns before the arm counts, and cross-fits just
+		// as the binary one does, so it needs the canonical order too.
+		BuildCanonicalOrder(frame);
 		return frame;
 	}
 
@@ -895,6 +961,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.warnings.push_back("the smaller treatment arm has only " + std::to_string(smaller) +
 		                         " rows; treat the interval as optimistic");
 	}
+	BuildCanonicalOrder(frame);
 	return frame;
 }
 

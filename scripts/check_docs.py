@@ -2,10 +2,18 @@
 
 Two tiers, because the documents make two different promises:
 
-  EXECUTED   The tutorial and the worked examples quote real output. Quoting real
-             output is worth nothing if the queries above it no longer run, so
-             every block is executed in document order against a fresh database.
-             A failure here means the docs are lying.
+  EXECUTED   The tutorial and the worked examples quote real output. Every block
+             is executed in document order against a fresh database, and every
+             number in the block quoted underneath it has to be a number the
+             query still produces.
+
+             Running the SQL was the original check and it was not enough. It
+             proves the query still parses and binds; it says nothing about the
+             figures, and the figures are what the prose reasons about. Both
+             documents were found quoting output their own queries no longer
+             produced - a LATE of 0.1174 where the query returned 0.1236 - while
+             passing a checker that only ran them. A document that argues from
+             stale numbers is worse than one with no numbers at all.
 
   PARSED     The README and the assumptions guide use illustrative fragments
              against tables that do not exist ('customers', 'sales'). Executing
@@ -34,6 +42,13 @@ EXECUTED = ["docs/TUTORIAL.md", "docs/EXAMPLES.md"]
 PARSED = ["README.md", "docs/ASSUMPTIONS.md", "docs/FUNCTIONS.md",
           "docs/REPRODUCIBILITY.md", "docs/BENCHMARKS.md"]
 BLOCK = re.compile(r"```sql\n(.*?)```", re.DOTALL)
+# A ```sql block followed by a plain fenced block: the query and the output it
+# is documented as producing.
+# Neither capture may contain a fence. Without the lookaheads the lazy `.*?`
+# happily runs past its own block's closing fence and through the prose and
+# the next query, so only the last pair in a run ever matched.
+PAIR = re.compile(r"```sql\n((?:(?!```).)*?)```\n[ \t]*\n```\n((?:(?!```).)*?)```", re.DOTALL)
+NUMBER = re.compile(r"-?\d+\.\d+|-?\d+")
 
 
 def blocks(path):
@@ -43,22 +58,88 @@ def blocks(path):
     return runnable, len(found) - len(runnable)
 
 
+def quoted_outputs(path):
+    """Map a runnable block's index to the output the document claims it prints.
+
+    Keyed by the SQL text so it lines up with the executed list, which drops the
+    abbreviated blocks and would otherwise shift every index after the first."""
+    with open(path, encoding="utf8") as handle:
+        text = handle.read()
+    by_sql = {sql: output for sql, output in PAIR.findall(text)}
+    runnable, _ = blocks(path)
+    return {i: by_sql[b] for i, b in enumerate(runnable) if b in by_sql}
+
+
+def numbers(text):
+    """Every numeric token, as floats. Comparing text would trip over 0.145 and
+    0.1450, which are the same number differently rendered."""
+    out = []
+    for token in NUMBER.findall(text):
+        try:
+            out.append(float(token))
+        except ValueError:
+            pass
+    return out
+
+
+MARK = "@@DUCKDO_BLOCK_%d@@"
+
+
 def run_executed(duckdb, doc):
     """Execute every block, in order, as one script - later blocks select from
-    tables earlier ones create."""
+    tables earlier ones create - then check that what came back is what the
+    document says came back.
+
+    Running the SQL only proves it still parses and binds. It says nothing about
+    whether the numbers underneath it are still the numbers it produces, and a
+    document whose prose reasons about stale figures is worse than one with no
+    figures at all. A sentinel between blocks makes the single transcript
+    splittable, so each block's own output can be compared against its own
+    quoted block."""
     runnable, skipped = blocks(doc)
+    expected = quoted_outputs(doc)
+
+    script = []
+    for i, block in enumerate(runnable):
+        script.append("SELECT '" + (MARK % i) + "' AS mark;")
+        script.append(block)
+    script.append("SELECT '" + (MARK % len(runnable)) + "' AS mark;")
+
     handle, path = tempfile.mkstemp(suffix=".sql")
     os.close(handle)
     try:
         with open(path, "w", encoding="utf8", newline="\n") as out:
-            out.write("\n".join(runnable))
+            out.write("\n".join(script))
         proc = subprocess.run([duckdb, "-c", ".read " + path.replace("\\", "/")],
                               capture_output=True, encoding="utf8", errors="replace")
     finally:
         os.unlink(path)
+
     errors = [line.strip() for line in proc.stdout.splitlines() + proc.stderr.splitlines()
               if "Error:" in line]
-    return len(runnable), skipped, errors
+    if errors:
+        return len(runnable), skipped, errors, 0
+
+    pieces = re.split(r"@@DUCKDO_BLOCK_(\d+)@@", proc.stdout)
+    actual = {}
+    for k in range(1, len(pieces) - 1, 2):
+        actual[int(pieces[k])] = pieces[k + 1]
+
+    checked = 0
+    for index, quoted in sorted(expected.items()):
+        produced = numbers(actual.get(index, ""))
+        missing = []
+        for value in numbers(quoted):
+            # The quoted block is a hand-aligned rendering, so match on value
+            # rather than on text, and allow the last displayed digit to differ.
+            if not any(abs(value - other) <= 5e-4 * max(1.0, abs(value)) for other in produced):
+                missing.append(value)
+        checked += 1
+        if missing:
+            shown = ", ".join(("%g" % v) for v in missing[:6])
+            errors.append("block %d quotes %d value(s) it no longer produces: %s"
+                          % (index, len(missing), shown))
+    return len(runnable), skipped, errors, checked
 
 
 def split_sql(text):
@@ -146,12 +227,15 @@ def main():
     for doc, tier in [(d, "EXECUTED") for d in EXECUTED] + [(d, "PARSED") for d in PARSED]:
         if not os.path.exists(doc):
             continue
-        count, skipped, errors = (run_executed if tier == "EXECUTED" else run_parsed)(args.duckdb, doc)
+        if tier == "EXECUTED":
+            count, skipped, errors, checked = run_executed(args.duckdb, doc)
+            detail = "%d blocks, %d abbreviated, %d outputs verified" % (count, skipped, checked)
+        else:
+            count, skipped, errors = run_parsed(args.duckdb, doc)
+            detail = "%d statements, %d abbreviated" % (count, skipped)
         status = "ok" if not errors else "FAILED"
         failures += bool(errors)
-        unit = "blocks" if tier == "EXECUTED" else "statements"
-        print("%-24s %-10s %-8s %d %s, %d abbreviated"
-              % (doc, tier, status, count, unit, skipped))
+        print("%-24s %-10s %-8s %s" % (doc, tier, status, detail))
         for line in errors[:5]:
             print("    %s" % line)
 
@@ -159,7 +243,8 @@ def main():
     if failures:
         print("%d document(s) contain SQL that does not check out" % failures)
         return 1
-    print("Documentation SQL checks out. EXECUTED docs ran; PARSED docs parsed.")
+    print("Documentation SQL checks out. EXECUTED docs ran and match their quoted\n"
+          "output; PARSED docs parsed.")
     return 0
 
 

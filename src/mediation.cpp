@@ -232,7 +232,7 @@ unique_ptr<FunctionData> BindMediate(ClientContext &context, TableFunctionBindIn
 		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
 		vector<idx_t> resample(frame.n);
 		for (idx_t k = 0; k < frame.n; k++) {
-			resample[k] = pick(rng);
+			resample[k] = frame.Draw(pick(rng));
 		}
 		results[rep] = Decompose(design, frame.aux, frame.y, resample, x_mean, lambda);
 	});

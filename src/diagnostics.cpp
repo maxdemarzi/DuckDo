@@ -268,6 +268,9 @@ CausalFrame SubFrame(const CausalFrame &src, const vector<idx_t> &rows) {
 			out.n_treated++;
 		}
 	}
+	// A subset is a different set of rows, so the parent's canonical order does
+	// not describe it.
+	BuildCanonicalOrder(out);
 	return out;
 }
 
@@ -290,6 +293,9 @@ void AppendFeature(CausalFrame &frame, const vector<double> &values, const strin
 	info.scale = sd;
 	frame.features.push_back(info);
 	frame.X = std::move(bigger);
+	// The rows now carry a column they did not before, so the content-derived
+	// order has to be rebuilt before anything draws against it.
+	BuildCanonicalOrder(frame);
 }
 
 unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInput &input,
@@ -309,7 +315,19 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 	bool zero_expected = false;
 
 	if (method == "placebo_treatment") {
-		std::shuffle(perturbed.t.begin(), perturbed.t.end(), rng);
+		// Permute the arm labels across canonical ranks. Shuffling the vector in
+		// place would permute them across storage positions, which makes the
+		// refutation depend on how the table happens to be laid out.
+		vector<double> labels;
+		labels.reserve(frame.n);
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			labels.push_back(frame.t[frame.Draw(rank)]);
+		}
+		std::shuffle(labels.begin(), labels.end(), rng);
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			perturbed.t[frame.Draw(rank)] = labels[rank];
+		}
+		BuildCanonicalOrder(perturbed);
 		perturbed.n_treated = 0;
 		for (auto v : perturbed.t) {
 			if (v == 1.0) {
@@ -321,17 +339,17 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 	} else if (method == "random_common_cause") {
 		std::normal_distribution<double> normal(0.0, 1.0);
 		vector<double> noise(frame.n);
-		for (auto &v : noise) {
-			v = normal(rng);
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			noise[frame.Draw(rank)] = normal(rng);
 		}
 		AppendFeature(perturbed, noise, "__duckdo_random_common_cause");
 		detail = "an irrelevant covariate was added; the estimate should not move";
 	} else if (method == "subset") {
 		vector<idx_t> rows;
 		std::uniform_real_distribution<double> uniform(0.0, 1.0);
-		for (idx_t i = 0; i < frame.n; i++) {
+		for (idx_t rank = 0; rank < frame.n; rank++) {
 			if (uniform(rng) < spec.fraction) {
-				rows.push_back(i);
+				rows.push_back(frame.Draw(rank));
 			}
 		}
 		if (rows.size() < 16) {
@@ -344,7 +362,7 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
 		vector<idx_t> rows(frame.n);
 		for (auto &r : rows) {
-			r = pick(rng);
+			r = frame.Draw(pick(rng));
 		}
 		perturbed = SubFrame(frame, rows);
 		detail = "re-estimated on a bootstrap resample; the estimate should be stable";
@@ -355,7 +373,8 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 		const double y_sd = std::max(StdDev(frame.y), 1e-12);
 		const double y_mean = Mean(frame.y);
 		vector<double> u(frame.n);
-		for (idx_t i = 0; i < frame.n; i++) {
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			const idx_t i = frame.Draw(rank);
 			u[i] = spec.confounder_strength * (frame.t[i] - 0.5) * 2.0 +
 			       spec.confounder_strength * (frame.y[i] - y_mean) / y_sd + normal(rng);
 		}

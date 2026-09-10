@@ -90,10 +90,9 @@ ContinuousNuisance FitContinuousNuisance(const CausalFrame &frame, const CausalS
 	const idx_t folds = std::min<idx_t>(std::max<idx_t>(spec.folds, 2), std::max<idx_t>(2, frame.n / 4));
 	const double lambda = RidgeLambdaFor(frame);
 
-	vector<idx_t> order(frame.n);
-	for (idx_t i = 0; i < frame.n; i++) {
-		order[i] = i;
-	}
+	// Shuffling the canonical order rather than 0..n-1 is what keeps fold
+	// membership a property of the rows instead of the table's storage order.
+	vector<idx_t> order = frame.AllRows();
 	std::mt19937_64 rng(static_cast<uint64_t>(spec.seed));
 	std::shuffle(order.begin(), order.end(), rng);
 	vector<idx_t> assignment(frame.n, 0);

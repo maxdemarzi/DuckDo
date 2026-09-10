@@ -318,7 +318,7 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 		double by[2][2] = {{0.0, 0.0}, {0.0, 0.0}};
 		idx_t bc[2][2] = {{0, 0}, {0, 0}};
 		for (idx_t k = 0; k < frame.n; k++) {
-			const idx_t i = pick(rng);
+			const idx_t i = frame.Draw(pick(rng));
 			const int arm = frame.t[i] == 1.0 ? 1 : 0;
 			const int med = frame.aux[i] >= 0.5 ? 1 : 0;
 			if (arm == 1) {

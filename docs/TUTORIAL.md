@@ -71,7 +71,7 @@ FROM do_ate('customers', treatment := 'got_discount', outcome := 'revenue',
 ```
 estimand  estimator  estimate  std_error  ci_low  ci_high  variance_method      n      n_treated
 ────────  ─────────  ────────  ─────────  ──────  ───────  ──────────────────  ─────  ─────────
-ATE       aipw           8.05      0.071    7.90     8.19  influence function  40000      13961
+ATE       aipw           8.05      0.073    7.90     8.19  influence function  40000      13961
 ```
 
 **$8.05**, against a truth of $8.00, with the interval covering it.
@@ -101,9 +101,9 @@ check_name             status  severity  detail
 ─────────────────────  ──────  ────────  ───────────────────────────────────────────────────────
 sample_size            pass    info      40000 rows: 13961 treated, 26039 control
 treatment_prevalence   pass    info      34.9% of rows are treated ('1' vs '0')
-positivity             pass    info      propensity spans [0.085, 1.000]; 0.5% of rows fall
+positivity             pass    info      propensity spans [0.083, 1.000]; 0.5% of rows fall
                                          outside [0.05, 0.95]
-balance                pass    info      largest weighted SMD is 0.023 on 'prior_spend'
+balance                pass    info      largest weighted SMD is 0.022 on 'prior_spend'
 outcome_variation      pass    info      outcome standard deviation is 21.1576
 missing_data           pass    info      0 rows had at least one missing covariate; they were
                                          imputed, not dropped
@@ -125,8 +125,8 @@ FROM do_balance('customers', treatment := 'got_discount', outcome := 'revenue',
 covariate       smd_before  smd_after  balanced
 ──────────────  ──────────  ─────────  ────────
 age                  0.009     -0.003  true
-tenure_months        0.590     -0.000  true
-prior_spend          0.477      0.023  true
+tenure_months        0.590     -0.001  true
+prior_spend          0.477      0.022  true
 ```
 
 Before adjustment the treated group differed from the control group by 0.59 standard
@@ -151,15 +151,20 @@ FROM do_refute('customers', treatment := 'got_discount', outcome := 'revenue',
 ```
 method                original  refuted  passed  detail
 ────────────────────  ────────  ───────  ──────  ────────────────────────────────────────────
-placebo_treatment         8.05     0.16  false   treatment permuted at random; a real effect
+placebo_treatment         8.05    -0.06  true    treatment permuted at random; a real effect
                                                  should collapse to zero
 random_common_cause       8.05     8.05  true    an irrelevant covariate was added; the
                                                  estimate should not move
 ```
 
-Read `passed` as "the refutation succeeded in breaking the estimate". The placebo test
-shuffles the treatment column, so any effect it finds is noise: 8.05 collapses to 0.16.
-`passed = false` there is the outcome you want.
+`passed` means **the refutation behaved the way it should**, so you want `true` in both
+rows — but it means something different in each. The placebo test shuffles the treatment
+column, so whatever effect it finds is noise and should be *zero*: 8.05 collapses to
+−0.06, inside a tolerance of 0.147. The random-common-cause test adds an irrelevant
+covariate, which should change *nothing*: 8.05 stays 8.05.
+
+A refutation that returns `false` is not a crash. It is the estimate telling you it
+depends on something it should not.
 
 Then the question nothing in the data can answer — **what if we missed a confounder?**
 
@@ -207,7 +212,7 @@ tenure_band     estimated_effect  true_effect  share_targeted
 a. 0-9 months              12.62        12.58           0.187
 b. 10-19                    9.68         9.65           0.280
 c. 20-29                    6.68         6.65           0.391
-d. 30-40                    3.61         3.58           0.523
+d. 30-40                    3.60         3.58           0.523
 ```
 
 Two things. The estimates track the truth to within four cents in every band. And the
@@ -240,7 +245,7 @@ FROM do_optimal_policy('customers', treatment := 'got_discount', outcome := 'rev
 ```
 leaf  rule                  n      mean_effect  cost  action        expected_gain
 ────  ────────────────────  ─────  ───────────  ────  ────────────  ─────────────
-   0  tenure_months <= 20   20552        10.99   8.0  treat                 1.534
+   0  tenure_months <= 20   20552        10.99   8.0  treat                 1.536
    1  tenure_months > 20    19448         4.93   8.0  do not treat          0.000
 ```
 

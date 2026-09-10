@@ -154,18 +154,23 @@ def main():
                   run(args.duckdb, args.models, IPW_CI % ", seed := 43")],
                  expect_identical=False)
 
-    # The one that does not hold. Every accumulation sums over rows in storage
-    # order, and floating-point addition is not associative, so a permuted table
-    # is a different sum of the same numbers.
-    shuffled = run(args.duckdb, args.models, ATE, order="ORDER BY hash(customer_id)")
-    ok &= report("rows physically reordered", [baseline, shuffled], expect_identical=False)
-    try:
+    # Row order used to move the estimate by 4e-4 relative, because folds were
+    # assigned over row positions. They are assigned over content now, so all
+    # that is left is floating-point summation order. This asserts the size of
+    # what remains rather than merely observing that something remains: if fold
+    # assignment ever follows storage order again, the gap jumps by ten orders
+    # of magnitude and this fails.
+    ORDER_TOLERANCE = 1e-10
+    for order in ("ORDER BY hash(customer_id)", "ORDER BY revenue DESC"):
+        shuffled = run(args.duckdb, args.models, ATE, order=order)
         a, b = float(baseline.split(",")[0]), float(shuffled.split(",")[0])
-        print("      gap %.3e on an estimate of %.10f (%.1e relative), which is far too"
-              % (abs(a - b), a, abs(a - b) / abs(a) if a else 0.0))
-        print("      large to be rounding: the folds moved, not the last bit")
-    except ValueError:
-        pass
+        relative = abs(a - b) / abs(a) if a else 0.0
+        within = relative < ORDER_TOLERANCE
+        ok &= within
+        print("  %-46s %-10s %s" % ("reordered: " + order[9:], "%.1e" % relative,
+                                    "ok" if within else "TOO LARGE"))
+    print("      Rounding, not fold membership. Below %.0e relative it cannot be" % ORDER_TOLERANCE)
+    print("      anything else: a fold that moved would be worth 1e-4.")
 
     print()
     print("how much row order actually moves the answer (10 permutations of the same rows)")
@@ -186,8 +191,8 @@ def main():
         spread = _sd(estimates)
         print("  %-11s %12.3e %12.4f %9.2f%%"
               % (estimator, spread, std_error, 100.0 * spread / std_error))
-    print("  Row order is an input. It is worth a small fraction of one standard error,")
-    print("  which is why the answer is reproducible as a number and not as bits.")
+    print("  Fold assignment follows content, so row order is worth rounding and nothing")
+    print("  more. It was 0.25% / 2.12% / 6.18% when folds followed row position.")
 
     if not args.skip_models:
         print()

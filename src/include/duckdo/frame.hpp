@@ -130,13 +130,41 @@ struct CausalFrame {
 	//! Non-fatal problems worth putting in front of the user.
 	vector<string> warnings;
 
+	//! A permutation of 0..n-1 ordered by what each row *contains* rather than
+	//! where it happens to sit in the table.
+	//!
+	//! Every seeded draw in DuckDo - fold assignment, bootstrap resampling,
+	//! foundation-model context selection, the placebo shuffle - used to index
+	//! storage positions. That made the estimate depend on row order: the same
+	//! rows written in a different order landed in different folds and returned
+	//! a different, equally valid answer, worth about 2% of a standard error for
+	//! `aipw` and 6% for `ipw`. A table reordered by an unrelated ETL change
+	//! would move a published number, which is not a property a database
+	//! extension should have.
+	//!
+	//! Draws index this instead, so they follow the data. Built once in
+	//! BuildFrame rather than lazily, because bootstrap replicates read the
+	//! frame from several threads at once and a lazy cache would be a race.
+	vector<idx_t> canonical;
+
 	idx_t Cols() const {
 		return X.cols;
 	}
-	//! Row indices of every row, of the treated arm, and of the control arm.
+	//! Row indices of every row, of the treated arm, and of the control arm,
+	//! all in canonical order.
 	vector<idx_t> AllRows() const;
 	vector<idx_t> ArmRows(double arm) const;
+	//! Map a canonical rank to a storage row. Seeded draws pick a rank.
+	inline idx_t Draw(idx_t rank) const {
+		return canonical[rank];
+	}
 };
+
+//! Order rows by content: a 64-bit hash of the encoded row for the common case,
+//! the row itself where hashes collide, and the storage index only where two
+//! rows are identical in every value an estimator can see - in which case which
+//! one goes where cannot change any result.
+void BuildCanonicalOrder(CausalFrame &frame);
 
 //! Materialise a causal frame from the source relation. Runs the schema probe,
 //! the level probes and the projection query, then encodes.

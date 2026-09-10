@@ -455,6 +455,8 @@ double BootstrapSe(const CausalFrame &frame, const CausalSpec &spec, Estimand es
 		return 0.0;
 	}
 	std::mt19937_64 rng(static_cast<uint64_t>(seed) ^ 0x9E3779B97F4A7C15ULL);
+	// The draw picks a canonical rank and the frame maps it to a row, so the
+	// resample follows the data rather than the table's storage order.
 	std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
 	const double lambda = RidgeLambda(frame);
 	vector<double> draws;
@@ -464,7 +466,7 @@ double BootstrapSe(const CausalFrame &frame, const CausalSpec &spec, Estimand es
 		vector<idx_t> rows(frame.n);
 		vector<idx_t> rows_t0, rows_t1;
 		for (idx_t i = 0; i < frame.n; i++) {
-			const idx_t r = pick(rng);
+			const idx_t r = frame.Draw(pick(rng));
 			rows[i] = r;
 			(frame.t[r] == 1.0 ? rows_t1 : rows_t0).push_back(r);
 		}
