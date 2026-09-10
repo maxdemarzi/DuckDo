@@ -396,7 +396,7 @@ Ort::Env &OrtEnvironment() {
 	return env;
 }
 
-//! One ORT session per (model, rung), created on first use and kept.
+//! One ORT session per (model, rung, device, precision), created on first use and kept.
 struct SessionCache {
 	std::mutex lock;
 	std::unordered_map<string, unique_ptr<Ort::Session>> sessions;
@@ -407,16 +407,82 @@ struct SessionCache {
 	}
 };
 
-Ort::Session &AcquireSession(const string &path, idx_t threads) {
+//! Where a model runs, read from duckdo_device and duckdo_gpu_precision.
+struct DeviceChoice {
+	string device = "cpu";
+	bool tf32 = false;
+};
+
+DeviceChoice ResolveDevice(ClientContext &context) {
+	DeviceChoice choice;
+	choice.device = StringUtil::Lower(GetSettingString(context, "duckdo_device", "cpu"));
+	const string precision = StringUtil::Lower(GetSettingString(context, "duckdo_gpu_precision", "fp32"));
+	if (choice.device != "cpu" && choice.device != "cuda") {
+		throw BinderException("duckdo: duckdo_device must be 'cpu' or 'cuda', not '%s'. ROCm and Apple GPUs are not "
+		                      "wired in: DuckDo builds against no ROCm or Core ML package of ONNX Runtime",
+		                      choice.device);
+	}
+	if (precision == "bf16" || precision == "fp16") {
+		throw BinderException("duckdo: duckdo_gpu_precision = '%s' needs graphs exported at that precision, and "
+		                      "DuckDo exports fp32 graphs only. Use 'fp32', or 'tf32' for faster matrix products",
+		                      precision);
+	}
+	if (precision != "fp32" && precision != "tf32") {
+		throw BinderException("duckdo: duckdo_gpu_precision must be 'fp32' or 'tf32', not '%s'", precision);
+	}
+	choice.tf32 = precision == "tf32";
+	return choice;
+}
+
+//! Attach the CUDA execution provider. ONNX Runtime turns use_tf32 on by default,
+//! so 'fp32' has to switch it off explicitly; leaving the default would make
+//! "fp32" quietly mean tf32, which rounds every matrix product to 10 bits.
+void AppendCuda(Ort::SessionOptions &options, bool tf32) {
+	const OrtApi &api = Ort::GetApi();
+	OrtCUDAProviderOptionsV2 *cuda = nullptr;
+	Ort::ThrowOnError(api.CreateCUDAProviderOptions(&cuda));
+	try {
+		// A fixed cuDNN algorithm rather than one benchmarked on the first runs:
+		// benchmarking lets later runs switch algorithms and so change the result.
+		const char *keys[] = {"device_id", "use_tf32", "cudnn_conv_algo_search"};
+		const char *values[] = {"0", tf32 ? "1" : "0", "DEFAULT"};
+		Ort::ThrowOnError(api.UpdateCUDAProviderOptions(cuda, keys, values, 3));
+		options.AppendExecutionProvider_CUDA_V2(*cuda);
+	} catch (...) {
+		api.ReleaseCUDAProviderOptions(cuda);
+		throw;
+	}
+	api.ReleaseCUDAProviderOptions(cuda);
+}
+
+Ort::Session &AcquireSession(const string &path, idx_t threads, const DeviceChoice &device) {
 	auto &cache = SessionCache::Get();
 	std::lock_guard<std::mutex> guard(cache.lock);
-	auto entry = cache.sessions.find(path);
+	// A session is bound to its execution provider, so the device and precision
+	// are part of what identifies it.
+	const string key = path + "|" + device.device + (device.tf32 ? "|tf32" : "|fp32");
+	auto entry = cache.sessions.find(key);
 	if (entry != cache.sessions.end()) {
 		return *entry->second;
 	}
 	Ort::SessionOptions options;
 	options.SetIntraOpNumThreads(static_cast<int>(std::max<idx_t>(threads, 1)));
 	options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+	if (device.device == "cuda") {
+		// Without this, repeated runs on one GPU session drifted in the eighth
+		// significant figure: ten repeats gave four different estimates, while the
+		// first run in a fresh process was always the same. Deterministic kernels
+		// avoid the atomic reductions that let the summation order vary.
+		options.SetDeterministicCompute(true);
+		try {
+			AppendCuda(options, device.tf32);
+		} catch (const std::exception &ex) {
+			throw BinderException("duckdo: duckdo_device = 'cuda', but the CUDA execution provider could not be "
+			                      "loaded: %s. It needs a build with -DDUCKDO_ORT_FLAVOUR=cuda12, and CUDA 12 with "
+			                      "cuDNN 9 on the library path. SET duckdo_device = 'cpu' runs on the CPU",
+			                      ex.what());
+		}
+	}
 #ifdef _WIN32
 	const std::wstring wide(path.begin(), path.end());
 	auto session = make_uniq<Ort::Session>(OrtEnvironment(), wide.c_str(), options);
@@ -424,7 +490,7 @@ Ort::Session &AcquireSession(const string &path, idx_t threads) {
 	auto session = make_uniq<Ort::Session>(OrtEnvironment(), path.c_str(), options);
 #endif
 	auto &ref = *session;
-	cache.sessions[path] = std::move(session);
+	cache.sessions[key] = std::move(session);
 	return ref;
 }
 
@@ -483,6 +549,16 @@ Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const M
 CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const CausalSpec &spec, const ModelInfo &model,
                    const string &dir) {
 	CfmResult result;
+	// Do-PFN's graph scatters into its output with indices ONNX Runtime's CUDA
+	// kernel does not promise to handle: it warns that ScatterND "only guarantees
+	// to be correct if indices are not duplicated". On an RTX 3060 the process then
+	// died with a segmentation fault, taking the whole DuckDB session with it. A
+	// refusal costs one SET; a crash costs the session and every unsaved result.
+	if (ResolveDevice(context).device == "cuda") {
+		throw BinderException("duckdo: do_pfn runs on the CPU only. Its graph uses a scatter that ONNX Runtime's CUDA "
+		                      "provider does not handle correctly, and in testing it crashed the process. SET "
+		                      "duckdo_device = 'cpu' for do_pfn; causalpfn runs on cuda");
+	}
 	auto bars = LoadBorders(dir, model.manifest_file);
 	if (!bars.loaded || bars.centres.size() != model.num_buckets) {
 		throw BinderException("duckdo: could not read the bar-distribution borders from %s/%s. Re-run the export "
@@ -544,7 +620,7 @@ CfmResult RunDoPfn(ClientContext &context, const CausalFrame &frame, const Causa
 		context_y[i] = static_cast<float>((frame.y[r] - y_mean) / y_sd);
 	}
 
-	auto &session = AcquireSession(GraphPath(dir, model, rung), NumericThreads());
+	auto &session = AcquireSession(GraphPath(dir, model, rung), NumericThreads(), ResolveDevice(context));
 	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 	const std::array<int64_t, 3> context_shape {static_cast<int64_t>(rung), 1, static_cast<int64_t>(width)};
 	const std::array<int64_t, 2> context_y_shape {static_cast<int64_t>(rung), 1};
@@ -658,7 +734,7 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 	// to serve 512x4096 of query attention - eight times more work spent on the
 	// part that is identical every time. Both arms reuse this too, so the saving
 	// is per chunk and per arm.
-	auto &encode = AcquireSession(GraphPath(dir, model, 0), NumericThreads());
+	auto &encode = AcquireSession(GraphPath(dir, model, 0), NumericThreads(), ResolveDevice(context));
 	const char *encode_inputs[] = {"X_context", "t_context", "y_context"};
 	const char *encode_outputs[] = {"k_cache", "v_cache", "stats_x", "stats_y"};
 	std::array<Ort::Value, 3> context_tensors {
@@ -681,7 +757,7 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 		                                       info.GetElementCount(), shape.data(), shape.size());
 	};
 
-	auto &decode = AcquireSession(dir + "/" + model.decode_graph, NumericThreads());
+	auto &decode = AcquireSession(dir + "/" + model.decode_graph, NumericThreads(), ResolveDevice(context));
 	const char *decode_inputs[] = {"k_cache", "v_cache", "stats_x", "stats_y", "X_query", "t_query"};
 	const char *decode_outputs[] = {"mu"};
 
@@ -757,6 +833,12 @@ CfmResult CfmEstimateCate(ClientContext &context, const CausalFrame &frame, cons
 
 	auto result = run_once(spec);
 	result.draws = 1;
+	const auto device = ResolveDevice(context);
+	if (device.device == "cuda") {
+		result.warnings.push_back(StringUtil::Format(
+		    "%s ran on CUDA at %s precision; the result agrees with the CPU's closely but not bit for bit",
+		    model.id.c_str(), device.tf32 ? "tf32" : "fp32"));
+	}
 
 	if (draws > 1) {
 		// Which rows land in the context is a real source of uncertainty, and it
@@ -916,19 +998,42 @@ unique_ptr<FunctionData> BindListModels(ClientContext &context, TableFunctionBin
 
 unique_ptr<FunctionData> BindDevices(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                      vector<string> &names) {
-	names = {"device", "available"};
-	return_types = {LogicalType::VARCHAR, LogicalType::BOOLEAN};
+	names = {"device", "available", "detail"};
+	return_types = {LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::VARCHAR};
 	auto bind = make_uniq<ResultBindData>();
-	const auto devices = AvailableDevices();
-	for (auto &device : devices) {
-		bind->rows.push_back({Value(device), Value::BOOLEAN(true)});
+#ifdef DUCKDO_WITH_ONNX
+	bind->rows.push_back({Value("cpu"), Value::BOOLEAN(true), Value("ONNX Runtime's CPU execution provider")});
+	bool listed = false;
+	for (auto &provider : Ort::GetAvailableProviders()) {
+		listed = listed || provider == "CUDAExecutionProvider";
 	}
-	if (devices.empty()) {
-		bind->rows.push_back({Value("cpu"), Value::BOOLEAN(false)});
+	if (!listed) {
+		bind->rows.push_back({Value("cuda"), Value::BOOLEAN(false),
+		                      Value("this build's ONNX Runtime has no CUDA provider; rebuild with "
+		                            "-DDUCKDO_ORT_FLAVOUR=cuda12")});
+	} else {
+		// Being listed is not being loadable: the provider library, CUDA and
+		// cuDNN load only when a session asks for them, so asking is the test.
+		bool loads = true;
+		string detail = "the CUDA provider loads; SET duckdo_device = 'cuda' to use it";
+		try {
+			Ort::SessionOptions probe;
+			AppendCuda(probe, false);
+		} catch (const std::exception &ex) {
+			loads = false;
+			detail = string("the CUDA provider is present but could not be loaded: ") + ex.what();
+		}
+		bind->rows.push_back({Value("cuda"), Value::BOOLEAN(loads), Value(detail)});
 	}
-	for (auto gpu : {"cuda", "rocm", "mlx"}) {
-		bind->rows.push_back({Value(gpu), Value::BOOLEAN(false)});
-	}
+#else
+	bind->rows.push_back({Value("cpu"), Value::BOOLEAN(false),
+	                      Value("built without ONNX Runtime; the classical estimators need no device")});
+	bind->rows.push_back({Value("cuda"), Value::BOOLEAN(false), Value("built without ONNX Runtime")});
+#endif
+	bind->rows.push_back(
+	    {Value("rocm"), Value::BOOLEAN(false), Value("not built: DuckDo builds against no ROCm package of ONNX Runtime")});
+	bind->rows.push_back(
+	    {Value("mlx"), Value::BOOLEAN(false), Value("not built: DuckDo has no Apple GPU backend")});
 	return std::move(bind);
 }
 
@@ -1060,6 +1165,14 @@ unique_ptr<FunctionData> BindDownload(ClientContext &context, TableFunctionBindI
 			                      "at that directory",
 			                      id, why, script);
 		}
+#ifndef DUCKDO_WITH_ONNX
+		// This build cannot run a model, so fetching one would be a network request
+		// with nothing to show for it - and a build without ONNX Runtime, the one
+		// the community repository ships, is the one that promises no downloads.
+		throw BinderException("duckdo: this build has no ONNX Runtime, so it cannot run %s and does not download it. "
+		                      "Rebuild with -DDUCKDO_WITH_ONNX=ON, or pass source := to copy the files anyway",
+		                      id);
+#endif
 		source = model->default_source;
 	}
 	// Verification is on by default exactly when the bytes come from DuckDo's

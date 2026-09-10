@@ -39,6 +39,15 @@ static void RegisterSettings(DatabaseInstance &instance) {
 	                          "Directory holding exported causal foundation model graphs and weights "
 	                          "(default ~/.cache/duckdo)",
 	                          LogicalType::VARCHAR, Value(""));
+	config.AddExtensionOption("duckdo_device",
+	                          "Where causal foundation models run: 'cpu' (default) or 'cuda'. cuda needs a build with "
+	                          "-DDUCKDO_ORT_FLAVOUR=cuda12 and CUDA 12 with cuDNN 9 on the library path, and its "
+	                          "results agree with the CPU's closely but not bit for bit",
+	                          LogicalType::VARCHAR, Value("cpu"));
+	config.AddExtensionOption("duckdo_gpu_precision",
+	                          "Matrix-product precision on cuda: 'fp32' (default) or 'tf32'. tf32 is faster and rounds "
+	                          "products to 10 mantissa bits, which can flip the sign of an effect near zero",
+	                          LogicalType::VARCHAR, Value("fp32"));
 	config.AddExtensionOption("duckdo_threads",
 	                          "Threads for model inference and for the dense accumulations inside every "
 	                          "estimator; 0 means one per hardware thread",

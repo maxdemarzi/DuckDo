@@ -1,0 +1,72 @@
+#
+# Performance and memory-safety checks that the distribution pipeline does not run.
+#
+# benchmark:  scripts/benchmark.py, tracked over time through the uploaded JSON.
+#             The peak-memory gate holds on any machine. The time gate is loosened
+#             here: the roadmap's 30 s is for a laptop core count, and a shared
+#             runner has four cores.
+# leak:       the same workload at 50 and 300 calls in one process each; the peak
+#             may not grow by more than 25 MB between them.
+# sanitizers: the full test suite on a debug build, where DuckDB turns on
+#             AddressSanitizer (with LeakSanitizer) and UBSan by default.
+#
+name: Performance and sanitizer checks
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'scripts/benchmark.py'
+      - '.github/workflows/Checks.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Benchmark and leak check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build release
+        run: GEN=ninja make release
+      - name: Benchmark
+        run: python3 scripts/benchmark.py --duckdb build/release/duckdb --json bench.json --time-gate 120
+      - name: Leak check
+        run: python3 scripts/benchmark.py --duckdb build/release/duckdb --leak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-${{ github.sha }}
+          path: bench.json
+          if-no-files-found: ignore
+
+  sanitizers:
+    name: Tests under AddressSanitizer and UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build debug (ASan and UBSan are on by default in DuckDB debug builds)
+        run: GEN=ninja make debug
+      - name: Run the test suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+        run: ./build/debug/test/unittest "test/*"

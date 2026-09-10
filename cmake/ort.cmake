@@ -26,6 +26,12 @@ option(DUCKDO_WITH_ONNX "Build the causal foundation model path (fetches ONNX Ru
 set(DUCKDO_ORT_VERSION "1.29.0" CACHE STRING "ONNX Runtime version to fetch")
 set(DUCKDO_ORT_URL "" CACHE STRING "Override URL for the prebuilt ONNX Runtime archive (mirror support)")
 set(DUCKDO_ONNXRUNTIME_ROOT "" CACHE PATH "Root of an already-unpacked ONNX Runtime release")
+# The CPU package runs everywhere. The CUDA 12 package adds the CUDA execution
+# provider, which then needs CUDA 12 and cuDNN 9 on the library path at run time.
+# A CUDA build still runs on the CPU unless duckdo_device says otherwise, and the
+# default is 'cpu', so switching packages changes no result by itself.
+set(DUCKDO_ORT_FLAVOUR "cpu" CACHE STRING "ONNX Runtime package to fetch: cpu or cuda12")
+set_property(CACHE DUCKDO_ORT_FLAVOUR PROPERTY STRINGS cpu cuda12)
 
 # Pointing at a root is an unambiguous request for the model path.
 if(DUCKDO_ONNXRUNTIME_ROOT)
@@ -61,6 +67,16 @@ elseif(WIN32)
 else()
   message(FATAL_ERROR "DuckDo: no prebuilt ONNX Runtime is mapped for ${CMAKE_SYSTEM_NAME}. "
                       "Unpack one yourself and pass -DDUCKDO_ONNXRUNTIME_ROOT.")
+endif()
+
+if(DUCKDO_ORT_FLAVOUR STREQUAL "cuda12")
+  if(_duckdo_ort_platform STREQUAL "linux-x64" OR _duckdo_ort_platform STREQUAL "win-x64")
+    set(_duckdo_ort_platform "${_duckdo_ort_platform}-gpu_cuda12")
+  else()
+    message(FATAL_ERROR "DuckDo: ONNX Runtime publishes no CUDA 12 package for ${_duckdo_ort_platform}")
+  endif()
+elseif(NOT DUCKDO_ORT_FLAVOUR STREQUAL "cpu")
+  message(FATAL_ERROR "DuckDo: DUCKDO_ORT_FLAVOUR must be cpu or cuda12, not '${DUCKDO_ORT_FLAVOUR}'")
 endif()
 
 if(DUCKDO_ONNXRUNTIME_ROOT)

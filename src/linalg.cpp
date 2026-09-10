@@ -68,10 +68,29 @@ bool CholeskySolve(vector<double> &A, idx_t n, const vector<double> &rhs, vector
 	return true;
 }
 
-static idx_t numeric_threads = 0;
+static std::atomic<idx_t> numeric_threads(0);
+//! True on a thread while it runs a ParallelJobs job, whose fits then run on that
+//! one thread. Nested parallelism used to be switched off by saving the shared
+//! thread budget, setting it to 1 and restoring it afterwards - a plain global,
+//! so two connections estimating at once could interleave the save and the
+//! restore, and leave every later query in the process on a single thread with
+//! nothing to say so. A per-thread flag has no such interleaving.
+static thread_local bool inside_job = false;
+
+namespace {
+struct InsideJob {
+	bool was;
+	InsideJob() : was(inside_job) {
+		inside_job = true;
+	}
+	~InsideJob() {
+		inside_job = was;
+	}
+};
+} // namespace
 
 void SetNumericThreads(idx_t threads) {
-	numeric_threads = threads;
+	numeric_threads.store(threads);
 }
 
 void ParallelJobs(idx_t count, const std::function<void(idx_t)> &job) {
@@ -89,15 +108,13 @@ void ParallelJobs(idx_t count, const std::function<void(idx_t)> &job) {
 		return;
 	}
 
-	// Each replicate is already a full pass over the data, so let the replicates
-	// have the threads and give each fit one. Restored below.
-	const idx_t saved = numeric_threads;
-	numeric_threads = 1;
-
+	// Each job is already a full pass over its data, so the jobs get the threads
+	// and each fit inside one runs on the thread that took it.
 	std::atomic<idx_t> next(0);
 	vector<std::thread> pool;
 	pool.reserve(workers - 1);
 	auto pump = [&]() {
+		InsideJob scope;
 		for (;;) {
 			const idx_t i = next.fetch_add(1);
 			if (i >= count) {
@@ -113,13 +130,15 @@ void ParallelJobs(idx_t count, const std::function<void(idx_t)> &job) {
 	for (auto &worker : pool) {
 		worker.join();
 	}
-
-	numeric_threads = saved;
 }
 
 idx_t NumericThreads() {
-	if (numeric_threads > 0) {
-		return numeric_threads;
+	if (inside_job) {
+		return 1;
+	}
+	const idx_t configured = numeric_threads.load();
+	if (configured > 0) {
+		return configured;
 	}
 	const unsigned hardware = std::thread::hardware_concurrency();
 	return hardware > 0 ? static_cast<idx_t>(hardware) : 1;

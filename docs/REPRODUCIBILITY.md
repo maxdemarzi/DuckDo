@@ -189,6 +189,15 @@ layers that is worth about 1e-3 of relative agreement at the logit level. It com
 to **0.00087 on the ATE** and a CATE correlation of 0.9994, which is why the export
 script gates on the estimand rather than on the tensors.
 
+**The GPU is a different machine for this purpose.** With `duckdo_device = 'cuda'`, a
+foundation-model result repeats to the last bit on the same GPU. That holds because
+DuckDo runs CUDA with deterministic kernels. Without them, ten repeats in one process
+gave four different estimates. It does not match the CPU to the last bit: at fp32
+the CausalPFN estimate differs from the CPU's by about 2e-7, and at
+`duckdo_gpu_precision = 'tf32'` by about 2e-5. That is why the
+CPU is the default. A result should not move because a GPU happens to be present,
+and every result that ran on CUDA says so, with its precision, in `warnings`.
+
 ---
 
 ## Running the checks

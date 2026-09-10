@@ -88,10 +88,19 @@ def sample_peak_linux(pid, stop, out):
         stop.wait(0.05)
 
 
-def run_case(duckdb, sql):
-    """Run one case, returning (stdout, stderr, returncode, seconds, peak_mb)."""
+def run_case(duckdb, sql, script=None):
+    """Run one case, returning (stdout, stderr, returncode, seconds, peak_mb).
+
+    A long workload goes through a script file: Windows caps a command line at
+    32,767 characters, and the leak check's is longer than that.
+    """
+    command = [duckdb, "-csv", "-noheader", "-c", sql]
+    if script is not None:
+        with open(script, "w", encoding="utf8") as handle:
+            handle.write(sql)
+        command = [duckdb, "-csv", "-noheader", "-c", ".read " + script.replace("\\", "/")]
     started = time.time()
-    process = subprocess.Popen([duckdb, "-csv", "-noheader", "-c", sql],
+    process = subprocess.Popen(command,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf8", errors="replace")
     sampled = [0.0]
     stop = threading.Event()
@@ -136,11 +145,91 @@ SELECT estimate FROM do_ate('(SELECT * FROM read_parquet(''{path}''))',
 """.format(path=path.replace("\\", "/"), estimator=estimator)
 
 
+# The leak check runs one mixed workload at three lengths, each in a fresh
+# process, and compares how fast the peak grows early and late. A leak costs the
+# same bytes on every call, so its growth per call stays flat. Allocators and
+# caches warming up cost less and less, so theirs falls away. A fixed ceiling on
+# growth cannot tell those apart - it passes a slow leak and fails a big warm-up -
+# so the gate is on the slope: the late per-call growth has to be well under the
+# early one, or negligible outright.
+#
+# The windows start at 300 calls because the warm-up is long. DuckDB's own
+# allocators are still settling after a thousand calls: do_ate_by alone grew
+# 135 KB a call over its first 240, 19.7 KB a call from 300 to 1,000, and 4.9 KB
+# from 1,000 to 3,000, levelling off near 110 MB. An earlier version compared 50
+# to 300 against 300 to 1,000 calls, measured nothing but the warm-up, and failed
+# on a workload that plateaus. The workload covers every estimator family,
+# do_ate_by (which attaches and detaches a scratch database on every call),
+# do_cate, and the bootstrap. AddressSanitizer in CI is the precise check; this
+# is the one that runs anywhere.
+LEAK_CALLS = (300, 1000, 3000)
+LEAK_SHAPE = (20_000, 10)
+LEAK_FLAT_KB = 5.0
+LEAK_SLOWDOWN = 0.5
+
+
+def leak_sql(path, calls):
+    src = path.replace("\\", "/")
+    rel = "(SELECT *, id %% 20 AS grp FROM read_parquet(''%s''))" % src
+    common = "treatment:='t', outcome:='y'"
+    work = [
+        "SELECT count(*) FROM do_ate('%s', %s, exclude:=['id','grp'], estimator:='aipw');" % (rel, common),
+        "SELECT count(*) FROM do_ate('%s', %s, exclude:=['id','grp'], estimator:='dml');" % (rel, common),
+        "SELECT count(*) FROM do_ate('%s', %s, exclude:=['id','grp'], estimator:='t_learner', bootstrap_reps:=50);"
+        % (rel, common),
+        "SELECT count(*) FROM do_ate_by('%s', %s, exclude:=['id'], by:=['grp']);" % (rel, common),
+        "SELECT count(*) FROM do_cate('%s', %s, exclude:=['id','grp']);" % (rel, common),
+    ]
+    return "\n".join(work[i % len(work)] for i in range(calls)) + "\n"
+
+
+def run_leak(args, workdir):
+    rows, covariates = LEAK_SHAPE
+    path = os.path.join(workdir, "leak_%d_%d.parquet" % (rows, covariates))
+    print("generating %d x %d ..." % (rows, covariates))
+    made = subprocess.run([args.duckdb, "-c", generate_sql(rows, covariates, path)],
+                          capture_output=True, encoding="utf8", errors="replace")
+    if made.returncode != 0:
+        print("FAILED to generate: %s" % made.stderr.strip()[:200])
+        return 1
+    peaks = {}
+    for calls in LEAK_CALLS:
+        script = os.path.join(workdir, "leak_%d.sql" % calls)
+        _, stderr, code, elapsed, peak = run_case(args.duckdb, leak_sql(path, calls), script=script)
+        if code != 0:
+            print("FAILED after %d calls: %s" % (calls, stderr.strip()[:300]))
+            return 1
+        if peak is None:
+            print("peak memory is not measured on this platform, and the leak check needs it")
+            return 2
+        peaks[calls] = peak
+        print("%4d calls: %7.1f s, peak %7.1f MB" % (calls, elapsed, peak))
+    first, middle, last = LEAK_CALLS
+    early = (peaks[middle] - peaks[first]) * 1024.0 / (middle - first)
+    late = (peaks[last] - peaks[middle]) * 1024.0 / (last - middle)
+    print("growth per call: %+.1f KB from %d to %d calls, %+.1f KB from %d to %d"
+          % (early, first, middle, late, middle, last))
+    if late <= LEAK_FLAT_KB or late <= LEAK_SLOWDOWN * early:
+        print("LEAK GATE PASSED: late growth %+.1f KB/call is %s"
+              % (late, "negligible" if late <= LEAK_FLAT_KB else "under half the early %+.1f KB/call" % early))
+        return 0
+    print("LEAK GATE FAILED: growth per call did not fall away (%+.1f KB early, %+.1f KB late) - "
+          "that is the shape of a leak" % (early, late))
+    return 1
+
+
 def main():
+    global GATE_SECONDS
     parser = argparse.ArgumentParser()
     parser.add_argument("--duckdb", default=os.path.join("build", "release", "duckdb.exe"))
     parser.add_argument("--json", default=None)
+    parser.add_argument("--leak", action="store_true",
+                        help="run the repeated-invocation leak check instead of the timing suite")
+    parser.add_argument("--time-gate", type=float, default=GATE_SECONDS,
+                        help="seconds allowed per case. The 30 s default is the roadmap's laptop gate; a shared CI "
+                             "runner with fewer cores needs more, while the memory gate holds everywhere")
     args = parser.parse_args()
+    GATE_SECONDS = args.time_gate
 
     if not os.path.exists(args.duckdb):
         print("duckdb binary not found at %s" % args.duckdb)
@@ -149,6 +238,8 @@ def main():
     workdir = tempfile.mkdtemp(prefix="duckdo-bench-")
     shapes = {}
     try:
+        if args.leak:
+            return run_leak(args, workdir)
         for rows, covariates, _ in CASES:
             if (rows, covariates) in shapes:
                 continue

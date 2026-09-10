@@ -86,6 +86,14 @@ columns. A group too small to estimate yields a row with NULL estimates and the
 reason in `warnings`, rather than failing the whole query. Capped by
 `duckdo_max_groups`.
 
+Groups are estimated from one scan. The relation is copied once into a private
+in-memory database, sorted by group, and each group reads only its own rows.
+1,000 groups of 200 rows take 0.88 s, against 9.4 s when each group re-read the
+whole relation, and the estimates are bit-identical to that older path. Groups run
+one after another, and each fit uses every thread for its own work. The copy lasts
+only for the call, but it is held in memory, so a very large relation needs room
+for a second copy while it runs.
+
 ### Clustered rows: effects across a one-to-many join
 
 ```sql
@@ -861,8 +869,35 @@ SELECT file, bytes, status FROM do_download('causalpfn', source := '/mnt/shared/
 
 ### `do_devices()`
 
-`device, available`. Reports `cpu` when the build has ONNX Runtime; CUDA/ROCm/MLX are listed as
-unavailable placeholders.
+`device, available, detail`. `detail` says why a device is or is not available, rather than
+leaving a bare `false`.
+
+For CUDA, `do_devices()` attaches the provider for real rather than trusting ONNX Runtime's list.
+The provider library, CUDA and cuDNN only load when a session asks for them, so asking is the
+test. When it fails, `detail` names what is missing: a DLL, or a version mismatch.
+
+**Running CausalPFN on an NVIDIA GPU.** Build with `-DDUCKDO_ORT_FLAVOUR=cuda12`, put CUDA 12.8 and
+cuDNN 9 on the library path, and:
+
+```sql
+SET duckdo_device = 'cuda';
+SELECT estimate, ci_low, ci_high
+FROM do_ate('customers', treatment := 'discount', outcome := 'revenue', model := 'causalpfn');
+```
+
+On an RTX 3060, 8,000 rows took 5.1 s against 40.0 s on the CPU, as medians of three runs. fp32 on
+the GPU differs from the CPU by about 2e-7, and repeats exactly because CUDA sessions run
+deterministic kernels. `duckdo_gpu_precision = 'tf32'` saves little (4.7 s) for about 140 times the
+error. The result carries a warning naming the device and precision it ran
+at.
+
+- **The CUDA 12 package needs CUDA 12.8 exactly or later.** ONNX Runtime 1.29 is built against
+  it. Older 12.x libraries, such as the ones PyTorch bundles, load and then fail with error 127.
+  NVIDIA's `nvidia-cuda-runtime-cu12` and `nvidia-cublas-cu12` pip packages at 12.8 are enough
+  without the full toolkit.
+- **`do_pfn` runs on the CPU only.** On CUDA its graph crashed the process, so it refuses
+  `duckdo_device = 'cuda'` before touching the GPU.
+- **ROCm and Apple GPUs are not built.** `do_devices()` lists them with the reason.
 
 ### Using a model
 
@@ -947,6 +982,8 @@ logit-level agreement without moving the number anyone reads.
 | `duckdo_bootstrap_reps` | 200 | Bootstrap replicates |
 | `duckdo_model_dir` | `~/.cache/duckdo` | Where exported model graphs and weights live |
 | `duckdo_threads` | 0 | Threads for model inference and the dense accumulations inside every estimator; 0 means one per hardware thread |
+| `duckdo_device` | `cpu` | Where causal foundation models run: `cpu` or `cuda`. `cuda` needs a build with `-DDUCKDO_ORT_FLAVOUR=cuda12`, and CUDA 12 with cuDNN 9 on the library path. Its results agree with the CPU's closely but not bit for bit, which is why the CPU is the default. `do_devices()` says whether CUDA loads here |
+| `duckdo_gpu_precision` | `fp32` | `fp32` or `tf32` on `cuda`. ONNX Runtime defaults to tf32 and DuckDo does not: tf32 rounds matrix products to 10 mantissa bits, which can flip the sign of an effect near zero. `bf16` and `fp16` are refused, because the graphs are exported in fp32 |
 | `duckdo_query_chunk` | 512 | Rows scored per model forward pass. The estimate is bit-identical at every setting. The context is encoded once and cached, so this is now a small dial: 8,000 rows take 31.3 s at 512 (1.9 GB peak), 23.0 s at 2048 (2.7 GB) and 22.2 s at 8192 (5.0 GB), medians of three runs. 2048 is worth it if the memory is spare; past that there is nothing left to buy |
 | `duckdo_ensemble_draws` | 1 | Context draws a foundation model takes; more than one funds an interval |
 

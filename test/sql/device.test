@@ -1,0 +1,79 @@
+# name: test/sql/device.test
+# description: duckdo_device and duckdo_gpu_precision default to cpu and fp32, and are checked before a model runs
+# group: [duckdo]
+#
+# Needs exported models, like cfm.test, but no GPU: whether CUDA itself works is
+# test/sql/gpu.test's business.
+
+require duckdo
+
+require-env DUCKDO_MODEL_DIR
+
+statement ok
+SET duckdo_model_dir = '${DUCKDO_MODEL_DIR}';
+
+statement ok
+CREATE TABLE dev AS
+SELECT i % 2 AS t, (i % 7) * 1.0 AS x,
+       1.0 + 2.0 * (i % 2) + 0.1 * (i % 7) + ((i * 37) % 11) * 0.05 AS y
+FROM range(400) r(i);
+
+# The CPU is the default, so no result moves because a GPU happens to be present.
+query II
+SELECT current_setting('duckdo_device'), current_setting('duckdo_gpu_precision');
+----
+cpu	fp32
+
+statement ok
+SET duckdo_device = 'rocm';
+
+statement error
+SELECT * FROM do_ate('dev', treatment := 't', outcome := 'y', model := 'causalpfn');
+----
+must be 'cpu' or 'cuda'
+
+statement ok
+SET duckdo_device = 'cpu';
+
+# Half precision needs graphs exported at half precision, which DuckDo does not make.
+statement ok
+SET duckdo_gpu_precision = 'bf16';
+
+statement error
+SELECT * FROM do_ate('dev', treatment := 't', outcome := 'y', model := 'causalpfn');
+----
+exports fp32 graphs only
+
+statement ok
+SET duckdo_gpu_precision = 'fp64';
+
+statement error
+SELECT * FROM do_ate('dev', treatment := 't', outcome := 'y', model := 'causalpfn');
+----
+must be 'fp32' or 'tf32'
+
+statement ok
+RESET duckdo_gpu_precision;
+
+# Do-PFN refuses cuda before touching a GPU: on CUDA its graph crashed the
+# process. The refusal comes first, so it reads the same with or without CUDA.
+statement ok
+SET duckdo_device = 'cuda';
+
+statement error
+SELECT * FROM do_ate('dev', treatment := 't', outcome := 'y', model := 'do_pfn');
+----
+do_pfn runs on the CPU only
+
+statement ok
+SET duckdo_device = 'cpu';
+
+# Back to the defaults, a model runs on the CPU with no device note attached.
+statement ok
+RESET duckdo_gpu_precision;
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%CUDA%'))
+FROM do_ate('dev', treatment := 't', outcome := 'y', model := 'causalpfn');
+----
+0

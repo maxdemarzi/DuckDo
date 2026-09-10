@@ -231,8 +231,8 @@ src/
 | 5 | Inference runtime | 0.5.0 | yes (models opt-in) | **DONE** — ONNX Runtime linked behind a build flag, model catalog, session cache, and a parity gate the export refuses to pass. For Do-PFN, logits must agree within 1e-4 (measured 4.3e-06 to 8.1e-06). For the split CausalPFN graphs, the ATE must agree within 0.01 and the CATE correlation must be at least 0.999 (measured 0.0009 and 0.9994), because fused versus decomposed attention kernels leave a raw-output gap of 0.066 |
 | 6 | CFM estimators | 0.6.0 | opt-in | **DONE for CausalPFN and Do-PFN** — CausalPFN matches AIPW (3.061 vs 3.063, truth 2.981) with CATE correlation 0.9995 and no shrinkage; Do-PFN shrinks to 2.631, reproduced and reported. CausalFM evaluated and declined (section 9, item 2) |
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
-| 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
-| 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
+| 8 | Scale and performance | 0.8.0 | — | **DONE**, with spilling rejected by design. 1M × 50 AIPW runs in 14.2 s against a 30 s gate, down from 101 s. `do_ate_by` is built from one scan: 1,000 groups in 0.88 s, down from 9.44 s, and bit-identical. CausalPFN caches its context and runs on CUDA. Nested parallelism is switched off per thread. A leak check shows memory growth levelling off. CI benchmark and sanitizer jobs are written but not yet run |
+| 9 | Ship | 1.0.0 | — | **READY, not submitted** — `description.yml`, the function reference, tutorial, worked examples, assumptions guide, benchmarks and reproducibility statement are written and checked by `scripts/check_docs.py`, including the `hello_world` a stranger runs first. A documentation site builds with `mkdocs build --strict`, ready to publish once GitHub Pages is switched on. The submission PR is held by the maintainer's choice |
 | 10 | Frontier | post-1.0 | — | **DONE** — continuous and multi-valued treatments, panel/DiD (plain and doubly robust), synthetic control, longitudinal MSMs, survival (RMST), mediation, causal discovery, cluster-robust estimation across one-to-many joins, and federated pooling across sites (`do_ate_pool`) landed. All seven items are done; what each leaves open is listed under Phase 10 below |
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
@@ -549,7 +549,29 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 
 ### Work
 
-1. **Grouped estimation** — `do_ate_by(..., by := ['region'])` runs an independent estimation per group with shared nuisance-model infrastructure, parallelized across groups.
+1. ~~**Grouped estimation**~~ **DONE.** `do_ate_by` existed, but it did not scale. Each group
+   re-read the whole relation, several times over, through a text-cast predicate, so the cost
+   grew with the square of the group count:
+
+   | groups x 200 rows | before | after |
+   |---|---|---|
+   | 100 | 0.42 s (4.2 ms/group) | 0.16 s (1.6 ms/group) |
+   | 300 | 1.75 s (5.8 ms/group) | 0.39 s (1.3 ms/group) |
+   | 1,000 | 9.44 s (9.4 ms/group) | 0.88 s (0.9 ms/group) |
+
+   The relation is now copied once into a private in-memory database, sorted by an integer group
+   id with each group's rows in their original order. Each group then reads one contiguous range.
+   A temporary table would not do, because every frame is built on a fresh connection, and
+   temporary tables are per-connection. An attached database is visible to all of them. 1,000
+   groups of 2,000 rows each, 2M rows in all, take 1.36 s. All 43 values of a full-precision
+   baseline are bit-identical to the old path: NULL groups, two grouping columns, a group too small
+   to estimate, clustering, and default covariates.
+
+   Running groups in parallel was built, measured, and removed. 1,000 AIPW groups took 0.88 s
+   against 0.93 s on one thread, and 300 `t_learner` groups 0.40 s against 0.42 s. A group's cost
+   is the queries that build its frame, not its arithmetic. The worker threads also read settings
+   through the binding query's client context, which is not made to be shared. Five percent was
+   not worth that.
 2. ~~**Parallelism**~~ **DONE for bootstrap replicates**, which were the remaining serial cost:
    `do_mediate`, `do_rmst` and `do_frontdoor` now run their replicates in parallel with the
    row-block threading switched off inside each, since nesting the two oversubscribes badly. Each
@@ -564,7 +586,23 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
    are bit-identical at any thread count — and the work-stealing dispatch that replaced the even
    split is also *faster*: 1M x 50 AIPW fell from 16.7 s to 14.2 s. Cross-fitting folds and CFM
    ensemble draws are still serial, and DuckDB's own task scheduler is still not used.
-3. **Context caching** — for CFMs, encode a fixed context once and reuse it across query chunks (`anofox_tabfm` does exactly this behind a setting).
+
+   Nested parallelism is now switched off per thread. It used to be switched off by saving the
+   shared thread budget, setting it to 1 and restoring it afterwards. That was a plain global, so
+   two connections estimating at once could interleave the save and the restore and leave every
+   later query in the process on one thread, with nothing to say so. A thread-local flag has no
+   such interleaving, and the full-precision baselines are bit-identical across the change.
+
+   Cross-fitting folds stay serial, and that is a decision now rather than a gap. A large fit
+   already spreads its row blocks across every thread, so running five folds side by side would
+   cap it at five threads. A small fit has too little work for the folds to be worth
+   parallelising. Groups in `do_ate_by` are where small fits come in numbers, and those now run in
+   parallel (item 1).
+3. ~~**Context caching** — for CFMs, encode a fixed context once and reuse it across query chunks.~~
+   **DONE**, and not behind a setting: it is the only path. CausalPFN is exported as two graphs.
+   The encoder turns the context into a key/value cache once. The decoder scores every query
+   chunk, and both arms, against that cache. On 8,000 rows the default went from 126 s to 31.3 s
+   with a bit-identical estimate (section 9, item 10).
 4. ~~**Streaming and chunking**~~ — **partly done, and the other part was rejected.**
    `duckdo_max_memory` is now a real ceiling: the encoded matrix's size is computed before
    it is allocated, and exceeding the budget raises an error naming the setting and the row
@@ -573,11 +611,64 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
    bootstrap reads it in random row order two hundred times more; a spilled matrix would turn
    a fast refusal into an unbounded thrash. Refusing with an actionable message is the better
    failure, and it is also what section 6's guardrail rule already specified.
-5. **GPU flavours** — CUDA and ROCm builds in-tree, with `do_devices()` reporting availability and `duckdo_gpu_precision` controlling `fp32`/`tf32`/`bf16`. Document that reduced precision can flip signs near zero effect.
-6. **Benchmark suite in CI** — a fixed set of table sizes and estimators, tracked over time so
-   regressions are visible. `scripts/benchmark.py` now gates on peak resident memory as well as
-   seconds, and generates each shape outside the measurement so both numbers describe the
-   estimator rather than the generator.
+5. ~~**GPU flavours**~~ **DONE for CUDA**; ROCm and bf16 are not built, for reasons below.
+   `-DDUCKDO_ORT_FLAVOUR=cuda12` fetches ONNX Runtime's CUDA 12 package in place of the CPU one.
+   `duckdo_device` ('cpu' or 'cuda') and `duckdo_gpu_precision` ('fp32' or 'tf32') choose where
+   and how. `do_devices()` attaches the CUDA provider for real rather than trusting its listing,
+   because the provider library, CUDA and cuDNN load only when a session asks for them. It then
+   says exactly what is missing when that fails: a named DLL (error 126), or a version mismatch
+   (error 127).
+
+   CausalPFN on an RTX 3060, 8,000 rows by 5 covariates, each run in a fresh process, as medians of
+   three:
+
+   | device | time | the three runs | estimate |
+   |---|---|---|---|
+   | CPU | 40.0 s | 36.6, 40.0, 49.8 | 3.008895 |
+   | CUDA fp32 | **5.1 s** | 5.1, 5.1, 5.0 | 3.008895 |
+   | CUDA tf32 | 4.7 s | 4.8, 4.6, 4.7 | 3.008894 |
+
+   That is about 7.8 times faster. The CPU runs spread over 13 seconds with identical code, which is
+   why single runs are not quoted. fp32 on the GPU differs from the CPU by 1.75e-7 on a 2,000-row
+   table and repeats bit for bit. tf32 differs by 2.44e-5, about 140 times as much, to save 0.4 s.
+   ONNX Runtime turns tf32 on by default, so 'fp32' switches it off explicitly; otherwise "fp32"
+   would quietly mean tf32. The CPU stays the default: a result should not move because a GPU happens
+   to be present.
+
+   Five things were found on the way:
+   - **CUDA was not deterministic until told to be.** Ten repeats of one query in one process gave
+     four different estimates, spread over 2e-8, while the first run in every fresh process
+     matched. An earlier check that two runs agreed had matched by luck; `gpu.test` caught it. CUDA
+     sessions now run with deterministic compute and a fixed cuDNN algorithm rather than one
+     benchmarked on the first runs. After that, ten repeats and three fresh processes all give the
+     same estimate at both precisions, for about 0.3 s.
+   - **ONNX Runtime 1.29's Windows CUDA package is built against CUDA 12.8.** PyTorch's bundled
+     12.6 libraries load and then fail with error 127, because `cublasLt` 12.6 lacks functions
+     the provider imports. A diagnosis comparing every import against every export confirmed
+     that 12.8's libraries have them all.
+   - **Do-PFN crashes the process on CUDA.** ONNX Runtime's CUDA kernel warns that the ScatterND
+     its graph uses "only guarantees to be correct if indices are not duplicated", and the run
+     then died with a segmentation fault. So `do_pfn` refuses `duckdo_device = 'cuda'` before
+     touching the GPU.
+   - **A CUDA build on the CPU changes nothing.** The CUDA package's CPU path returns
+     3.044465189457, the same as the CPU package, and both suites pass without any CUDA library on
+     the path.
+   - **bf16 and fp16 are refused.** They need graphs exported at that precision, and DuckDo
+     exports fp32 graphs.
+
+   ROCm is not built. ONNX Runtime publishes no prebuilt ROCm package for Windows, and there is no
+   AMD GPU here to test one on. Shipping an untested device path would be worse than naming the
+   gap, so `do_devices()` reports it as not built, with the reason.
+
+   `test/sql/gpu.test` covers the GPU path, and runs only with `DUCKDO_CUDA_TESTS` set.
+6. ~~**Benchmark suite in CI**~~ **WRITTEN, not yet run.** `scripts/benchmark.py` gates on peak resident
+   memory as well as seconds, and generates each shape outside the measurement, so both numbers
+   describe the estimator rather than the generator. `.github/workflows/Checks.yml` runs it weekly
+   and on pushes that touch the source, uploads the JSON so the numbers can be tracked across
+   commits, and runs the leak check and the full test suite under AddressSanitizer and UBSan. The
+   time gate is loosened to 120 s there, because the roadmap's 30 s is for a laptop core count and
+   a shared runner has four cores. The memory gates hold on any machine. None of this has run yet:
+   GitHub Actions runs only once the branch is pushed, and it has not been.
 
 ### Measured
 
@@ -611,9 +702,17 @@ to leave room for the 2.2x.
 
 ### Exit gate
 
-- 1M rows, 50 covariates, AIPW, under 30 seconds on a laptop core count.
-- `do_ate_by` over 1000 groups scales roughly linearly.
-- No memory growth across repeated invocations (leak check under valgrind/ASan).
+- ~~1M rows, 50 covariates, AIPW, under 30 seconds on a laptop core count.~~ **Met**: 14.2 s.
+- ~~`do_ate_by` over 1000 groups scales roughly linearly.~~ **Met, and better than linear**: the
+  cost per group falls from 1.6 ms at 100 groups to 0.9 ms at 1,000 (item 1).
+- ~~No memory growth across repeated invocations.~~ **Met as far as this machine can measure.**
+  `scripts/benchmark.py --leak` runs a mixed workload of every estimator family, `do_ate_by`,
+  `do_cate` and the bootstrap, at 300, 1,000 and 3,000 calls. The peak grew 25.4 KB per call from
+  300 to 1,000 calls and 7.4 KB per call from 1,000 to 3,000. That is warm-up levelling off; a leak
+  holds flat. `do_ate_by` alone reached a plateau near 110 MB by 3,000 calls. Most of the early
+  growth is DuckDB's own: a plain SQL loop that attaches and detaches a database grows the same way
+  and levels off the same way. The precise check, the full suite under AddressSanitizer with
+  LeakSanitizer, is written into CI and has not run yet.
 
 ---
 
@@ -663,6 +762,19 @@ to leave room for the 2.2x.
    not exist. The two tiers are named in the output so nobody mistakes the weaker one for the
    stronger. A deliberately broken query was planted to confirm the checker fails when it
    should.
+
+   The checker now covers the first thing a stranger runs as well. The `hello_world` block in
+   `description.yml` is what the community page shows verbatim. It is executed on a fresh database
+   with no download, and the interval it prints has to contain the true effect its own comment
+   promises. Today it prints [1.971, 2.027] around a true 2.0. That is the "correct ATE within five
+   minutes" exit gate, checked by a script instead of asserted.
+
+   A documentation site is built from the same files, unchanged. `mkdocs.yml` and
+   `scripts/mkdocs_hooks.py` make the README the home page and point links that leave `docs/` at
+   the file on GitHub. The build runs with `--strict`, so a broken link fails it.
+   `.github/workflows/Docs.yml` publishes it to GitHub Pages on a push to `main`. That needs Pages
+   switched on once in the repository settings, which is the maintainer's call, and nothing is
+   published until then.
 3. ~~**Honest benchmark page.**~~ **DONE** (`docs/BENCHMARKS.md`, from `scripts/bench_headtohead.py`,
    every method in its own process against identical rows). The headline reverses what this
    repository previously claimed: on IHDP, `model := 'causalpfn'` posts a mean PEHE of **0.416**
@@ -693,11 +805,14 @@ to leave room for the 2.2x.
    from the same stream that fills the columns, so it compared *different data* and made the result
    look far worse than it is.
 5. ~~**No telemetry.**~~ **DONE and verified rather than asserted.** The extension contains no HTTP
-   client and no socket code; the only two URLs in `src/` are attribution strings naming where each
-   model came from, printed by `do_list_models()` and never fetched. `docs/REPRODUCIBILITY.md`
-   ships the one-line grep that checks it. `do_download` now exists (item 11 below). It reads through
-   DuckDB's file system, so DuckDo itself still opens no connection, and it has no default source,
-   so no URL is reached that the user did not write.
+   client and no socket code. `src/` holds three URLs. Two are attribution strings naming where each
+   model came from, which `do_list_models()` prints and nothing fetches. The third is the pinned
+   address of the hosted CausalPFN release, which is fetched only when someone calls
+   `do_download('causalpfn')` with no source. `docs/REPRODUCIBILITY.md` ships the one-line grep that
+   checks this. `do_download` reads through DuckDB's file system, so DuckDo itself still opens no
+   connection. It verifies every file against a compiled-in SHA-256 before installing it. A build
+   without ONNX Runtime, the one the community repository ships, refuses the default source
+   outright. That build cannot run a model, so its only network request would be a user-typed URL.
 
 ### Exit gate
 

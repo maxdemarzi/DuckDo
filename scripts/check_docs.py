@@ -22,6 +22,14 @@ Two tiers, because the documents make two different promises:
              malformed named-parameter syntax - but NOT a stale column name.
              That gap is real; it is the price of a landing page that reads well.
 
+And one more, stricter than both:
+
+  HELLO      The hello_world block in description.yml is what the community
+             extension page shows a stranger, verbatim. It is executed on a
+             fresh database, and the interval it prints has to contain the true
+             effect its own comment promises. Running without error is not
+             enough for the one query most people will ever copy.
+
 Blocks containing `...` are deliberately abbreviated, and are counted and
 reported rather than silently ignored.
 
@@ -31,12 +39,15 @@ Dev-only. Not shipped with the extension.
 """
 
 import argparse
+import csv
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 
 EXECUTED = ["docs/TUTORIAL.md", "docs/EXAMPLES.md"]
 PARSED = ["README.md", "docs/ASSUMPTIONS.md", "docs/FUNCTIONS.md",
@@ -212,6 +223,47 @@ def run_parsed(duckdb, doc):
     return checked, skipped, errors
 
 
+def hello_world(path="description.yml"):
+    """The hello_world block from the community-extension descriptor, dedented."""
+    with open(path, encoding="utf8") as handle:
+        lines = handle.read().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "hello_world: |")
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        body.append(line)
+    return textwrap.dedent("\n".join(body))
+
+
+def run_hello_world(duckdb, path="description.yml", truth=2.0):
+    """The first thing a stranger runs. The community page shows it verbatim, so
+    it has to run on a fresh database with no download, and give the answer its
+    own comment promises: an interval around a true effect of exactly 2.0."""
+    handle, script = tempfile.mkstemp(suffix=".sql")
+    os.close(handle)
+    try:
+        with open(script, "w", encoding="utf8", newline="\n") as out:
+            out.write(hello_world(path))
+        proc = subprocess.run([duckdb, "-csv", "-c", ".read " + script.replace("\\", "/")],
+                              capture_output=True, encoding="utf8", errors="replace")
+    finally:
+        os.unlink(script)
+    errors = [line.strip() for line in proc.stdout.splitlines() + proc.stderr.splitlines() if "Error:" in line]
+    if errors:
+        return errors, "did not run"
+    rows = list(csv.reader(io.StringIO(proc.stdout)))
+    for i, row in enumerate(rows[:-1]):
+        if "ci_low" in row and "ci_high" in row:
+            low = float(rows[i + 1][row.index("ci_low")])
+            high = float(rows[i + 1][row.index("ci_high")])
+            if low <= truth <= high:
+                return [], "ran; [%g, %g] covers the true %g" % (low, high, truth)
+            return ["the interval [%g, %g] misses the true effect %g" % (low, high, truth)], "wrong answer"
+    return ["printed no interval to check"], "no interval"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--duckdb", default=os.path.join("build", "release", "duckdb.exe"))
@@ -236,6 +288,14 @@ def main():
         status = "ok" if not errors else "FAILED"
         failures += bool(errors)
         print("%-24s %-10s %-8s %s" % (doc, tier, status, detail))
+        for line in errors[:5]:
+            print("    %s" % line)
+
+    if os.path.exists("description.yml"):
+        errors, detail = run_hello_world(args.duckdb)
+        failures += bool(errors)
+        print("%-24s %-10s %-8s %s" % ("description.yml", "EXECUTED", "ok" if not errors else "FAILED",
+                                       "hello_world " + detail))
         for line in errors[:5]:
             print("    %s" % line)
 

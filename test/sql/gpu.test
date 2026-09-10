@@ -1,0 +1,79 @@
+# name: test/sql/gpu.test
+# description: CausalPFN on CUDA agrees with the CPU, repeats exactly, and Do-PFN refuses CUDA
+# group: [duckdo]
+#
+# Needs exported models, a build with -DDUCKDO_ORT_FLAVOUR=cuda12, an NVIDIA GPU,
+# and CUDA 12.8 with cuDNN 9 on the library path. Opt in with DUCKDO_CUDA_TESTS:
+#   DUCKDO_MODEL_DIR=build/models DUCKDO_CUDA_TESTS=1 ./build/release/test/unittest "test/sql/gpu.test"
+
+require duckdo
+
+require-env DUCKDO_MODEL_DIR
+
+require-env DUCKDO_CUDA_TESTS
+
+statement ok
+SET duckdo_model_dir = '${DUCKDO_MODEL_DIR}';
+
+query I
+SELECT available FROM do_devices() WHERE device = 'cuda';
+----
+true
+
+statement ok
+SELECT setseed(0.2);
+
+statement ok
+CREATE TABLE d AS
+SELECT x, t, 3.0*t + x + (random()-0.5) AS y
+FROM (SELECT x, (random() < 1/(1+exp(-x)))::INT AS t FROM (SELECT (random()-0.5)*4 AS x FROM range(2000)));
+
+statement ok
+SET VARIABLE on_cpu = (SELECT estimate FROM do_ate('d', treatment := 't', outcome := 'y', model := 'causalpfn'));
+
+statement ok
+SET duckdo_device = 'cuda';
+
+statement ok
+SET VARIABLE on_gpu = (SELECT estimate FROM do_ate('d', treatment := 't', outcome := 'y', model := 'causalpfn'));
+
+# fp32 on the GPU agrees with the CPU closely - measured 1.8e-7 here - but not
+# bit for bit, which is why the CPU is the default.
+query I
+SELECT abs(getvariable('on_gpu') - getvariable('on_cpu')) < 1e-5;
+----
+true
+
+# The same query on the same GPU repeats exactly - because CUDA sessions run
+# deterministic kernels. Without them, ten repeats gave four different values,
+# and this assertion is the one that caught it.
+query I
+SELECT (SELECT estimate FROM do_ate('d', treatment := 't', outcome := 'y', model := 'causalpfn')) = getvariable('on_gpu');
+----
+true
+
+# The result says where it ran.
+query I
+SELECT len(list_filter(warnings, w -> w LIKE 'causalpfn ran on CUDA at fp32 precision%'))
+FROM do_ate('d', treatment := 't', outcome := 'y', model := 'causalpfn');
+----
+1
+
+# tf32 rounds every matrix product to 10 mantissa bits; measured 2.4e-5 from the
+# CPU here, about 140 times the fp32 gap.
+statement ok
+SET duckdo_gpu_precision = 'tf32';
+
+query I
+SELECT abs((SELECT estimate FROM do_ate('d', treatment := 't', outcome := 'y', model := 'causalpfn')) - getvariable('on_cpu')) < 1e-3;
+----
+true
+
+statement ok
+RESET duckdo_gpu_precision;
+
+# Do-PFN crashed the process on CUDA, so it refuses before touching the GPU.
+statement error
+SELECT * FROM do_ate('d', treatment := 't', outcome := 'y', model := 'do_pfn');
+----
+do_pfn runs on the CPU only

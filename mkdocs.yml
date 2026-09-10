@@ -1,0 +1,55 @@
+# The DuckDo documentation site. The pages are the same Markdown files GitHub
+# renders, unchanged; scripts/mkdocs_hooks.py makes the README the home page and
+# points links outside docs/ at the file on GitHub.
+#
+#   pip install mkdocs-material
+#   mkdocs build --strict        # or: mkdocs serve
+site_name: DuckDo
+site_description: Causal inference inside DuckDB - treatment effects, diagnostics and interventions in SQL
+repo_url: https://github.com/maxdemarzi/DuckDo
+repo_name: maxdemarzi/DuckDo
+edit_uri: blob/main/docs/
+docs_dir: docs
+site_dir: build/site
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+hooks:
+  - scripts/mkdocs_hooks.py
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+nav:
+  - Home: index.md
+  - Tutorial: TUTORIAL.md
+  - Worked examples: EXAMPLES.md
+  - Function reference: FUNCTIONS.md
+  - Assumptions guide: ASSUMPTIONS.md
+  - Benchmarks: BENCHMARKS.md
+  - Reproducibility: REPRODUCIBILITY.md
+  - Updating: UPDATING.md
+  - Roadmap: ROADMAP.md

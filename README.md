@@ -223,6 +223,12 @@ On a DGP with a true effect of 3.0, the single-draw interval is `[3.035, 3.048]`
 truth**. The 8-draw interval `[3.007, 3.121]` contains it. Each draw is a full forward pass, so this
 costs k times as much.
 
+**On an NVIDIA GPU, CausalPFN is about 8x faster.** Build with `-DDUCKDO_ORT_FLAVOUR=cuda12` and
+`SET duckdo_device = 'cuda'`. On an RTX 3060, 8,000 rows take 5.1 s against 40.0 s on the CPU
+(medians of three runs), and the estimate matches the CPU's to about 2e-7. The CPU stays the default, so no result moves
+because a GPU happens to be present. Do-PFN runs on the CPU only: on CUDA its graph crashed the
+process, so it refuses.
+
 The extension itself never ships weights. Getting a model running takes two steps:
 
 ```sh

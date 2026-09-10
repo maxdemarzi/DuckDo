@@ -62,6 +62,12 @@ SELECT count(*) >= 1 FROM do_devices();
 ----
 true
 
+# Every device says why it is or is not available, rather than a bare false.
+query II
+SELECT available, detail LIKE 'not built%' FROM do_devices() WHERE device = 'rocm';
+----
+false	true
+
 statement ok
 CREATE TABLE tiny AS SELECT i AS id, (i % 2) AS t, i * 1.0 AS y, (i % 7) * 1.0 AS x FROM range(400) r(i);
 
