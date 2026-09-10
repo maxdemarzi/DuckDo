@@ -97,6 +97,46 @@ of the worst means (0.390), for the same reason and on the same replication.
 
 ---
 
+## ACIC 2016, ten simulations
+
+4,802 rows and 58 real covariates (79 once three categoricals are one-hot encoded), with ten
+simulated treatment and outcome settings over the same covariates, from the 2016 Atlantic Causal
+Inference Conference competition. The data comes from the CSVs causallib ships (Apache-2.0). The
+harness pulls them out of its wheel without installing it, because causallib pins its own
+scikit-learn and would change the environment the other methods run in. The categoricals are
+encoded once, so every method sees the same numeric matrix.
+
+| method | mean \|error\| | median \|error\| | mean PEHE | median PEHE |
+|---|---|---|---|---|
+| EconML `CausalForestDML` | **0.114** | 0.097 | 1.553 | 1.461 |
+| DuckDo `causalpfn` | 0.136 | 0.126 | 1.453 | 1.140 |
+| CausalPFN (python) | 0.137 | **0.091** | **1.379** | **1.119** |
+| EconML `LinearDML` | 0.348 | 0.168 | 2.605 | 2.508 |
+| DuckDo `aipw` | 0.433 | 0.353 | 3.086 | 3.269 |
+| EconML `LinearDRLearner` | 0.506 | 0.446 | 2.903 | 2.934 |
+| DuckDo `dml` | 0.530 | 0.597 | 3.086 | 3.269 |
+| DoWhy PSW | 0.537 | 0.512 | — | — |
+
+**This is the hardest benchmark here, and it is where DuckDo's classical path loses most.** `aipw`
+misses the average by 0.43 and posts a PEHE of 3.09. EconML's `LinearDML`, also linear, does better
+on both (0.35, 2.61). With 79 covariates and response surfaces that are not linear, a regularised
+GLM base learner is the wrong tool, and the table says so.
+
+**The flexible methods cluster at the top**, and which one leads depends on the metric.
+`CausalForestDML` has the best mean error on the average effect (0.114). The two CausalPFN runs have
+the best per-row error, with a PEHE around 1.4 against the forest's 1.55. On IHDP the foundation
+model led on both metrics by a wide margin; here it and the forest are close.
+
+**The ONNX export tracks the reference, but less tightly than on IHDP**: 0.136 against 0.137 on the
+average, and 1.453 against 1.379 on PEHE. The wider gap has nothing to do with the graph. 4,802
+rows is more than the 4,096-row context, so each side picks a subset of rows to condition on, and
+they pick different ones. On IHDP's 747 rows both see every row, and the two agree to within 0.007.
+
+Seconds are not reported for this benchmark. The machine was running other work during the sweep,
+so the timings would mislead; accuracy is unaffected.
+
+---
+
 ## Where the classical path loses
 
 Two synthetic datasets of 8,000 rows, identical except in shape. In the first the
@@ -243,7 +283,8 @@ cost and memory across table sizes.
 
 - **Only ten IHDP replications**, not the canonical 1000, because that is what the
   public mirror carries. Means over ten replications are noisy — see `dml`.
-- **No ACIC**, which is the benchmark that would test many more DGP shapes.
+- **ACIC is ten simulations**: the ones causallib ships, one replication each, not the full
+  competition set.
 - **One machine**, one run per cell. The timings are not averaged over repeats and
   should be read as order-of-magnitude.
 - **No standard errors on the errors.** Whether 0.078 beats 0.082 is not something

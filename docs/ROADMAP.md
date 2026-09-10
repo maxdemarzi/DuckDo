@@ -907,10 +907,18 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    rejected: see Phase 8, which also shows why the residual 2.2x is a floor rather than an
    oversight.
 7. ~~**Persist graphs**~~ **DONE**: graphs live in a `duckdo_graphs` table, so they survive a restart and are inspectable as ordinary data. Open question 3 is answered — a plain table beat catalog integration, which would have coupled DuckDo to internals that move between DuckDB versions.
-8. **Broaden the cross-check further.** It now covers all ten IHDP replications available from the
-   CEVAE mirror (mean |ATE error| 0.137, mean PEHE 2.23) and Lalonde NSW against its experimental
-   benchmark (1794.3, with `dml` at 1759.3). The canonical 1000-replication IHDP set is not at that
-   source; an ACIC subset is still open.
+8. ~~**Broaden the cross-check further.**~~ **DONE for ACIC.** `scripts/bench_headtohead.py` now runs
+   ten ACIC 2016 simulations beside the ten IHDP replications and Lalonde. They are the simulations
+   causallib ships as CSVs, extracted from its wheel without installing it, since causallib pins
+   its own scikit-learn. ACIC is where DuckDo's classical path loses most. `aipw` misses the
+   average by 0.43 with a PEHE of 3.09, behind EconML's `LinearDML`, which is also linear (0.35,
+   2.61). The flexible methods lead: `CausalForestDML` on the average effect (0.114), and the two
+   CausalPFN runs on per-row effects (PEHE about 1.4). DuckDo's CausalPFN tracks the reference less
+   tightly than on IHDP, 1.453 against 1.379 on PEHE, because 4,802 rows exceed the 4,096-row
+   context and the two pick different subsets to condition on. Since the fold change, IHDP reads
+   0.164 mean |ATE error| and 2.25 mean PEHE for `aipw`, and Lalonde reads 1709.8 for `dml`
+   against the 1794.3 benchmark. The canonical 1000-replication IHDP set and the full ACIC
+   competition set are still not run.
 9. ~~**Assign folds by row content, not row position.**~~ **DONE.** `CausalFrame` carries a
    canonical order derived from what each row contains, and every seeded draw indexes that instead
    of storage: fold assignment, bootstrap resampling in `do_ate`, `do_iv` and `do_mediate`, the

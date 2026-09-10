@@ -374,6 +374,11 @@ sample, and a gate that calls that a failure only teaches people to loosen gates
 Across **all ten IHDP replications** the mean absolute ATE error is **0.164**, and `do_cate`'s mean
 PEHE is 2.25 — dominated by replication 9, whose true effect is 10.5 where the others sit near 4.
 
+On **ten ACIC 2016 simulations** (4,802 rows, 79 encoded covariates, nonlinear surfaces) the
+linear estimators trail. `aipw` misses the average by 0.43, behind EconML's `LinearDML` at 0.35,
+while `model := 'causalpfn'` lands at 0.136 beside EconML's causal forest at 0.114. The full
+tables, including where each method loses, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
 And on **Lalonde NSW**, where treatment was randomised so the unadjusted difference *is* the causal
 effect, the adjusted estimators have a benchmark to reproduce rather than improve on:
 

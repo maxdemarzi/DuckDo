@@ -270,6 +270,58 @@ def lalonde():
     return X, T, Y, float(Y[T == 1].mean() - Y[T == 0].mean()), None
 
 
+def fetch_acic(folder):
+    """Extract ACIC 2016 from the causallib wheel on PyPI (Apache-2.0).
+
+    The wheel is downloaded without installing it: causallib pins its own
+    scikit-learn and pandas, and installing it into the environment the other
+    competitors run in would change the thing being measured."""
+    import glob
+    import zipfile
+    staging = os.path.join(CACHE, "causallib_wheel")
+    os.makedirs(staging, exist_ok=True)
+    subprocess.run([sys.executable, "-m", "pip", "download", "causallib==0.10.0", "--no-deps",
+                    "-d", staging, "-q"], check=True, capture_output=True)
+    wheel = glob.glob(os.path.join(staging, "causallib-0.10.0-*.whl"))[0]
+    os.makedirs(folder, exist_ok=True)
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            if "acic_challenge_2016/" in name and name.endswith(".csv"):
+                with io.open(os.path.join(folder, os.path.basename(name)), "wb") as out:
+                    out.write(archive.read(name))
+
+
+def acic2016(simulation):
+    """One of the ten ACIC 2016 simulations shipped with causallib.
+
+    4,802 rows and 58 covariates - real covariates, three of them categorical -
+    with simulated treatment and outcomes, so individual effects are known and
+    PEHE is measurable. The categoricals are one-hot encoded here, once, so every
+    method sees the same numeric design matrix: DuckDo could encode them itself,
+    but then the comparison would be of encoders as well as estimators."""
+    folder = os.path.join(CACHE, "acic2016")
+    if not os.path.exists(os.path.join(folder, "zymu_%d.csv" % simulation)):
+        fetch_acic(folder)
+    with io.open(os.path.join(folder, "x.csv"), encoding="utf8") as handle:
+        rows = list(csv.reader(handle))
+    header, body = rows[0], rows[1:]
+    columns = []
+    for j in range(len(header)):
+        values = [row[j] for row in body]
+        try:
+            columns.append(np.array([float(v) for v in values]))
+        except ValueError:
+            for level in sorted(set(values))[1:]:  # first level is the reference
+                columns.append(np.array([1.0 if v == level else 0.0 for v in values]))
+    X = np.column_stack(columns)
+    sim = np.loadtxt(os.path.join(folder, "zymu_%d.csv" % simulation), delimiter=",", skiprows=1)
+    T = sim[:, 0].astype(int)
+    y0, y1, mu0, mu1 = sim[:, 1], sim[:, 2], sim[:, 3], sim[:, 4]
+    Y = np.where(T == 1, y1, y0)
+    individual = mu1 - mu0
+    return X, T, Y, float(individual.mean()), individual
+
+
 def heterogeneous(seed=11, n=8000, p=5):
     """Effect linear in x0, outcome surface linear. Individual truths known."""
     rng = np.random.default_rng(seed)
@@ -362,6 +414,10 @@ def main():
     parser.add_argument("--duckdb", default=os.path.join("build", "release", "duckdb.exe"))
     parser.add_argument("--models", default=os.path.join("build", "models"))
     parser.add_argument("--quick", action="store_true", help="one IHDP replication, not ten")
+    parser.add_argument("--only", default="",
+                        help="comma list of groups to run (heterogeneous, nonlinear, ihdp, acic, "
+                             "lalonde); their rows replace the same groups' rows in --json and "
+                             "every other row is kept")
     parser.add_argument("--json", default=os.path.join("scripts", "bench_results.json"))
     parser.add_argument("--worker", help="internal: run one method in this process")
     parser.add_argument("--data")
@@ -377,28 +433,50 @@ def main():
     args.cuda = cuda_available()
     print("CUDA %s" % ("available" if args.cuda else "not available"))
 
+    groups = [g.strip() for g in args.only.split(",") if g.strip()] or \
+        ["heterogeneous", "nonlinear", "ihdp", "acic", "lalonde"]
     results = []
 
-    print()
-    print("heterogeneous (n=8000, effect linear in x0, individual truths known)")
-    X, T, Y, truth, individual = heterogeneous()
-    evaluate("heterogeneous", X, T, Y, truth, individual, args, results)
-
-    print()
-    print("nonlinear (n=8000, step effect and a curved outcome surface)")
-    X, T, Y, truth, individual = nonlinear()
-    evaluate("nonlinear", X, T, Y, truth, individual, args, results)
-
-    for replication in ([1] if args.quick else range(1, 11)):
+    if "heterogeneous" in groups:
         print()
-        print("ihdp-%d (n=747, 25 covariates, individual truths known)" % replication)
-        X, T, Y, truth, individual = ihdp(replication)
-        evaluate("ihdp-%d" % replication, X, T, Y, truth, individual, args, results)
+        print("heterogeneous (n=8000, effect linear in x0, individual truths known)")
+        X, T, Y, truth, individual = heterogeneous()
+        evaluate("heterogeneous", X, T, Y, truth, individual, args, results)
 
-    print()
-    print("lalonde NSW (randomised: the benchmark is the unadjusted difference)")
-    X, T, Y, truth, individual = lalonde()
-    evaluate("lalonde", X, T, Y, truth, individual, args, results)
+    if "nonlinear" in groups:
+        print()
+        print("nonlinear (n=8000, step effect and a curved outcome surface)")
+        X, T, Y, truth, individual = nonlinear()
+        evaluate("nonlinear", X, T, Y, truth, individual, args, results)
+
+    if "ihdp" in groups:
+        for replication in ([1] if args.quick else range(1, 11)):
+            print()
+            print("ihdp-%d (n=747, 25 covariates, individual truths known)" % replication)
+            X, T, Y, truth, individual = ihdp(replication)
+            evaluate("ihdp-%d" % replication, X, T, Y, truth, individual, args, results)
+
+    if "acic" in groups:
+        for simulation in ([1] if args.quick else range(1, 11)):
+            X, T, Y, truth, individual = acic2016(simulation)
+            print()
+            print("acic-%d (n=%d, %d encoded covariates, individual truths known)"
+                  % (simulation, len(T), X.shape[1]))
+            evaluate("acic-%d" % simulation, X, T, Y, truth, individual, args, results)
+
+    if "lalonde" in groups:
+        print()
+        print("lalonde NSW (randomised: the benchmark is the unadjusted difference)")
+        X, T, Y, truth, individual = lalonde()
+        evaluate("lalonde", X, T, Y, truth, individual, args, results)
+
+    # A partial run replaces only its own groups, so ACIC can be added without
+    # re-running the thirty-minute sweep that produced everything else.
+    if args.only and os.path.exists(args.json):
+        with io.open(args.json, encoding="utf8") as handle:
+            kept = [row for row in json.load(handle)
+                    if row.get("dataset", "").split("-")[0] not in groups]
+        results = kept + results
 
     with io.open(args.json, "w", encoding="utf8") as handle:
         json.dump(results, handle, indent=2)
