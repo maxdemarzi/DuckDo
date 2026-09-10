@@ -5,7 +5,8 @@ last change was worth.
 
 DuckDo makes DuckDB an in-process causal engine: treatment effects, assumption diagnostics and
 graph-based identification expressed as ordinary SQL over ordinary tables. No Python, no training
-loop, no data leaving the process.
+loop, no data leaving the process, and **no network request of any kind** — not a usage ping, not
+a version check. Causal analysis runs on the data that is worth analysing.
 
 ```sql
 SELECT estimand, estimator, round(estimate, 2) AS estimate, round(ci_low, 2), round(ci_high, 2)
@@ -23,10 +24,15 @@ FROM do_ate('customers',
 > dependencies and needs no downloads.
 
 New here? **[docs/TUTORIAL.md](docs/TUTORIAL.md)** walks one real question end to end in about
-five minutes, and **[docs/EXAMPLES.md](docs/EXAMPLES.md)** works three more — — an A/B test nobody complied with, a pricing question where the naive
-answer has the wrong *sign*, and a retention call worth targeting.
-**[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** is what every estimate rests on, written for
-analysts. Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
+five minutes, and **[docs/EXAMPLES.md](docs/EXAMPLES.md)** works three more — an A/B test nobody
+complied with, a pricing question where the naive answer has the wrong *sign*, and a retention
+call worth targeting. **[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** is what every estimate rests
+on, written for analysts. Full signatures: **[docs/FUNCTIONS.md](docs/FUNCTIONS.md)**.
+
+Weighing it against something else? **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** grades DuckDo
+against EconML, DoWhy and the CausalPFN package on identical rows, with the losses shown, and
+**[docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md)** says what is reproducible to the bit, what
+is not, and how to pin it.
 
 ## What works today
 
@@ -358,9 +364,10 @@ Reproduce with `test/sql/estimators.test` and `python scripts/crosscheck_econml.
 
 ### And does the foundation model beat them?
 
-Not on these data, and the honest answer is worth more than a flattering one:
+**On a linear DGP, no. On real benchmark data, decisively — and mostly on the metric that
+decides whether a targeting rule works.**
 
-Three engines, identical SQL, 1500 rows, true ATE **2.9806**:
+Three engines, identical SQL, 1500 rows of a *linear* DGP, true ATE **2.9806**:
 
 | engine | estimate | error | CATE correlation |
 |---|---|---|---|
@@ -368,16 +375,30 @@ Three engines, identical SQL, 1500 rows, true ATE **2.9806**:
 | `model := 'causalpfn'` | **3.0610** | **+0.080** | **0.9995** |
 | `model := 'do_pfn'` | 2.6307 | −0.350 | 0.984 |
 
-**CausalPFN matches AIPW.** Do-PFN **shrinks the population effect** — the documented weakness of
-that model class, reproduced here rather than hidden — while still ranking individuals well. So
-Do-PFN remains usable for *who to treat* and is the wrong tool for *what the programme is worth*;
-CausalPFN is fine for both, which is why it is the one to start with.
+**CausalPFN matches AIPW** where AIPW is correctly specified, which is the most it could do.
+Do-PFN **shrinks the population effect** — the documented weakness of that model class,
+reproduced here rather than hidden — while still ranking individuals well.
 
-Note that none of these beat AIPW on a linear DGP, where AIPW is correctly specified. The
-foundation models earn their keep on data whose structure you do not already know. Read
-`do_sensitivity` before believing any of them.
+Change the data to IHDP, ten replications of a real covariate distribution, and the gap opens:
 
-Inference cost: ~16 s for 1500 rows across both models, single CPU.
+| | mean \|ATE error\| | **mean PEHE** |
+|---|---|---|
+| `model := 'causalpfn'` | **0.078** | **0.416** |
+| CausalPFN, the Python package | 0.082 | 0.423 |
+| `estimator := 'aipw'` | 0.137 | 2.226 |
+| econml `LinearDML` | 0.147 | 2.161 |
+| econml `CausalForestDML` | 0.390 | 2.749 |
+
+**PEHE 0.42 against 2.16** — a factor of five on per-row effects, which is what a targeting rule
+rides on. That is the case foundation models were built for: a covariate structure nobody
+specified in advance. It is also the reason the linear result above is not the headline.
+
+DuckDo's ONNX export lands within 0.007 of the reference package on both metrics across all ten
+replications (0.0041 on mean |error|, 0.0066 on mean PEHE), which is much stronger evidence that the export is faithful than the tensor-level
+parity check in the export script.
+
+The losses, the costs, and the datasets where EconML's forest learners beat DuckDo's classical
+path outright are in **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
 
 ## Settings
 
@@ -432,8 +453,12 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   degrading exactly as confounding strengthens, which is the signature of the heteroskedasticity
   it corrects. A single replicate covers anywhere between 0.56 and 1.00 of its rows, so coverage
   quoted without a standard error is not a measurement — this README previously quoted one.
-- **Base learners are regularised GLMs.** Strongly non-linear confounding will not be fully removed.
-  Gradient-boosted base learners are a Phase 2 follow-up.
+- **Base learners are regularised GLMs, and this is measurable.** On a DGP whose effect is a step
+  function, `do_cate` posts a PEHE of **0.992** where EconML's `CausalForestDML` posts **0.213** and
+  `model := 'causalpfn'` posts 0.451. The average effect is barely touched (0.020 against 0.011),
+  so this costs you targeting rules, not headline numbers. Gradient-boosted base learners are a
+  Phase 2 follow-up; until then, reach for the foundation model when the structure is unknown.
+  Full table in [docs/BENCHMARKS.md](docs/BENCHMARKS.md#where-the-classical-path-loses).
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
   not visible to an estimation call.
 - **Foundation model intervals need `ensemble :=`, and still miss parameter uncertainty.** A single
@@ -447,6 +472,18 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   rather than the model does most of the damage. `ensemble := k` spreads the choice of covariates
   across draws, which widens the interval from ±0.006 to ±0.31, but dropped confounders are bias
   and no resampling interval covers bias. Use CausalPFN. `model := 'causalfm'` is not exported.
+- **`duckdo_query_chunk` defaults to 512, and that costs a factor of six.** The foundation-model
+  path re-encodes its whole context on every query chunk, so 8,000 rows at 512 a chunk pays for the
+  context sixteen times: **148 s against 21 s** at `duckdo_query_chunk = 8192`, with the estimate
+  **bit-identical** at every setting. The default is conservative because the fast setting peaks at
+  5.3 GB against 2.1 GB. Raise it if you have the memory. The real fix is encoding the context once,
+  which needs a re-exported graph.
+- **Row order is an input.** `AssignFolds` seeds a shuffle of row *positions*, so the same rows in a
+  different physical order land in different cross-fitting folds and give a different estimate:
+  measured across ten permutations, a standard deviation of **2.1% of one standard error** for
+  `aipw` and 6.2% for `ipw`. Statistically negligible, not bit-reproducible. Materialise your
+  analysis table with an explicit `ORDER BY` if you need to defend a number twice. See
+  [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md).
 - **ONNX Runtime links dynamically.** `-DDUCKDO_WITH_ONNX=ON` fetches the pinned release and stages
   its libraries next to the binaries, so this is handled rather than manual — but the community
   build still ships without it, because a shared dependency is exactly what the dependency-free
@@ -463,7 +500,7 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-341 assertions in the dependency-free build, 373 with the foundation-model path enabled, across
+341 assertions in the dependency-free build, 378 with the foundation-model path enabled, across
 estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
 time-varying treatment, survival, the `do()` surface and end-to-end inference for both models.
 

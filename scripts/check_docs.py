@@ -31,7 +31,8 @@ import sys
 import tempfile
 
 EXECUTED = ["docs/TUTORIAL.md", "docs/EXAMPLES.md"]
-PARSED = ["README.md", "docs/ASSUMPTIONS.md", "docs/FUNCTIONS.md"]
+PARSED = ["README.md", "docs/ASSUMPTIONS.md", "docs/FUNCTIONS.md",
+          "docs/REPRODUCIBILITY.md", "docs/BENCHMARKS.md"]
 BLOCK = re.compile(r"```sql\n(.*?)```", re.DOTALL)
 
 

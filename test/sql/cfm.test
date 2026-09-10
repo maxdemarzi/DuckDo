@@ -273,3 +273,30 @@ SELECT len(list_filter(warnings, w -> w LIKE '%different subset weighted by%')) 
 FROM do_ate('wide12', treatment:='trt', outcome:='rev', exclude:=['cid'], model:='causalpfn', ensemble:=3);
 ----
 true
+
+# duckdo_query_chunk is a cost knob and nothing else. It decides how many rows go
+# through one forward pass, and the context is re-encoded for each chunk - which
+# is worth a factor of six in wall clock on eight thousand rows, and must be
+# worth exactly nothing in the answer. Measured at 512 vs 8192 the estimate is
+# bit-identical; this pins that, because a chunk size that leaked into the result
+# would be a silent correctness bug rather than a slow query.
+statement ok
+SET duckdo_query_chunk = 128;
+
+statement ok
+CREATE TABLE chunk_a AS
+SELECT estimate FROM do_ate('customers', treatment:='discount', outcome:='revenue',
+                            exclude:=['customer_id'], model:='causalpfn');
+
+statement ok
+SET duckdo_query_chunk = 4096;
+
+query I
+SELECT (SELECT estimate FROM chunk_a) = estimate
+FROM do_ate('customers', treatment:='discount', outcome:='revenue',
+            exclude:=['customer_id'], model:='causalpfn');
+----
+true
+
+statement ok
+SET duckdo_query_chunk = 256;

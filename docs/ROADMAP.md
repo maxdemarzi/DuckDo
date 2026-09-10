@@ -663,9 +663,42 @@ to leave room for the 2.2x.
    not exist. The two tiers are named in the output so nobody mistakes the weaker one for the
    stronger. A deliberately broken query was planted to confirm the checker fails when it
    should.
-3. **Honest benchmark page.** DuckDo classical vs DuckDo CFM vs Python EconML/DoWhy/CausalPFN, on the standard benchmarks, with the losses shown.
-4. **Reproducibility statement.** What is deterministic, what is not, and how to pin it.
-5. **No telemetry.** Causal analysis runs on sensitive data. Shipping zero telemetry is both the right default and a genuine differentiator worth stating explicitly.
+3. ~~**Honest benchmark page.**~~ **DONE** (`docs/BENCHMARKS.md`, from `scripts/bench_headtohead.py`,
+   every method in its own process against identical rows). The headline reverses what this
+   repository previously claimed: on IHDP, `model := 'causalpfn'` posts a mean PEHE of **0.416**
+   against 2.161 for the best classical method measured, and lands within 0.007 of the CausalPFN
+   package on both metrics across ten replications (0.0041 and 0.0066) — the strongest evidence yet that the ONNX
+   export is faithful. The README's "the foundation model does not beat AIPW" was true only of the
+   linear DGP it was measured on, and has been corrected.
+
+   The losses are on the page rather than in a footnote. On a step-function DGP EconML's
+   `CausalForestDML` beats DuckDo's classical `do_cate` on PEHE by **0.213 against 0.992**, because
+   regularised GLMs cannot fit a cliff. `dml`'s mean IHDP error of 0.786 against a median of 0.160
+   is one replication where it misses by 5.9. And the CFM path was **6× slower than the same model
+   in Python** until the cause was found: `duckdo_query_chunk` defaults to 512 and the context is
+   re-encoded per chunk, so 8,000 rows paid for a 4,096-row context sixteen times — 148 s against
+   21 s at chunk 8192, **bit-identical estimate**, 2.1 GB against 5.3 GB. The default stands and the
+   trade is documented; encoding the context once needs a re-exported graph and is the Phase 8 CFM
+   caching item.
+4. ~~**Reproducibility statement.**~~ **DONE** (`docs/REPRODUCIBILITY.md`, each claim a case in
+   `scripts/reproducibility_check.py`, which fails if the behaviour stops matching the prose).
+   Identical to the last bit across repeat runs, `duckdo_threads` 1/2/8/auto, DuckDB `threads` 1/4,
+   `duckdo_query_chunk` 256 vs 4096, and repeated foundation-model runs.
+
+   The case that fails is row order, and finding out *why* mattered: the first explanation was
+   floating-point non-associativity, and it was wrong by eight orders of magnitude. `AssignFolds`
+   seeds a shuffle of row **positions**, so a permuted table puts different rows in different folds.
+   Measured across ten permutations that is worth 0.25% of one standard error for `regression`,
+   2.1% for `aipw` and 6.2% for `ipw` — sampling variation, not error, but not bit-reproducible
+   either. The first harness for this was itself wrong: ordering the generating query by `random()`
+   draws from the same stream that fills the columns, so it compared *different data* and made the
+   result look far worse than it is.
+5. ~~**No telemetry.**~~ **DONE and verified rather than asserted.** The extension contains no HTTP
+   client and no socket code; the only two URLs in `src/` are attribution strings naming where each
+   model came from, printed by `do_list_models()` and never fetched. `docs/REPRODUCIBILITY.md`
+   ships the one-line grep that checks it. Note that `do_download` — named in this document's
+   earlier drafts and in item 9 below — **does not exist**; weights are exported locally, so there
+   is currently no code path that fetches anything at all.
 
 ### Exit gate
 
@@ -856,6 +889,18 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    CEVAE mirror (mean |ATE error| 0.137, mean PEHE 2.23) and Lalonde NSW against its experimental
    benchmark (1794.3, with `dml` at 1759.3). The canonical 1000-replication IHDP set is not at that
    source; an ACIC subset is still open.
-9. **Host the exported graphs** so `do_download` can fetch them, rather than requiring every user to
-   run the export script.
-10. **Submit** the `description.yml` PR to `duckdb/community-extensions`.
+9. **Assign folds by row content, not row position.** Uncovered by the reproducibility work:
+   `AssignFolds` shuffles positions, so the same rows in a different physical order land in
+   different folds and give a different estimate — 2.1% of a standard error for `aipw`, 6.2% for
+   `ipw`. Hashing each row's encoded contents instead would make the estimate order-invariant,
+   which matters in a database where a table can be reordered by an unrelated ETL change. Not done
+   yet because it moves every number currently published in the tutorial, the worked examples and
+   the tests, and that is not a change to make in the same week as a first submission.
+10. **Cache the foundation model's context encoding.** Measured at 6×: the context is re-encoded
+    for every query chunk. Needs the graph re-exported with the context and query stages split,
+    so it is a change to `scripts/export/`, not to the runtime. Until then `duckdo_query_chunk` is
+    the documented workaround.
+11. **Write `do_download` and host the exported graphs**, rather than requiring every user to run
+    the export script. It does not exist today, which is also why DuckDo currently makes no network
+    request at all — a property worth keeping deliberately rather than losing by accident.
+12. **Submit** the `description.yml` PR to `duckdb/community-extensions`.
