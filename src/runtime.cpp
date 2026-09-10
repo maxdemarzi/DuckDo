@@ -46,8 +46,10 @@ const vector<ModelInfo> &ModelCatalog() {
 		causalpfn.max_covariates = 99;
 		causalpfn.num_buckets = 0;
 		causalpfn.max_context = 4096;
-		causalpfn.weights_file = "causalpfn.weights.bin";
-		causalpfn.graph_pattern = "causalpfn.onnx";
+		causalpfn.weights_file = "causalpfn_encode.weights.bin";
+		causalpfn.graph_pattern = "causalpfn_encode.onnx";
+		causalpfn.decode_graph = "causalpfn_decode.onnx";
+		causalpfn.decode_weights = "causalpfn_decode.weights.bin";
 		causalpfn.manifest_file = "causalpfn.manifest.json";
 		models.push_back(std::move(causalpfn));
 
@@ -150,6 +152,14 @@ bool ModelArtifactsPresent(ClientContext &context, const ModelInfo &model, strin
 			const string path = GraphPath(dir, model, rung);
 			if (!FileExists(path)) {
 				missing = StringUtil::Format(model.graph_pattern, static_cast<unsigned long long>(rung));
+				return false;
+			}
+		}
+	}
+	if (model.Split()) {
+		for (const auto &artifact : {model.decode_graph, model.decode_weights}) {
+			if (!FileExists(dir + "/" + artifact)) {
+				missing = artifact;
 				return false;
 			}
 		}
@@ -613,12 +623,45 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 		context_y[i] = static_cast<float>(frame.y[r]);
 	}
 
-	auto &session = AcquireSession(GraphPath(dir, model, 0), NumericThreads());
 	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 	const std::array<int64_t, 3> context_shape {1, static_cast<int64_t>(ctx), static_cast<int64_t>(width)};
 	const std::array<int64_t, 2> context_1d {1, static_cast<int64_t>(ctx)};
-	const char *input_names[] = {"X_context", "t_context", "y_context", "X_query", "t_query"};
-	const char *output_names[] = {"mu"};
+
+	// Encode the context once.
+	//
+	// Every layer takes its keys and values from the context prefix alone, so a
+	// query row can read the context but never changes it. The old single-graph
+	// path re-encoded the whole context for each query chunk, which at a
+	// 4096-row context and a 512-row chunk meant 4096x4096 of context attention
+	// to serve 512x4096 of query attention - eight times more work spent on the
+	// part that is identical every time. Both arms reuse this too, so the saving
+	// is per chunk and per arm.
+	auto &encode = AcquireSession(GraphPath(dir, model, 0), NumericThreads());
+	const char *encode_inputs[] = {"X_context", "t_context", "y_context"};
+	const char *encode_outputs[] = {"k_cache", "v_cache", "stats_x", "stats_y"};
+	std::array<Ort::Value, 3> context_tensors {
+	    Ort::Value::CreateTensor<float>(memory, context_x.data(), context_x.size(), context_shape.data(),
+	                                    context_shape.size()),
+	    Ort::Value::CreateTensor<float>(memory, context_t.data(), context_t.size(), context_1d.data(),
+	                                    context_1d.size()),
+	    Ort::Value::CreateTensor<float>(memory, context_y.data(), context_y.size(), context_1d.data(),
+	                                    context_1d.size())};
+	auto cached = encode.Run(Ort::RunOptions {nullptr}, encode_inputs, context_tensors.data(),
+	                         context_tensors.size(), encode_outputs, 4);
+
+	// The cache is the largest thing here - 20 layers x context x 384 floats,
+	// twice - so it is borrowed rather than copied: `cached` owns it and the
+	// decode calls read it in place.
+	auto borrow = [&](Ort::Value &value) {
+		auto info = value.GetTensorTypeAndShapeInfo();
+		auto shape = info.GetShape();
+		return Ort::Value::CreateTensor<float>(memory, value.GetTensorMutableData<float>(),
+		                                       info.GetElementCount(), shape.data(), shape.size());
+	};
+
+	auto &decode = AcquireSession(dir + "/" + model.decode_graph, NumericThreads());
+	const char *decode_inputs[] = {"k_cache", "v_cache", "stats_x", "stats_y", "X_query", "t_query"};
+	const char *decode_outputs[] = {"mu"};
 
 	const idx_t chunk = std::max<idx_t>(GetSettingIdx(context, "duckdo_query_chunk", 512), 1);
 	result.cate.assign(frame.n, 0.0);
@@ -638,19 +681,14 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 		for (int arm = 0; arm < 2; arm++) {
 			// do(T = arm) for every query row.
 			std::vector<float> query_t(count, static_cast<float>(arm));
-			std::array<Ort::Value, 5> inputs {
-			    Ort::Value::CreateTensor<float>(memory, context_x.data(), context_x.size(), context_shape.data(),
-			                                    context_shape.size()),
-			    Ort::Value::CreateTensor<float>(memory, context_t.data(), context_t.size(), context_1d.data(),
-			                                    context_1d.size()),
-			    Ort::Value::CreateTensor<float>(memory, context_y.data(), context_y.size(), context_1d.data(),
-			                                    context_1d.size()),
+			std::array<Ort::Value, 6> inputs {
+			    borrow(cached[0]), borrow(cached[1]), borrow(cached[2]), borrow(cached[3]),
 			    Ort::Value::CreateTensor<float>(memory, query_x.data(), query_x.size(), query_shape.data(),
 			                                    query_shape.size()),
 			    Ort::Value::CreateTensor<float>(memory, query_t.data(), query_t.size(), query_1d.data(),
 			                                    query_1d.size())};
 			auto outputs =
-			    session.Run(Ort::RunOptions {nullptr}, input_names, inputs.data(), inputs.size(), output_names, 1);
+			    decode.Run(Ort::RunOptions {nullptr}, decode_inputs, inputs.data(), inputs.size(), decode_outputs, 1);
 			const float *mu = outputs[0].GetTensorData<float>();
 			const auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
 			idx_t produced = 1;

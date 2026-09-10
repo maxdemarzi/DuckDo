@@ -51,6 +51,14 @@ struct ModelInfo {
 	//! printf pattern for a ladder graph, or a plain filename when there is one.
 	string graph_pattern;
 	string manifest_file;
+	//! A split model ships two graphs: one that encodes the context into a
+	//! per-layer key/value cache, and one that scores query rows against it.
+	//! Empty for a model whose single graph does both at once.
+	string decode_graph;
+	string decode_weights;
+	bool Split() const {
+		return !decode_graph.empty();
+	}
 };
 
 //! The catalog. Static: adding a model means shipping a new graph.

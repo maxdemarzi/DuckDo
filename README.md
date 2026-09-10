@@ -478,12 +478,14 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   rather than the model does most of the damage. `ensemble := k` spreads the choice of covariates
   across draws, which widens the interval from ±0.006 to ±0.31, but dropped confounders are bias
   and no resampling interval covers bias. Use CausalPFN. `model := 'causalfm'` is not exported.
-- **`duckdo_query_chunk` defaults to 512, and that costs a factor of five.** The foundation-model
-  path re-encodes its whole context on every query chunk, so 8,000 rows at 512 a chunk pays for the
-  context sixteen times: **126 s against 23 s** at `duckdo_query_chunk = 8192`, with the estimate
-  **bit-identical** at every setting. The default is conservative because the fast setting peaks at
-  5.3 GB against 2.1 GB. Raise it if you have the memory. The real fix is encoding the context once,
-  which needs a re-exported graph.
+- **The foundation-model path is close to the CausalPFN package's CPU speed, not level with it.**
+  On 8,000 rows the default takes 31.3 s (median of three runs) against the package's 22.5 s, and
+  `duckdo_query_chunk = 2048` closes the gap: 23.0 s at a 2.7 GB peak. It used to take 126 s,
+  because the exported graph re-encoded the whole 4,096-row context for every 512-row query
+  chunk. CausalPFN is now exported as two graphs: one encodes the context once, the other scores
+  chunks against the cached keys and values. The estimate is **bit-identical** to the old single
+  graph. Re-export with `scripts/export/export_causalpfn.py` to get the two-graph layout. The
+  weights grow from 75 MB to 120 MB, because both graphs carry the layers.
 - **ONNX Runtime links dynamically.** `-DDUCKDO_WITH_ONNX=ON` fetches the pinned release and stages
   its libraries next to the binaries, so this is handled rather than manual — but the community
   build still ships without it, because a shared dependency is exactly what the dependency-free

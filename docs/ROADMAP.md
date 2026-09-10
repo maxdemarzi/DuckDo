@@ -675,11 +675,10 @@ to leave room for the 2.2x.
    `CausalForestDML` beats DuckDo's classical `do_cate` on PEHE by **0.213 against 0.992**, because
    regularised GLMs cannot fit a cliff. `dml`'s mean IHDP error of 0.786 against a median of 0.160
    is one replication where it misses by 6.4. And the CFM path was **8× slower than the same model
-   in Python** until the cause was found: `duckdo_query_chunk` defaults to 512 and the context is
-   re-encoded per chunk, so 8,000 rows paid for a 4,096-row context sixteen times — 126 s against
-   23 s at chunk 8192, **bit-identical estimate**, 2.1 GB against 5.3 GB. The default stands and the
-   trade is documented; encoding the context once needs a re-exported graph and is the Phase 8 CFM
-   caching item.
+   in Python**: the single exported graph re-encoded the whole 4,096-row context for every 512-row
+   query chunk. That is fixed by item 10 below. The default path went from 126 s to 31.3 s on 8,000
+   rows (median of three runs), against the package's 22.5 s. At chunk 2048 it takes 23.0 s, level with
+   the package, and the estimate is bit-identical.
 4. ~~**Reproducibility statement.**~~ **DONE** (`docs/REPRODUCIBILITY.md`, each claim a case in
    `scripts/reproducibility_check.py`, which fails if the behaviour stops matching the prose).
    Identical to the last bit across repeat runs, `duckdo_threads` 1/2/8/auto, DuckDB `threads` 1/4,
@@ -910,10 +909,34 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    still produced the documented numbers, and both executed docs were quoting stale output; and the
    tutorial mis-taught `do_refute`, reading `passed = false` as the desired outcome on a placebo
    test when it means the refutation did not behave as it should.
-10. **Cache the foundation model's context encoding.** Measured at 6×: the context is re-encoded
-    for every query chunk. Needs the graph re-exported with the context and query stages split,
-    so it is a change to `scripts/export/`, not to the runtime. Until then `duckdo_query_chunk` is
-    the documented workaround.
+10. ~~**Cache the foundation model's context encoding.**~~ **DONE.** Every CausalPFN layer takes its
+    keys and values from the context prefix alone (`k, v = kv_proj(h[:, :context_length])`), so the
+    context's representation cannot depend on the query. The export now writes two graphs:
+    `causalpfn_encode.onnx` produces a per-layer key/value cache (20 layers × context × 384, twice)
+    plus the context-derived input statistics and outcome scaling, and `causalpfn_decode.onnx`
+    scores query chunks against it. The runtime encodes once per ensemble draw and decodes each
+    chunk once per arm against the same cache, borrowing the cache rather than copying it.
+
+    The split was prototyped in PyTorch before anything was exported. It reproduced `predict_cepo`
+    to 1e-7 across four context/query shapes. Through ONNX its estimate is **bit-identical** to the
+    single graph's, 2.9705805124938487 at every chunk size, and so are the ensemble draws.
+
+    | `duckdo_query_chunk` | single graph (one run) | two graphs (median of three) |
+    |---|---|---|
+    | 512 (default) | 125.8 s, 2,062 MB | **31.3 s, 1,938 MB** |
+    | 2048 | 42.8 s, 3,335 MB | 23.0 s, 2,728 MB |
+    | 8192 | 23.3 s, 5,347 MB | 22.2 s, 5,030 MB |
+
+    The default is four times faster and uses slightly less memory. Chunk 2048 reaches the
+    package's CPU speed. The weights grow from 75 MB to 120 MB, because both graphs carry the
+    layers.
+
+    One measurement nearly became a finding. A single run put the two graphs *slower* than the
+    one at chunk 8192, 29.2 s against 23.3 s, and an explanation was already drafted: the decode
+    graph takes k and v as inputs, so ONNX Runtime's fused attention kernel would not match it.
+    Three runs put that cell at 22.2 s. The slowdown was noise, and so was the explanation. A
+    single run of the same configuration on this machine varies by up to a quarter, which is
+    why every figure quoted here is now a median.
 11. **Write `do_download` and host the exported graphs**, rather than requiring every user to run
     the export script. It does not exist today, which is also why DuckDo currently makes no network
     request at all — a property worth keeping deliberately rather than losing by accident.

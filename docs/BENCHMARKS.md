@@ -10,9 +10,9 @@ each method in its own process against the same data and writes
 **The short version.** On real benchmark data DuckDo's foundation-model path is the
 most accurate thing measured here, on both metrics, by a wide margin. DuckDo's
 classical estimators are competitive on the average effect and **lose badly on
-per-row effects** whenever the truth is not linear. And DuckDo's CFM path is
-**8× slower than the same model in Python** on eight thousand rows, for a reason
-that is understood and fixed by one setting.
+per-row effects** whenever the truth is not linear. And DuckDo's CFM path now runs
+within about 1.4× of the same model in Python on CPU, after a fix that removed a
+fourfold slowdown in how it scored the context.
 
 ---
 
@@ -49,14 +49,14 @@ ten replications, and says so.
 
 | method | mean \|error\| | median \|error\| | **mean PEHE** | mean s |
 |---|---|---|---|---|
-| **DuckDo `causalpfn`** | **0.078** | **0.070** | **0.416** | 2.16 |
-| CausalPFN (python) | 0.082 | 0.075 | 0.423 | 1.76 |
-| DoWhy PSW | 0.125 | 0.096 | — | 17.25 |
-| EconML `LinearDML` | 0.147 | 0.116 | 2.161 | 3.23 |
-| DuckDo `aipw` | 0.164 | 0.152 | 2.252 | **0.19** |
-| EconML `LinearDRLearner` | 0.259 | 0.166 | 3.131 | 3.20 |
-| EconML `CausalForestDML` | 0.390 | 0.066 | 2.749 | 5.34 |
-| DuckDo `dml` | 0.857 | 0.196 | 2.252 | 0.18 |
+| **DuckDo `causalpfn`** | **0.078** | **0.070** | **0.416** | 3.13 |
+| CausalPFN (python) | 0.082 | 0.075 | 0.423 | 2.31 |
+| DoWhy PSW | 0.125 | 0.096 | — | 18.80 |
+| EconML `LinearDML` | 0.147 | 0.116 | 2.161 | 3.88 |
+| DuckDo `aipw` | 0.164 | 0.152 | 2.252 | **0.21** |
+| EconML `LinearDRLearner` | 0.259 | 0.166 | 3.131 | 3.90 |
+| EconML `CausalForestDML` | 0.390 | 0.066 | 2.749 | 6.14 |
+| DuckDo `dml` | 0.857 | 0.196 | 2.252 | 0.20 |
 
 Four things worth reading carefully.
 
@@ -167,46 +167,55 @@ Seconds for one ATE, same machine.
 
 | | n=747 | n=8,000 |
 |---|---|---|
-| DuckDo `aipw` / `dml` | **0.19** | **0.22** |
-| DuckDo `causalpfn` | 2.16 | 163.8 |
-| DuckDo `causalpfn`, `duckdo_query_chunk=8192` | — | **23.3** |
-| CausalPFN (python, cpu) | 1.76 | 20.3 |
-| CausalPFN (python, gpu) | 1.70 | 11.3 |
-| EconML `LinearDML` | 3.23 | 3.17 |
-| EconML `CausalForestDML` | 5.34 | 15.5 |
-| DoWhy PSW | 17.25 | 2.84 |
+| DuckDo `aipw` / `dml` | **0.21** | **0.23** |
+| DuckDo `causalpfn` | 3.13 | 27.2 |
+| DuckDo `causalpfn`, `duckdo_query_chunk=2048` | — | 23.0 |
+| CausalPFN (python, cpu) | 2.31 | 22.5 |
+| CausalPFN (python, gpu) | 1.89 | 12.7 |
+| EconML `LinearDML` | 3.88 | 3.55 |
+| EconML `CausalForestDML` | 6.14 | 15.9 |
+| DoWhy PSW | 18.80 | 3.12 |
 
 **DuckDo's classical path is an order of magnitude faster than anything else here**,
-and its 0.19 s includes launching a process and parsing a CSV. EconML's floor of
+and its 0.21 s includes launching a process and parsing a CSV. EconML's floor of
 about 3 s is scikit-learn's cross-fitting machinery, and it does not shrink for
-small data — which is why DuckDo beats it by 17× on 747 rows and 14× on 8,000.
+small data — which is why DuckDo beats it by 19× on 747 rows and 15× on 8,000.
 
-### The CFM path is 8× slower by default
+Every cell above is one run. On this machine a single run of the same
+configuration has varied by up to a quarter, so read the table as orders of
+magnitude; the chunk table below is the median of three.
 
-164 seconds against the reference package's 20, on the same weights and the same
-CPU. That is not the model; it is `duckdo_query_chunk`, which defaults to 512.
-DuckDo scores query rows in chunks, and **re-encodes the entire 4,096-row context
-on every chunk** — so 8,000 rows at 512 a chunk pays for the context sixteen times.
+### Encoding the context once
 
-| `duckdo_query_chunk` | seconds | peak MB | estimate |
-|---|---|---|---|
-| 512 (default) | 125.8 | 2,062 | 2.9705805124938487 |
-| 2048 | 42.8 | 3,335 | 2.9705805124938487 |
-| 4096 | 28.4 | 3,594 | 2.9705805124938487 |
-| 8192 | 23.3 | 5,348 | 2.9705805124938487 |
+Until this version DuckDo's CFM path was 8× slower than the reference package on
+8,000 rows, on the same weights and the same CPU: 164 s against 20. DuckDo scores
+query rows in chunks, and the exported graph **re-encoded the entire 4,096-row
+context on every chunk**. Every CausalPFN layer takes its keys and values from the
+context alone, so that work came out the same every time. At 512-row chunks it was
+eight times the work spent on the queries themselves.
 
-**The estimate is bit-identical at every chunk size** — all eighteen digits — so
-this is purely a time-versus-memory dial with no accuracy cost. At 8192 DuckDo
-(23.3 s) is within striking distance of the Python package on CPU (20.3 s), which
-is the real comparison: the two are about the same speed, and the default was
-giving away a factor of five.
+CausalPFN is now exported as two graphs. One encodes the context into a per-layer
+key/value cache, and the other scores query chunks against it.
 
-The default stays at 512 because 5.3 GB of peak memory is not a reasonable thing to
-impose on an unknown machine, and this is exactly the number a laptop can fail on.
-**If you are running a foundation model over more than a few thousand rows and have
-the memory, raise it.** The proper fix — encoding the context once and reusing it
-across chunks — needs a re-export of the graph with the context and query stages
-split, and is the "CFM context caching" item in Phase 8 of the roadmap.
+| `duckdo_query_chunk` | one graph | two graphs | peak MB, two graphs | estimate |
+|---|---|---|---|---|
+| 512 (default) | 125.8 s | **31.3 s** | 1,938 | 2.9705805124938487 |
+| 2048 | 42.8 s | 23.0 s | 2,728 | 2.9705805124938487 |
+| 8192 | 23.3 s | 22.2 s | 5,030 | 2.9705805124938487 |
+
+**The estimate is bit-identical in every cell**, across both layouts and every chunk
+size, all eighteen digits.
+
+Chunk size used to be a real trade, costing 5.3 GB to reach parity, and mostly no
+longer is. The default runs four times faster than it did, at slightly less memory
+than it used. Raising it to 2048 buys the rest for another 0.8 GB and reaches the
+package's CPU speed; past that there is nothing left to buy.
+
+Two costs. The weights grow from 75 MB to 120 MB, because both graphs carry the
+layers. And the comparison is lopsided: the two-graph column is the median of three
+runs, while the one-graph column is single runs of a layout that no longer exists.
+A single run first put the two graphs *slower* at 8192, 29.2 s against 23.3 s. With
+three runs that became 22.2 s. Read the one-graph column as order of magnitude.
 
 DuckDo will not match the GPU row. Its ONNX session is CPU-only.
 

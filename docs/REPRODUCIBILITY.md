@@ -72,9 +72,11 @@ rather than drawing from one shared stream, so replicate 7 is replicate 7 no mat
 which thread reaches it or when.
 
 `duckdo_query_chunk` behaves the same way for the foundation models: it changes how
-many rows are scored per forward pass, and **not** the answer. It is a pure
-time-versus-memory dial, worth a factor of five — see
-[BENCHMARKS.md](BENCHMARKS.md#the-cfm-path-is-8-slower-by-default).
+many rows are scored per forward pass, and **not** the answer. The same holds
+across the move from one graph to two. The split encode/decode export returns
+2.9705805124938487 on the benchmark table where the single graph did, digit for
+digit, and the ensemble draws are unchanged too — see
+[BENCHMARKS.md](BENCHMARKS.md#encoding-the-context-once).
 
 ---
 
