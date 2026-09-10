@@ -314,6 +314,7 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.depth = OptionalIdx(named, "depth", 2);
 	spec.treated_label = OptionalString(named, "treated", "");
 	spec.control_label = OptionalString(named, "control", "");
+	spec.reference = OptionalString(named, "reference", "");
 	spec.seed = static_cast<int64_t>(OptionalIdx(named, "seed", GetSettingIdx(context, "duckdo_seed", 42)));
 	spec.folds = OptionalIdx(named, "folds", 5);
 	spec.bootstrap_reps = OptionalIdx(named, "bootstrap_reps", GetSettingIdx(context, "duckdo_bootstrap_reps", 200));
@@ -534,11 +535,43 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		t_expr = "CAST(" + t_quoted + " AS DOUBLE)";
 		frame.control_label = "dose";
 		frame.treated_label = "dose";
+	} else if (spec.multi_treatment) {
+		// Levels in the column's natural order, so 2 sorts before 10. Capped:
+		// past a couple of dozen levels this is a dose or a column that needs
+		// bucketing, not a handful of arms to contrast.
+		const idx_t max_levels = 20;
+		auto probe = RunQuery(context,
+		                      "SELECT CAST(v AS VARCHAR) FROM (SELECT DISTINCT " + t_quoted + " AS v FROM " + rel +
+		                          " WHERE " + t_quoted + " IS NOT NULL) ORDER BY v LIMIT " +
+		                          std::to_string(max_levels + 1),
+		                      "inspecting treatment column " + spec.treatment);
+		const idx_t found = probe->RowCount();
+		if (found < 2) {
+			throw BinderException("duckdo: treatment '%s' has %llu level(s); a contrast needs at least two",
+			                      spec.treatment, static_cast<unsigned long long>(found));
+		}
+		if (found > max_levels) {
+			throw BinderException("duckdo: treatment '%s' has more than %llu levels. do_ate_levels is for a handful of "
+			                      "discrete arms; for a dose use do_ape() or do_dose_response(), otherwise bucket the "
+			                      "column first",
+			                      spec.treatment, static_cast<unsigned long long>(max_levels));
+		}
+		t_expr = "CASE";
+		for (idx_t level = 0; level < found; level++) {
+			const string label = probe->GetValue(0, level).ToString();
+			frame.levels.push_back(label);
+			t_expr += " WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(label) + " THEN " +
+			          std::to_string(level) + ".0";
+		}
+		t_expr += " END";
+		frame.multi_treatment = true;
+		frame.control_label = frame.levels.front();
+		frame.treated_label = frame.levels.back();
 	} else if (types[t_idx].id() == LogicalTypeId::BOOLEAN) {
 		t_expr = "CASE WHEN " + t_quoted + " THEN 1.0 ELSE 0.0 END";
 		frame.control_label = "false";
 		frame.treated_label = "true";
-	} else if (types[t_idx].IsNumeric()) {
+	} else if (types[t_idx].IsNumeric() && spec.treated_label.empty() && spec.control_label.empty()) {
 		auto probe =
 		    RunQuery(context,
 		             "SELECT COUNT(DISTINCT " + t_quoted + "), CAST(MIN(" + t_quoted + ") AS DOUBLE), CAST(MAX(" +
@@ -546,9 +579,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		             "inspecting treatment column " + spec.treatment);
 		const auto distinct = probe->GetValue(0, 0).GetValue<int64_t>();
 		if (distinct != 2) {
-			throw BinderException("duckdo: treatment '%s' has %lld distinct non-NULL values, so this function cannot "
-			                      "use it. For a dose, use do_ape() or do_dose_response(); otherwise derive a binary "
-			                      "column, or pass treated := / control := to pick two levels",
+			throw BinderException("duckdo: treatment '%s' has %lld distinct non-NULL values, and this function needs "
+			                      "two. For a dose, use do_ape() or do_dose_response(); for a handful of arms, "
+			                      "do_ate_levels() contrasts each against a reference over the whole population; or "
+			                      "pass treated := / control := to compare two levels among the units that received "
+			                      "one of them",
 			                      spec.treatment, static_cast<long long>(distinct));
 		}
 		const double lo = probe->GetValue(1, 0).GetValue<double>();
@@ -557,22 +592,29 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.treated_label = StringUtil::Format("%g", hi);
 		t_expr = "CASE WHEN CAST(" + t_quoted + " AS DOUBLE) = " + StringUtil::Format("%.17g", hi) +
 		         " THEN 1.0 ELSE 0.0 END";
-	} else {
+	} else if (spec.treated_label.empty() && spec.control_label.empty()) {
+		// With explicit labels this probe is skipped: the mapping below picks the
+		// two levels, and a third is simply not either of them.
 		auto probe = RunQuery(context,
 		                      "SELECT DISTINCT CAST(" + t_quoted + " AS VARCHAR) AS v FROM " + rel + " WHERE " +
 		                          t_quoted + " IS NOT NULL ORDER BY 1 LIMIT 3",
 		                      "inspecting treatment column " + spec.treatment);
 		if (probe->RowCount() != 2) {
-			throw BinderException("duckdo: treatment '%s' has %lld distinct non-NULL values; DuckDo v0 supports binary "
-			                      "treatments only. Pass treated := / control := to pick two levels",
-			                      spec.treatment, static_cast<long long>(probe->RowCount()));
+			const string how_many = probe->RowCount() > 2
+			                            ? string("more than two distinct non-NULL values")
+			                            : StringUtil::Format("only %llu distinct non-NULL value(s)",
+			                                                 static_cast<unsigned long long>(probe->RowCount()));
+			throw BinderException("duckdo: treatment '%s' has %s, and this function needs two. do_ate_levels() "
+			                      "contrasts every level against a reference over the whole population; treated := "
+			                      "/ control := compare two levels among the units that received one of them",
+			                      spec.treatment, how_many);
 		}
 		frame.control_label = probe->GetValue(0, 0).ToString();
 		frame.treated_label = probe->GetValue(0, 1).ToString();
 		t_expr = "CASE WHEN CAST(" + t_quoted + " AS VARCHAR) = " + QuoteLiteral(frame.treated_label) +
 		         " THEN 1.0 ELSE 0.0 END";
 	}
-	if (!spec.treated_label.empty() || !spec.control_label.empty()) {
+	if (!spec.multi_treatment && (!spec.treated_label.empty() || !spec.control_label.empty())) {
 		if (spec.treated_label.empty() || spec.control_label.empty()) {
 			throw BinderException("duckdo: treated := and control := must be given together");
 		}
@@ -937,6 +979,29 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		}
 		// The continuous path returns before the arm counts, and cross-fits just
 		// as the binary one does, so it needs the canonical order too.
+		BuildCanonicalOrder(frame);
+		return frame;
+	}
+
+	if (frame.multi_treatment) {
+		// Like the continuous path, a multi-level treatment returns before the
+		// binary arm counts - but every level still has to hold enough rows to
+		// fit an outcome surface of its own.
+		vector<idx_t> counts(frame.levels.size(), 0);
+		for (auto value : frame.t) {
+			counts[static_cast<idx_t>(value)]++;
+		}
+		for (idx_t level = 0; level < counts.size(); level++) {
+			if (counts[level] < 5) {
+				throw BinderException("duckdo: treatment level '%s' has only %llu rows after dropping NULL treatment "
+				                      "and outcome values; every level needs at least 5 to fit its own outcome model",
+				                      frame.levels[level], static_cast<unsigned long long>(counts[level]));
+			}
+			if (counts[level] < 30) {
+				frame.warnings.push_back("treatment level '" + frame.levels[level] + "' has only " +
+				                         std::to_string(counts[level]) + " rows; treat its interval as optimistic");
+			}
+		}
 		BuildCanonicalOrder(frame);
 		return frame;
 	}

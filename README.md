@@ -266,6 +266,27 @@ extrapolates past where data exists, and `n_within_decile` says how much support
 
 The binary estimators still refuse a dose outright, and point here.
 
+### More than two arms
+
+```sql
+SELECT level, reference, estimate, ci_low, ci_high, naive_difference
+FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', exclude := ['id']);
+-- B | A |  1.472 |  1.375 |  1.568 |  4.185
+-- C | A | -0.992 | -1.085 | -0.899 | -2.717
+```
+
+`do_ate_levels` returns one row per level, each against a reference (`reference :=`, the first level
+by default), and every row contributes to every contrast. Under the hood it is a multi-arm AIPW with
+cross-fitted one-vs-rest propensities and an outcome surface per level. The truths here are 1.5 and
+-1.0; the naive differences are off by nearly a factor of three.
+
+`do_ate(..., treated := 'B', control := 'A')` also works on a three-level column, but it answers a
+different question: the effect among the units that received A or B. When who gets which arm
+depends on the covariates, which is the reason to adjust at all, that subpopulation is not the
+population. On the table above the pairwise route returns **2.467**, right on that subpopulation's
+truth of 2.464 and a full unit from the population's 1.5. Neither is wrong; they are different
+estimands, and the pairwise one is rarely the one a decision needs.
+
 ### Panel data - difference-in-differences that does not misweight
 
 ```sql
@@ -448,10 +469,11 @@ this, so a stray full copy of the frame shows up as a failure rather than as a s
 
 Stated plainly, because a causal tool that hides its limits is worse than none.
 
-- **Binary treatments for the effect estimators; continuous ones only through `do_ape` and
-  `do_dose_response`.** The binary path refuses a dose rather than silently binarising it, and says
-  where to go. Multi-valued categorical treatments are still unsupported, and the dose-response
-  model is quadratic in the dose, so a sharply non-monotone response will be smoothed.
+- **The effect estimators take a binary treatment. A dose goes through `do_ape` and
+  `do_dose_response`, and three or more arms through `do_ate_levels`.** The binary path refuses
+  anything else rather than silently binarising it, and says where to go. `do_ate_levels` offers
+  AIPW only. The dose-response model is quadratic in the dose, so a sharply non-monotone response
+  will be smoothed.
 - **`do_cate` intervals are calibrated, and an earlier claim here that they were not was noise.**
   Measured 95% coverage is 0.948 ± 0.014, 0.948 ± 0.016 and 0.944 ± 0.014 across randomised,
   confounded and strongly-confounded DGPs — 40 replicates of 4,000 rows, standard error across

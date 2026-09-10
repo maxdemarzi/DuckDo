@@ -1,0 +1,139 @@
+# name: test/sql/multi.test
+# description: do_ate_levels - population contrasts for a treatment with more than two levels
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.19);
+
+# Three arms. B goes to high-x units and C to low-x ones, and B's effect grows
+# with x. So the population contrast B vs A and the contrast among units that
+# received A or B are genuinely different numbers - which is the case the
+# pairwise treated := / control := workaround gets wrong.
+statement ok
+CREATE TABLE arms AS
+WITH u AS (
+  SELECT i AS id,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS z2,
+         random() AS r,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS noise
+  FROM range(6000) t(i)),
+ w AS (SELECT *, 1.0 AS wa, exp(1.2*x) AS wb, exp(-1.6*x) AS wc FROM u),
+ p AS (SELECT *, wa/(wa+wb+wc) AS pa, wb/(wa+wb+wc) AS pb FROM w),
+ a AS (SELECT *, CASE WHEN r < pa THEN 'A' WHEN r < pa + pb THEN 'B' ELSE 'C' END AS arm FROM p)
+SELECT id, x, z2, arm,
+       1.0 + 2.0*x + 0.5*z2 + CASE arm WHEN 'B' THEN 1.5 + 2.0*x WHEN 'C' THEN -1.0 ELSE 0.0 END + noise AS y
+FROM a;
+
+# The two estimands really do differ here, by more than a standard error many
+# times over. Checked on the data itself, so the test cannot pass vacuously.
+query I
+SELECT abs((SELECT 2.0*avg(x) FROM arms WHERE arm IN ('A','B')) - (SELECT 2.0*avg(x) FROM arms)) > 0.3;
+----
+true
+
+# One row per non-reference level; the reference defaults to the first level.
+query II
+SELECT count(*), bool_and(reference = 'A') FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y',
+                                                              exclude := ['id']);
+----
+2	true
+
+# B vs A over the whole population: E[1.5 + 2x].
+query I
+SELECT abs(estimate - (SELECT 1.5 + 2.0*avg(x) FROM arms)) < 0.2
+FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', exclude := ['id'])
+WHERE level = 'B';
+----
+true
+
+# C vs A: a constant -1.0.
+query I
+SELECT abs(estimate + 1.0) < 0.2
+FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', exclude := ['id'])
+WHERE level = 'C';
+----
+true
+
+# The interval covers the truth, and the naive difference is badly confounded.
+query II
+SELECT ci_low < (SELECT 1.5 + 2.0*avg(x) FROM arms) AND (SELECT 1.5 + 2.0*avg(x) FROM arms) < ci_high,
+       abs(naive_difference - (SELECT 1.5 + 2.0*avg(x) FROM arms)) > 0.5
+FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', exclude := ['id'])
+WHERE level = 'B';
+----
+true	true
+
+# The pairwise workaround is not wrong - it answers the subpopulation question,
+# and lands on the subpopulation's truth, not the population's.
+query I
+SELECT abs(estimate - (SELECT 1.5 + 2.0*avg(x) FROM arms WHERE arm IN ('A','B'))) < 0.2
+FROM do_ate('arms', treatment := 'arm', outcome := 'y', exclude := ['id'], treated := 'B', control := 'A');
+----
+true
+
+# Any level can be the reference.
+query II
+SELECT count(*), bool_and(reference = 'C') FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y',
+                                                              exclude := ['id'], reference := 'C');
+----
+2	true
+
+query I
+SELECT abs(estimate - (SELECT 2.5 + 2.0*avg(x) FROM arms)) < 0.25
+FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', exclude := ['id'], reference := 'C')
+WHERE level = 'B';
+----
+true
+
+# Full name registered too.
+query I
+SELECT count(*) FROM duckdo_ate_levels('arms', treatment := 'arm', outcome := 'y', exclude := ['id']);
+----
+2
+
+statement error
+SELECT * FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', reference := 'Z');
+----
+not a level
+
+statement error
+SELECT * FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', estimator := 'ipw');
+----
+estimates with aipw
+
+statement error
+SELECT * FROM do_ate_levels('arms', treatment := 'arm', outcome := 'y', treated := 'B', control := 'A');
+----
+reference :=
+
+# The binary functions still refuse three levels rather than guessing.
+statement error
+SELECT * FROM do_ate('arms', treatment := 'arm', outcome := 'y');
+----
+distinct non-NULL values
+
+# The same arms coded 0 / 1 / 2. The pairwise route used to be refused on both a
+# text and a numeric column with three values - the two-level probe ran before
+# treated := / control := were consulted, while its error message told the
+# caller to pass exactly those. Both codings now reach the same rows, so their
+# estimates must agree to the last digit.
+statement ok
+CREATE TABLE arms_num AS
+SELECT id, x, z2, CASE arm WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END AS arm_code, y FROM arms;
+
+query I
+SELECT abs(n.estimate - s.estimate) < 1e-9
+FROM do_ate('arms_num', treatment := 'arm_code', outcome := 'y', exclude := ['id'], treated := '1', control := '0') n,
+     do_ate('arms', treatment := 'arm', outcome := 'y', exclude := ['id'], treated := 'B', control := 'A') s;
+----
+true
+
+# Numeric levels are ordered as numbers, so 0 is the default reference.
+query I
+SELECT string_agg(level, ',' ORDER BY level) FROM do_ate_levels('arms_num', treatment := 'arm_code',
+                                                                 outcome := 'y', exclude := ['id']);
+----
+1,2

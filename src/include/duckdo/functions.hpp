@@ -31,6 +31,7 @@ void AddCommonNamedParameters(TableFunction &fn);
 void RegisterEstimationFunctions(ExtensionLoader &loader);
 void RegisterInterventionFunctions(ExtensionLoader &loader);
 void RegisterContinuousFunctions(ExtensionLoader &loader);
+void RegisterMultiLevelFunctions(ExtensionLoader &loader);
 void RegisterPanelFunctions(ExtensionLoader &loader);
 void RegisterIdentificationFunctions(ExtensionLoader &loader);
 void RegisterMediationFunctions(ExtensionLoader &loader);

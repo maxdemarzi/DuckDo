@@ -65,6 +65,11 @@ vector<idx_t> AssignFolds(const CausalFrame &frame, idx_t folds, int64_t seed) {
 	return assignment;
 }
 
+} // namespace
+
+// RidgeLambda and FitAndPredictOutcome are shared with the multi-level
+// estimator. AssignFolds stays private: it stratifies arms 0 and 1 only.
+
 double RidgeLambda(const CausalFrame &frame) {
 	// Features are standardised, so a ridge proportional to n keeps the normal
 	// equations conditioned without materially shrinking the fit.
@@ -85,8 +90,6 @@ void FitAndPredictOutcome(const CausalFrame &frame, const vector<idx_t> &train, 
 		out[r] = model.Predict(frame.X.Row(r), frame.X.cols);
 	}
 }
-
-} // namespace
 
 vector<double> FitPropensity(const CausalFrame &frame, idx_t folds, int64_t seed) {
 	vector<double> e(frame.n, 0.5);

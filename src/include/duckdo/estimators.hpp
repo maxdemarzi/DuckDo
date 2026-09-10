@@ -51,6 +51,14 @@ NuisanceFit FitNuisance(const CausalFrame &frame, const CausalSpec &spec, int64_
 //! need an outcome column at all.
 vector<double> FitPropensity(const CausalFrame &frame, idx_t folds, int64_t seed);
 
+//! The ridge penalty every outcome fit uses, proportional to n.
+double RidgeLambda(const CausalFrame &frame);
+
+//! Fit an outcome model on `train` and write its prediction for every row in
+//! `targets` into `out`: logistic for a binary outcome, ridge otherwise.
+void FitAndPredictOutcome(const CausalFrame &frame, const vector<idx_t> &train, const vector<idx_t> &targets,
+                          vector<double> &out);
+
 //! Estimate a population effect with the estimator named in the spec.
 EffectResult EstimateEffect(const CausalFrame &frame, const CausalSpec &spec, Estimand estimand);
 

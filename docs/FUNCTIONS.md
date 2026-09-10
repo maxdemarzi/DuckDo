@@ -119,6 +119,37 @@ point with thin support as decoration.
 
 The binary estimators (`do_ate` and friends) refuse a continuous treatment and point here.
 
+### `do_ate_levels`
+
+Average treatment effects for a treatment with **more than two levels**, each contrasted against a
+reference level.
+
+```sql
+SELECT level, reference, estimate, ci_low, ci_high, naive_difference
+FROM do_ate_levels('trial', treatment := 'arm', outcome := 'y', reference := 'placebo');
+```
+
+| Parameter | Default | |
+|---|---|---|
+| `reference` | the first level | the level every other level is contrasted against |
+
+The common parameters apply as well. Levels sort in their natural order, so 2 comes before 10, and
+there can be up to 20. Past that, the column is a dose (use `do_ape`) or needs bucketing. Every level
+needs at least 5 rows, and fewer than 30 draws a warning.
+
+Returns one row per non-reference level: `level, reference, estimand, estimator, estimate,
+std_error, ci_low, ci_high, p_value, naive_difference, n_level, n_reference, warnings`.
+
+The estimator is a multi-arm AIPW. It fits an outcome surface for each level and one-vs-rest
+propensities normalised to sum to one, both cross-fitted with folds stratified within every level.
+Each contrast is the mean of ψ_k − ψ_ref, with an influence-function interval. Only `aipw` is
+available; naming any other estimator is refused.
+
+**Why not `do_ate(..., treated := 'B', control := 'A')`?** That works too, but it estimates the
+effect among the units that received A or B. Take a three-arm DGP where B goes to high-x units and
+its effect grows with x. There the pairwise route returns 2.467, on the subpopulation's truth of
+2.464. The population contrast is 1.5, and `do_ate_levels` returns 1.472 [1.375, 1.568].
+
 ---
 
 ## Panel data

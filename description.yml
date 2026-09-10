@@ -144,6 +144,7 @@ docs:
 
     ```sql
     SELECT * FROM do_ape(...);            -- average partial effect, continuous treatment
+    SELECT * FROM do_ate_levels(...);     -- three or more arms, each against a reference
     SELECT * FROM do_dose_response(...);  -- the curve, on a quantile grid
     SELECT * FROM do_did(...);            -- Callaway-Sant'Anna group-time effects
     SELECT * FROM do_event_study(...);    -- the pre-trend check
@@ -193,8 +194,9 @@ docs:
 
     Binary treatments for the effect estimators; continuous ones go through
     `do_ape` and `do_dose_response`, and a dose passed to the binary path is
-    refused rather than silently binarised. Multi-valued categorical treatments
-    are unsupported. Base learners are regularised GLMs, so strongly non-linear
+    refused rather than silently binarised. Treatments with more than two
+    levels go through `do_ate_levels`, which contrasts each against a reference
+    over the whole population. Base learners are regularised GLMs, so strongly non-linear
     confounding will not be fully removed. `do_cate` interval coverage measures
     0.948, 0.948 and 0.944 - each within its own standard error of the nominal
     0.95 - across randomised, confounded and strongly-confounded DGPs.

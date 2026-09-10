@@ -54,6 +54,12 @@ struct CausalSpec {
 	//! continuous treatment must still refuse, so this is opt-in per function
 	//! rather than inferred from the data.
 	bool continuous_treatment = false;
+	//! Set by do_ate_levels. The treatment is kept as a level index rather than
+	//! mapped onto {0, 1}, and `reference` names the level every other one is
+	//! contrasted against. Opt-in per function for the same reason as
+	//! continuous_treatment: a binary function handed three levels must refuse.
+	bool multi_treatment = false;
+	string reference;
 	//! Grid points for a dose-response curve.
 	idx_t grid = 20;
 	//! Independent context draws for a foundation model. One means a single
@@ -100,10 +106,14 @@ struct CausalFrame {
 	//! n x p encoded covariates, standardised.
 	Matrix X;
 	//! Treatment. 0.0 or 1.0 for a binary treatment; the dose on its own scale
-	//! when continuous_treatment is set.
+	//! when continuous_treatment is set; a level index when multi_treatment is.
 	vector<double> t;
 	//! True when `t` holds a dose rather than an arm indicator.
 	bool continuous_treatment = false;
+	//! True when `t` holds a level index, 0 .. levels.size() - 1.
+	bool multi_treatment = false;
+	//! Treatment levels in the column's natural order; `t` indexes into this.
+	vector<string> levels;
 	//! Dose quantiles, ascending, for choosing a well-supported grid.
 	vector<double> dose_sorted;
 	//! Outcome on its original scale.
@@ -160,10 +170,12 @@ struct CausalFrame {
 	}
 };
 
-//! Order rows by content: a 64-bit hash of the encoded row for the common case,
-//! the row itself where hashes collide, and the storage index only where two
-//! rows are identical in every value an estimator can see - in which case which
-//! one goes where cannot change any result.
+//! Order rows by content, lexicographically: outcome, treatment, auxiliary
+//! column, then the encoded covariates, with the storage index breaking ties only
+//! between rows identical in every value an estimator can see - where which one
+//! goes first cannot change any result. Not a hash: `X` is standardised with a
+//! mean summed in storage order, and a hash turns that mean's last-bit drift
+//! under reordering into a different sort key, where a comparison does not.
 void BuildCanonicalOrder(CausalFrame &frame);
 
 //! Materialise a causal frame from the source relation. Runs the schema probe,
