@@ -32,7 +32,7 @@ The reference architecture for running such models inside DuckDB already exists 
 
 ### What DuckDo is *not*
 
-- Not a causal **discovery** engine (learning the DAG from data). That is post-1.0, and deliberately so — the field is not reliable enough to ship as a default.
+- Not a causal **discovery** engine you should trust unreviewed. `do_discover` exists, post-1.0, as a *proposer*: it reports how fragile every edge is, and `do_graph_create` refuses its output until a person has reviewed it and oriented what the data could not. Discovery is never a default and never feeds an estimate directly.
 - Not a replacement for a statistician. Every estimand carries assumptions. DuckDo's job is to make those assumptions **checkable in SQL**, not to hide them.
 - Not a general ML inference extension. If you want zero-shot classification, use `anofox_tabfm`. DuckDo should coexist with it cleanly.
 
@@ -233,7 +233,7 @@ src/
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
-| 10 | Frontier | post-1.0 | — | **IN PROGRESS** — continuous treatments (`do_ape`, `do_dose_response`) and panel/DiD (`do_did`, `do_event_study`) landed; longitudinal, survival, mediation and discovery outstanding |
+| 10 | Frontier | post-1.0 | — | **IN PROGRESS** — continuous and multi-valued treatments, panel/DiD (plain and doubly robust), synthetic control, longitudinal MSMs, survival (RMST), mediation and causal discovery landed; federated / multi-table estimation outstanding |
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
 
@@ -751,7 +751,21 @@ Roughly in order of value per unit of effort:
    treatment-outcome and treatment-mediator arms of it and leaves mediator-outcome confounding
    untouched, which is the most common error in applied mediation. Graph-based verification that a
    named mediator actually *is* one is still `do_validate`'s job rather than built in here.
-6. **Causal discovery** — `do_discover()` proposing a DAG from data. Deliberately last: it is the feature users most want and the one most likely to produce confident nonsense. If it ships, it ships with loud uncertainty and a required review step.
+6. ~~**Causal discovery** — `do_discover()` proposing a DAG from data.~~ **DONE**, under the two conditions this item set. It was deliberately last: it is the feature users most want and the one most likely to produce confident nonsense.
+
+   `do_discover` runs PC-stable, with Fisher-z tests, v-structures and Meek's rules. It reports every edge with its bootstrap stability, including edges the full-data graph left out, so the uncertainty shows in both directions.
+
+   The review step is enforced, not suggested. `do_discover_dot` writes a proposal that `do_graph_create` refuses until its `do_discover: unreviewed` line is deleted, and refuses again for each edge the data could not orient, written `a -- b`, until a person picks a direction.
+
+   On a seven-variable linear-Gaussian world with a single collider, the full-data graph is exactly right, and the one pair no data can orient is left undirected. Orientation stability comes out at 0.88, not 1.0. A resample carries the sample's error on top of its own, so its tests reject independence more often than `alpha`, and sometimes a and b stay joined, which erases the collider every orientation depends on. At `alpha := 0.001` it is 0.98. The bootstrap therefore understates reliability, which is the safe direction for this feature, and the docs say so.
+
+   Building it exposed two silent bugs in the DOT parser, both older than discovery:
+   - Comments were tokenised, so every word of one became a node: `// the treatment` registered nodes `the` and `treatment`.
+   - `a -- b` was dropped without a word: two nodes and no edge.
+
+   Comments are now skipped, and an undirected edge is an error that names both ends. That same error is how the proposal's unoriented edges are made impossible to skip.
+
+   Still open: tests for non-Gaussian or mixed data, and FCI for hidden confounders. FCI is the honest answer to the assumption real data breaks most often.
 7. **Federated / multi-table estimation** — effects across joins without materializing the join.
 
 ---

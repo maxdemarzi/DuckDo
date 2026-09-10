@@ -357,6 +357,29 @@ the real unit ranks first of 21 placebo runs, the smallest p-value that 20 donor
 solver is certified against scipy's SLSQP: on a strictly convex fit they agree to 1.6e-8 in the
 weights and 6e-14 in the objective (`scripts/synth_check.py`).
 
+**When you have no graph, discovery can propose one, but it can't register one.** `do_discover`
+runs PC-stable and reports every edge with its bootstrap stability. `do_discover_dot` writes the
+proposal as DOT, and `do_graph_create` refuses that DOT twice: once until you delete its
+`do_discover: unreviewed` line, and once for every edge the data could not orient (written `a -- b`)
+until you pick a direction.
+
+```sql
+SELECT source, edge, target, stability, orientation_stability
+FROM do_discover('measurements');
+-- a -> c | b -> c | c -> d | d -> f   each in 100% of resamples
+-- g -- h                              no direction the data can supply
+
+SELECT dot FROM do_discover_dot('measurements');   -- review, edit, then do_graph_create
+```
+
+On a seven-variable linear-Gaussian world, the full-data graph above is exactly right. Everything it
+orients traces back to one collider, a → c ← b, and Meek's rules carry that down the chain. Drop `b`
+and a → c → d → f comes back entirely undirected, which is correct: a chain with no collider
+implies the same distribution in either direction. Also read `orientation_stability`. Here it is
+0.88 even though the graph is right, because resamples reject independence more often than `alpha`
+and sometimes join a and b. At `alpha := 0.001` it is 0.98. Discovery assumes no hidden common
+causes, and real data usually has them.
+
 ### Interventions - querying a world that did not happen
 
 ```sql

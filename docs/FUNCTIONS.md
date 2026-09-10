@@ -344,6 +344,62 @@ SELECT name, definition FROM duckdo_graphs;
 Re-registering a name replaces it. The in-process map is only a parse cache in
 front of that table.
 
+Comments (`//`, `#` and `/* ... */`) are skipped. An undirected edge `a -- b` is an
+error, not a silently dropped edge: DuckDo graphs are directed, so pick a direction.
+
+### `do_discover` / `do_discover_dot`
+
+```sql
+SELECT source, edge, target, in_graph, stability, orientation_stability
+FROM do_discover('measurements', alpha := 0.01, bootstrap := 50);
+
+SELECT dot FROM do_discover_dot('measurements');
+```
+
+These functions propose a graph from data. Treat the output as a draft to review, not an answer.
+
+`do_discover` returns `source, target, edge, in_graph, stability, orientation_stability, warnings`,
+with one row per pair of variables that is joined in the full-data graph or in at least 25% of
+bootstrap resamples. `edge` is `->` when the data orients it, `--` when it cannot, and `absent` for a
+pair that only the resamples joined. `stability` is the share of resamples containing the edge.
+`orientation_stability` is the share that gave it this same orientation, or left it unoriented when
+`edge` is `--`.
+
+The algorithm is PC-stable (Colombo and Maathuis 2014), with Fisher-z tests of partial correlation.
+It orients v-structures and then applies Meek's rules. The result is a CPDAG. Observational data
+identifies a graph only up to its Markov equivalence class, so some edges have no direction the data
+can supply: `x -> y` and `y -> x` fit a two-variable world equally well. The "stable" variant makes
+the skeleton independent of column order. The bootstrap draws rows in content order, so it does not
+depend on row order either.
+
+- **Columns.** The default is every numeric or boolean column. Use `columns := [...]` to choose, or
+  `exclude := [...]` to leave some out. At most 30 variables are allowed, because the number of
+  tests, and the chance that one of them errs, grows combinatorially. Rows with a NULL in a
+  selected column are dropped, with a warning.
+- **`alpha`** (default 0.01) is the level of each independence test. **`max_conditioning`**
+  (default 3) caps the size of the conditioning sets. **`bootstrap`** (default 50) sets the number
+  of resamples, and `0` turns them off, with a warning. **`seed`** follows `duckdo_seed`.
+- **Assumptions**, restated in `warnings`: no hidden common cause of any two variables,
+  faithfulness, and linear-Gaussian dependence. Real data usually breaks the first. When it does,
+  the orientations can be wrong even where every edge is right.
+- **The stabilities lean pessimistic.** A resample carries the sample's own error on top of its
+  own, so its independence tests reject more often than `alpha`, and resamples join pairs that
+  are truly independent. All orientations flow from colliders, so one spurious edge that erases a
+  collider unorients everything downstream of it. On a world where the full-data graph is exactly
+  right, orientation stability comes out at 0.88 at `alpha := 0.01` and 0.98 at `0.001`.
+
+`do_discover_dot` returns `dot, n_nodes, n_directed, n_undirected`. The proposal is DOT with each
+edge's bootstrap stability as a comment, and **`do_graph_create` refuses it twice over**:
+
+1. The DOT contains a line marked `do_discover: unreviewed`. Until that line is deleted,
+   `do_graph_create` refuses it.
+2. Every edge the data could not orient is written `a -- b`, and `do_graph_create` refuses those
+   until someone writes `a -> b` or `b -> a`.
+
+That makes the review step required rather than suggested. A graph registered with
+`do_graph_create` is what `do_identify` and `do_validate` treat as true, so an edge that was never
+reviewed would become a wrong adjustment set.
+
 ### `do_identify`
 
 Named parameters only: `graph`, `treatment`, `outcome`.

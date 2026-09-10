@@ -148,6 +148,8 @@ docs:
     SELECT * FROM do_dose_response(...);  -- the curve, on a quantile grid
     SELECT * FROM do_did(...);            -- Callaway-Sant'Anna group-time effects
     SELECT * FROM do_event_study(...);    -- the pre-trend check
+    SELECT * FROM do_synth(...);          -- synthetic control, placebo p-value
+    SELECT * FROM do_discover_dot(...);   -- a proposed graph, refused until reviewed
     SELECT * FROM do_msm(...);            -- time-varying treatment, stabilised IPTW
     SELECT * FROM do_rmst(...);           -- time-to-event, without a hazard ratio
     ```

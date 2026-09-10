@@ -1,0 +1,107 @@
+# name: test/sql/discover.test
+# description: causal discovery proposes a graph, says how fragile it is, and cannot be registered unreviewed
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.77);
+
+# A known linear-Gaussian DAG. a and b are independent causes of c - a collider,
+# which is what lets anything be oriented at all - and c causes d, which causes
+# f. Separately, g causes h: a pair whose direction no observational data can
+# reveal, because g -> h and h -> g imply the same distribution.
+statement ok
+CREATE TABLE causal_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS b,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS g,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e4
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, b, c, d, 0.8*d + 0.6*e3 AS f, g, 0.9*g + 0.6*e4 AS h FROM s2;
+
+# The skeleton is exactly right, a and b are not joined, the collider is
+# oriented, Meek's rules carry that down the chain, and g -- h is left alone.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world') WHERE in_graph;
+----
+a->c b->c c->d d->f g--h
+
+# Every true edge survives resampling, and so does every orientation.
+query II
+SELECT bool_and(stability >= 0.9), bool_and(orientation_stability >= 0.8)
+FROM do_discover('causal_world') WHERE in_graph;
+----
+true	true
+
+# The proposal is DOT, carrying the review marker, with the one unidentifiable
+# edge left undirected.
+query IIII
+SELECT dot LIKE '%do_discover: unreviewed%', n_nodes, n_directed, n_undirected
+FROM do_discover_dot('causal_world');
+----
+true	7	4	1
+
+statement ok
+SET VARIABLE proposal = (SELECT dot FROM do_discover_dot('causal_world'));
+
+# It cannot be registered as it stands...
+statement error
+SELECT * FROM do_graph_create('found', getvariable('proposal'));
+----
+review marker
+
+# ...nor with the marker deleted and the undirected edge left for someone else:
+# g -- h has no direction in the data, so a person has to give it one.
+statement error
+SELECT * FROM do_graph_create('found', replace(getvariable('proposal'), 'do_discover: unreviewed', ''));
+----
+undirected edge
+
+# Reviewed - marker gone, g -- h oriented - it registers, comments and all.
+query II
+SELECT n_nodes, n_edges FROM do_graph_create('found',
+    replace(replace(getvariable('proposal'), 'do_discover: unreviewed', ''), '"g" -- "h"', '"g" -> "h"'));
+----
+7	5
+
+# The same data twice gives the same proposal.
+query I
+SELECT (SELECT dot FROM do_discover_dot('causal_world')) = getvariable('proposal');
+----
+true
+
+# --- the DOT parser, which discovery exposed ------------------------------------
+
+# Comments used to be tokenised, so every word of one became a node.
+query II
+SELECT n_nodes, n_edges FROM do_graph_create('commented', 'digraph { // the treatment and its outcome
+  t -> y; /* a block comment */ # and a hash comment
+}');
+----
+2	1
+
+# An undirected edge used to vanish without a word. It is now an error.
+statement error
+SELECT * FROM do_graph_create('undirected', 'digraph { a -- b; }');
+----
+undirected edge
+
+# --- error paths ------------------------------------------------------------------
+
+statement error
+SELECT * FROM do_discover('causal_world', columns := ['a']);
+----
+at least two numeric columns
+
+statement error
+SELECT * FROM do_discover('causal_world', alpha := 1.5);
+----
+alpha must be in

@@ -69,16 +69,58 @@ struct Dag {
 // --- DOT parsing ------------------------------------------------------------
 
 //! Tokenise a DOT-ish description into identifiers, arrows and punctuation.
+//!
+//! Comments - `//` and `#` to the end of the line, `/* ... */` - are skipped.
+//! They used to be tokenised like everything else, so each word of a comment
+//! became a node: 'digraph { // the treatment ... }' registered nodes called
+//! "the" and "treatment". And `--`, DOT's undirected edge, used to vanish: `-`
+//! was an unknown character and skipped, so 'a -- b' made two nodes and no
+//! edge. A causal graph that silently loses an edge answers questions wrongly,
+//! so an undirected edge is now an error that names both ends - which is also
+//! how a do_discover proposal makes its unoriented edges impossible to skip.
 vector<string> Tokenize(const string &text) {
 	vector<string> tokens;
 	idx_t i = 0;
 	while (i < text.size()) {
 		const char c = text[i];
+		const char next = i + 1 < text.size() ? text[i + 1] : '\0';
 		if (std::isspace(static_cast<unsigned char>(c))) {
 			i++;
-		} else if (c == '-' && i + 1 < text.size() && text[i + 1] == '>') {
+		} else if ((c == '/' && next == '/') || c == '#') {
+			while (i < text.size() && text[i] != '\n') {
+				i++;
+			}
+		} else if (c == '/' && next == '*') {
+			i += 2;
+			while (i + 1 < text.size() && !(text[i] == '*' && text[i + 1] == '/')) {
+				i++;
+			}
+			i += 2;
+		} else if (c == '-' && next == '>') {
 			tokens.push_back("->");
 			i += 2;
+		} else if (c == '-' && next == '-') {
+			idx_t j = i + 2;
+			while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j]))) {
+				j++;
+			}
+			string right;
+			if (j < text.size() && text[j] == '"') {
+				j++;
+				while (j < text.size() && text[j] != '"') {
+					right += text[j++];
+				}
+			} else {
+				while (j < text.size() &&
+				       (std::isalnum(static_cast<unsigned char>(text[j])) || text[j] == '_' || text[j] == '.')) {
+					right += text[j++];
+				}
+			}
+			const string left = tokens.empty() ? string("?") : tokens.back();
+			throw BinderException("duckdo: '%s -- %s' is an undirected edge. DuckDo graphs are directed: write "
+			                      "'%s -> %s' or '%s -> %s'. A graph proposed by do_discover leaves these for you "
+			                      "because the data could not orient them",
+			                      left, right, left, right, right, left);
 		} else if (c == '{' || c == '}' || c == ';' || c == ',' || c == '[' || c == ']' || c == '=') {
 			tokens.push_back(string(1, c));
 			i++;
@@ -572,6 +614,19 @@ unique_ptr<FunctionData> BindGraphCreate(ClientContext &, TableFunctionBindInput
 		                      "CALL do_graph_create('sales_dag', 'digraph { season -> discount; }')");
 	}
 	const string name = input.inputs[0].ToString();
+	// A graph proposed by do_discover carries a marker line, and it is refused
+	// until someone deletes it. Discovery rests on assumptions - no hidden
+	// confounders, faithfulness, linear-Gaussian dependence - that real data
+	// usually breaks, and a graph registered here is what do_validate and
+	// do_identify will then treat as the truth. The review step is required,
+	// not suggested, and this is the only place that can require it.
+	if (input.inputs[1].ToString().find("do_discover: unreviewed") != string::npos) {
+		throw BinderException(
+		    "duckdo: this graph still carries do_discover's review marker. Discovery proposes edges under "
+		    "assumptions real data usually breaks - no hidden confounders, faithfulness, linear-Gaussian "
+		    "dependence - so read every edge, fix what is wrong, orient what it could not, then delete the line "
+		    "containing 'do_discover: unreviewed' and create the graph again");
+	}
 	auto dag = ParseDot(input.inputs[1].ToString());
 
 	idx_t latent_count = 0;
