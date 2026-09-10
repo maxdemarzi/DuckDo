@@ -4,10 +4,9 @@ What DuckDo reproduces exactly, what it does not, and how to pin the parts that
 move. Every claim on this page is a case in `scripts/reproducibility_check.py`,
 which fails if the behaviour stops matching the text.
 
-**The short version.** Same table, same order, same settings → **identical to the
-last bit**, on any number of threads. Reorder the rows and the answer moves by a
-small fraction of one standard error, because fold assignment follows row
-position. And DuckDo sends nothing anywhere, ever.
+**The short version.** Same table, same settings → **identical to the last bit**,
+on any number of threads. Reorder the rows and the answer moves by about 2e-15
+relative, which is rounding. And DuckDo sends nothing anywhere, ever.
 
 ---
 
@@ -53,6 +52,7 @@ Verified on 20,000 rows, comparing full-precision output rather than rounded:
 | `model := 'causalpfn'`, run twice | **identical** |
 | `duckdo_query_chunk` = 256 vs 4096 | **identical** |
 | `ensemble := 4`, same seed | **identical** |
+| the same rows in a different physical order | to 2e-15 relative |
 
 **Thread-independence is not free and did not come for free.** Floating-point
 addition is not associative, so `(a+b)+c` and `a+(b+c)` differ in the last bits. If
@@ -73,72 +73,65 @@ which thread reaches it or when.
 
 `duckdo_query_chunk` behaves the same way for the foundation models: it changes how
 many rows are scored per forward pass, and **not** the answer. It is a pure
-time-versus-memory dial, worth a factor of six — see
-[BENCHMARKS.md](BENCHMARKS.md#the-cfm-path-is-6-slower-than-it-should-be).
+time-versus-memory dial, worth a factor of five — see
+[BENCHMARKS.md](BENCHMARKS.md#the-cfm-path-is-8-slower-by-default).
 
 ---
 
 ## What moves, and by how much
 
-### Row order is an input
+### Row order, which used to matter and no longer does
 
 Permute the rows of a table — same rows, nothing else changed — and the estimate
-moves:
+moves by:
 
 ```
 estimator             sd    std_error      sd/se
-regression     2.703e-04       0.1093      0.25%
-aipw           2.192e-03       0.1032      2.12%
-ipw            2.180e-02       0.3525      6.18%
+regression     1.620e-13       0.1092      0.00%
+aipw           3.163e-14       0.1031      0.00%
+ipw            2.043e-13       0.3459      0.00%
 ```
 
 Ten deterministic permutations of one 20,000-row table; `sd` is the standard
-deviation of the estimate across those permutations.
+deviation of the estimate across those permutations. That is rounding, and the
+check asserts it stays below 1e-10 relative rather than merely observing it.
 
-**The cause is not rounding.** That was the first guess and it was wrong by eight
-orders of magnitude — non-associativity on 20,000 doubles is worth about 1e-14
-relative, and the measured move is 4e-4. The cause is fold assignment:
+**It used to be 0.25% / 2.12% / 6.18% of a standard error**, and the reason is
+worth keeping. Fold assignment seeded a shuffle of row *positions*:
 
 ```cpp
 vector<idx_t> rows = frame.ArmRows(arm);
 std::shuffle(rows.begin(), rows.end(), rng);   // seeded, but over row *positions*
 ```
 
-The shuffle is seeded and reproducible, but it permutes row *positions* within each
-treatment arm. Move a row to a different position in the table and it lands in a
-different fold, so a cross-fitted estimator holds out a different subset and
-returns a genuinely different — equally valid — estimate. This is sampling
-variation in the cross-fitting, not error.
+Move a row to a different position and it landed in a different fold, so a
+cross-fitted estimator held out a different subset and returned a different —
+equally valid — estimate. Sampling variation rather than error, but a table
+rebuilt by an unrelated ETL change would move a published number.
 
-`ipw` moves most (6.2% of a standard error) because it leans entirely on the
-propensity model, and every row's weight depends on which fold's model scored it.
-`regression` moves least. All three are small against their own standard errors,
-which is the only scale on which the difference means anything: **the answer is
-reproducible as a number, and not as bits, under reordering.**
+The frame now carries a **canonical order**: a permutation of the rows derived
+from what they contain. Every seeded draw indexes that instead of storage — fold
+assignment, bootstrap resampling, the foundation model's context sample, and all
+five refutation methods.
 
-To pin it, make the row order deterministic:
+Hashing each row was the obvious way to build that order, and it is wrong in an
+instructive way. `X` is standardised, so every value carries a mean that was
+itself summed in storage order; permuting the table moves that mean by an ulp,
+and a hash turns an ulp into a completely different sort key. The hash-ordered
+sort came out *more* order-sensitive than the thing it replaced. Comparison is
+stable where hashing is not, because standardising is monotone within a column
+and an ulp of drift cannot reorder two distinct values.
 
-```sql
-CREATE TABLE analysis AS SELECT * FROM source ORDER BY customer_id;
-```
-
-Any total order will do — it only has to be the same one next time. This matters
-more than it sounds: a table read from partitioned Parquet, or rebuilt by an
-unrelated ETL change, can arrive in a different order without anyone touching the
-analysis.
-
-> **This is a wart, not a design.** Assigning folds by hashing each row's *contents*
-> instead of its position would make the estimate order-invariant. It is on the
-> roadmap and is not done, because it would change every number currently published
-> in the tutorial, the worked examples and this repository's tests, and doing that
-> the week before submission trades a documented limitation for an undocumented one.
+It costs 0.8 s on the 1M × 50 frame, and the estimates are unchanged in accuracy:
+across ten IHDP replications the paired change in absolute error is 0.027 ± 0.039,
+an interval comfortably containing zero.
 
 ### Deliberately different
 
 | | |
 |---|---|
-| a bootstrap interval, `seed := 42` vs `43` | differs — 8.2807 vs 8.2921 |
-| `ensemble := 4`, `seed := 42` vs `43` | differs — 8.7309 vs 8.7553 |
+| a bootstrap interval, `seed := 42` vs `43` | differs — 8.2736 vs 8.3157 |
+| `ensemble := 4`, `seed := 42` vs `43` | differs — 8.7702 vs 8.7813 |
 
 Both are resampling, so a different seed is a different sample. The default seed is
 42 and every function takes `seed :=`.
@@ -148,8 +141,9 @@ Both are resampling, so a different seed is a different sample. The default seed
 ## Pinning a result you will need to defend
 
 1. **The extension version.** `SELECT * FROM duckdb_extensions() WHERE extension_name = 'duckdo';`
-2. **The row order.** Materialise the analysis table with an explicit `ORDER BY` on
-   a stable key, as above.
+2. ~~**The row order.**~~ No longer necessary — see above. Left in the list because
+   it was necessary until recently, and a pinning recipe that quietly drops a step
+   is worse than one that says why the step is gone.
 3. **The seed.** Pass `seed :=` explicitly rather than relying on the default,
    which is a value that could change between versions.
 4. **The covariate list.** `exclude :=` is relative to whatever columns the table
@@ -161,9 +155,8 @@ Both are resampling, so a different seed is a different sample. The default seed
    covariate budget; the manifest beside the weights carries the export's opset and
    its parity check against PyTorch.
 
-Points 2 and 4 are the two that actually bite. A rerun that differs is nearly
-always a different adjustment set or a different row order, not a different
-estimator.
+Point 4 is the one that actually bites. A rerun that differs is nearly always a
+different adjustment set, not a different estimator.
 
 ---
 

@@ -676,7 +676,7 @@ logit-level agreement without moving the number anyone reads.
 | `duckdo_bootstrap_reps` | 200 | Bootstrap replicates |
 | `duckdo_model_dir` | `~/.cache/duckdo` | Where exported model graphs and weights live |
 | `duckdo_threads` | 0 | Threads for model inference and the dense accumulations inside every estimator; 0 means one per hardware thread |
-| `duckdo_query_chunk` | 512 | Rows scored per model forward pass. A pure time-versus-memory dial — the estimate is bit-identical at every setting — but a large one: the context is re-encoded per chunk, so 8,000 rows take 148 s at 512 and 21 s at 8192, peaking at 2.1 GB and 5.3 GB. Raise it if you have the memory |
+| `duckdo_query_chunk` | 512 | Rows scored per model forward pass. A pure time-versus-memory dial — the estimate is bit-identical at every setting — but a large one: the context is re-encoded per chunk, so 8,000 rows take 126 s at 512 and 23 s at 8192, peaking at 2.1 GB and 5.3 GB. Raise it if you have the memory |
 | `duckdo_ensemble_draws` | 1 | Context draws a foundation model takes; more than one funds an interval |
 
 Every guardrail names the setting to raise when it trips, rather than silently

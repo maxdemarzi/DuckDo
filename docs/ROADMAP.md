@@ -674,10 +674,10 @@ to leave room for the 2.2x.
    The losses are on the page rather than in a footnote. On a step-function DGP EconML's
    `CausalForestDML` beats DuckDo's classical `do_cate` on PEHE by **0.213 against 0.992**, because
    regularised GLMs cannot fit a cliff. `dml`'s mean IHDP error of 0.786 against a median of 0.160
-   is one replication where it misses by 5.9. And the CFM path was **6× slower than the same model
+   is one replication where it misses by 6.4. And the CFM path was **8× slower than the same model
    in Python** until the cause was found: `duckdo_query_chunk` defaults to 512 and the context is
-   re-encoded per chunk, so 8,000 rows paid for a 4,096-row context sixteen times — 148 s against
-   21 s at chunk 8192, **bit-identical estimate**, 2.1 GB against 5.3 GB. The default stands and the
+   re-encoded per chunk, so 8,000 rows paid for a 4,096-row context sixteen times — 126 s against
+   23 s at chunk 8192, **bit-identical estimate**, 2.1 GB against 5.3 GB. The default stands and the
    trade is documented; encoding the context once needs a re-exported graph and is the Phase 8 CFM
    caching item.
 4. ~~**Reproducibility statement.**~~ **DONE** (`docs/REPRODUCIBILITY.md`, each claim a case in
@@ -685,14 +685,14 @@ to leave room for the 2.2x.
    Identical to the last bit across repeat runs, `duckdo_threads` 1/2/8/auto, DuckDB `threads` 1/4,
    `duckdo_query_chunk` 256 vs 4096, and repeated foundation-model runs.
 
-   The case that fails is row order, and finding out *why* mattered: the first explanation was
+   The case that failed was row order, and finding out *why* mattered: the first explanation was
    floating-point non-associativity, and it was wrong by eight orders of magnitude. `AssignFolds`
-   seeds a shuffle of row **positions**, so a permuted table puts different rows in different folds.
-   Measured across ten permutations that is worth 0.25% of one standard error for `regression`,
-   2.1% for `aipw` and 6.2% for `ipw` — sampling variation, not error, but not bit-reproducible
-   either. The first harness for this was itself wrong: ordering the generating query by `random()`
-   draws from the same stream that fills the columns, so it compared *different data* and made the
-   result look far worse than it is.
+   seeded a shuffle of row **positions**, so a permuted table put different rows in different folds
+   — worth 0.25% of one standard error for `regression`, 2.1% for `aipw` and 6.2% for `ipw`. That is
+   now **fixed**, see item 9 below; the residual is 2e-15 relative and the check asserts that bound.
+   The first harness for this was itself wrong: ordering the generating query by `random()` draws
+   from the same stream that fills the columns, so it compared *different data* and made the result
+   look far worse than it is.
 5. ~~**No telemetry.**~~ **DONE and verified rather than asserted.** The extension contains no HTTP
    client and no socket code; the only two URLs in `src/` are attribution strings naming where each
    model came from, printed by `do_list_models()` and never fetched. `docs/REPRODUCIBILITY.md`
@@ -889,13 +889,27 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    CEVAE mirror (mean |ATE error| 0.137, mean PEHE 2.23) and Lalonde NSW against its experimental
    benchmark (1794.3, with `dml` at 1759.3). The canonical 1000-replication IHDP set is not at that
    source; an ACIC subset is still open.
-9. **Assign folds by row content, not row position.** Uncovered by the reproducibility work:
-   `AssignFolds` shuffles positions, so the same rows in a different physical order land in
-   different folds and give a different estimate — 2.1% of a standard error for `aipw`, 6.2% for
-   `ipw`. Hashing each row's encoded contents instead would make the estimate order-invariant,
-   which matters in a database where a table can be reordered by an unrelated ETL change. Not done
-   yet because it moves every number currently published in the tutorial, the worked examples and
-   the tests, and that is not a change to make in the same week as a first submission.
+9. ~~**Assign folds by row content, not row position.**~~ **DONE.** `CausalFrame` carries a
+   canonical order derived from what each row contains, and every seeded draw indexes that instead
+   of storage: fold assignment, bootstrap resampling in `do_ate`, `do_iv` and `do_mediate`, the
+   foundation model's context sample, and all five refutation methods. The spread across ten
+   permutations falls from 0.25% / 2.12% / 6.18% of a standard error to 0.00%, leaving 2e-15
+   relative, which is summation order.
+
+   **Hashing the rows was the obvious approach and it is wrong**, which is the part worth keeping.
+   `X` is standardised, so every value carries a mean summed in storage order; permuting the table
+   moves it by an ulp, and a hash turns an ulp into a completely different sort key — the
+   hash-ordered sort was *more* order-sensitive than what it replaced. Comparison is stable where
+   hashing is not, because standardising is monotone within a column. Cost is 0.8 s on the 1M × 50
+   frame, most of which came back by sorting (outcome, row) pairs rather than bare indices, since
+   sorting indices chases `y` at a random offset on every comparison.
+
+   Accuracy is unchanged: across ten IHDP replications the paired difference in absolute error is
+   0.027 ± 0.039. The published numbers moved anyway, and regenerating them surfaced two
+   documentation defects — `check_docs.py` verified that documented SQL *ran* but never that it
+   still produced the documented numbers, and both executed docs were quoting stale output; and the
+   tutorial mis-taught `do_refute`, reading `passed = false` as the desired outcome on a placebo
+   test when it means the refutation did not behave as it should.
 10. **Cache the foundation model's context encoding.** Measured at 6×: the context is re-encoded
     for every query chunk. Needs the graph re-exported with the context and query stages split,
     so it is a change to `scripts/export/`, not to the runtime. Until then `duckdo_query_chunk` is
