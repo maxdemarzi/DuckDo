@@ -210,11 +210,11 @@ Panel LoadPanel(ClientContext &context, const string &relation, const string &un
 		// Each unit's values at the first period it is observed in: pre-treatment
 		// for every cohort, so the treatment cannot have moved them.
 		const string u_q = QuoteIdentifier(unit_col), p_q = QuoteIdentifier(period_col);
-		auto baseline = RunQuery(context,
-		                         "SELECT CAST(" + u_q + " AS VARCHAR)" + casts + " FROM " + rel + " WHERE " + u_q +
-		                             " IS NOT NULL AND " + p_q + " IS NOT NULL QUALIFY row_number() OVER (PARTITION BY " +
-		                             u_q + " ORDER BY " + p_q + ") = 1",
-		                         string(fn) + " reading baseline covariates");
+		auto baseline = RunQuery(
+		    context,
+		    "SELECT CAST(" + u_q + " AS VARCHAR)" + casts + " FROM " + rel + " WHERE " + u_q + " IS NOT NULL AND " +
+		        p_q + " IS NOT NULL QUALIFY row_number() OVER (PARTITION BY " + u_q + " ORDER BY " + p_q + ") = 1",
+		    string(fn) + " reading baseline covariates");
 		const idx_t p = covariates.size();
 		panel.X.Resize(panel.n_units, p);
 		vector<uint8_t> present(panel.n_units * p, 0);
@@ -257,9 +257,9 @@ Panel LoadPanel(ClientContext &context, const string &relation, const string &un
 			}
 		}
 		if (imputed > 0) {
-			panel.warnings.push_back(StringUtil::Format(
-			    "%llu baseline covariate values were NULL and were replaced by the column mean",
-			    static_cast<unsigned long long>(imputed)));
+			panel.warnings.push_back(
+			    StringUtil::Format("%llu baseline covariate values were NULL and were replaced by the column mean",
+			                       static_cast<unsigned long long>(imputed)));
 		}
 		panel.has_covariates = true;
 	}
@@ -320,8 +320,8 @@ CellResult CellEffect(const Panel &panel, const vector<idx_t> &treated, const ve
 		if (treated_count == 0 || control_count == 0) {
 			return cell;
 		}
-		cell.att = treated_change / static_cast<double>(treated_count) -
-		           control_change / static_cast<double>(control_count);
+		cell.att =
+		    treated_change / static_cast<double>(treated_count) - control_change / static_cast<double>(control_count);
 		cell.n_treated = treated_count;
 		cell.n_control = control_count;
 		cell.valid = true;
@@ -616,8 +616,7 @@ unique_ptr<FunctionData> BindDid(ClientContext &context, TableFunctionBindInput 
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.push_back(
 	    {Value("ATT"), Value(panel.has_covariates ? "callaway-santanna, doubly robust" : "callaway-santanna"),
-	     Value::DOUBLE(att),
-	     se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
+	     Value::DOUBLE(att), se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
 	     se > 0.0 ? Value::DOUBLE(att - Z95 * se) : Value(LogicalType::DOUBLE),
 	     se > 0.0 ? Value::DOUBLE(att + Z95 * se) : Value(LogicalType::DOUBLE),
 	     Value::BIGINT(static_cast<int64_t>(panel.n_units)), Value::BIGINT(static_cast<int64_t>(panel.n_periods)),
@@ -1101,13 +1100,20 @@ unique_ptr<FunctionData> BindSynth(ClientContext &context, TableFunctionBindInpu
                                    vector<LogicalType> &return_types, vector<string> &names) {
 	auto run = RunSynth(context, input, "do_synth");
 	auto &panel = run.panel;
-	names = {"unit",          "adoption_period", "estimand",       "estimator", "estimate",
-	         "pre_rmspe",     "post_rmspe",      "rmspe_ratio",    "p_value",   "n_donors",
-	         "n_pre_periods", "n_post_periods",  "weights",        "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
-	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::BIGINT,
+	names = {"unit",        "adoption_period", "estimand", "estimator",     "estimate",       "pre_rmspe", "post_rmspe",
+	         "rmspe_ratio", "p_value",         "n_donors", "n_pre_periods", "n_post_periods", "weights",   "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
 	                LogicalType::MAP(LogicalType::VARCHAR, LogicalType::DOUBLE),
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 	auto bind = make_uniq<ResultBindData>();
@@ -1142,19 +1148,19 @@ unique_ptr<FunctionData> BindSynth(ClientContext &context, TableFunctionBindInpu
 			    static_cast<unsigned long long>(result.outside_range),
 			    static_cast<unsigned long long>(result.adoption))));
 		}
-		warnings.push_back(Value(StringUtil::Format(
-		    "%llu placebo runs, so the smallest attainable p-value is %.4f",
-		    static_cast<unsigned long long>(result.placebos), 1.0 / (1.0 + static_cast<double>(result.placebos)))));
+		warnings.push_back(Value(StringUtil::Format("%llu placebo runs, so the smallest attainable p-value is %.4f",
+		                                            static_cast<unsigned long long>(result.placebos),
+		                                            1.0 / (1.0 + static_cast<double>(result.placebos)))));
 
-		bind->rows.push_back(
-		    {Value(panel.units[result.unit]), Value(panel.period_labels[result.adoption]), Value("ATT"),
-		     Value("synthetic control"), Value::DOUBLE(result.fit.att), Value::DOUBLE(result.fit.pre_rmspe),
-		     Value::DOUBLE(result.fit.post_rmspe), Value::DOUBLE(result.ratio), Value::DOUBLE(result.p_value),
-		     Value::BIGINT(static_cast<int64_t>(run.donors.size())),
-		     Value::BIGINT(static_cast<int64_t>(result.adoption)),
-		     Value::BIGINT(static_cast<int64_t>(panel.n_periods - result.adoption)),
-		     Value::MAP(LogicalType::VARCHAR, LogicalType::DOUBLE, std::move(keys), std::move(values)),
-		     Value::LIST(LogicalType::VARCHAR, std::move(warnings))});
+		bind->rows.push_back({Value(panel.units[result.unit]), Value(panel.period_labels[result.adoption]),
+		                      Value("ATT"), Value("synthetic control"), Value::DOUBLE(result.fit.att),
+		                      Value::DOUBLE(result.fit.pre_rmspe), Value::DOUBLE(result.fit.post_rmspe),
+		                      Value::DOUBLE(result.ratio), Value::DOUBLE(result.p_value),
+		                      Value::BIGINT(static_cast<int64_t>(run.donors.size())),
+		                      Value::BIGINT(static_cast<int64_t>(result.adoption)),
+		                      Value::BIGINT(static_cast<int64_t>(panel.n_periods - result.adoption)),
+		                      Value::MAP(LogicalType::VARCHAR, LogicalType::DOUBLE, std::move(keys), std::move(values)),
+		                      Value::LIST(LogicalType::VARCHAR, std::move(warnings))});
 	}
 	return std::move(bind);
 }
@@ -1187,10 +1193,8 @@ void RegisterPanelFunctions(ExtensionLoader &loader) {
 		const char *name;
 		table_function_bind_t bind;
 	};
-	const Entry entries[] = {{"did", BindDid},
-	                         {"event_study", BindEventStudy},
-	                         {"synth", BindSynth},
-	                         {"synth_path", BindSynthPath}};
+	const Entry entries[] = {
+	    {"did", BindDid}, {"event_study", BindEventStudy}, {"synth", BindSynth}, {"synth_path", BindSynthPath}};
 	for (auto &entry : entries) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);

@@ -609,11 +609,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		// past a couple of dozen levels this is a dose or a column that needs
 		// bucketing, not a handful of arms to contrast.
 		const idx_t max_levels = 20;
-		auto probe = RunQuery(context,
-		                      "SELECT CAST(v AS VARCHAR) FROM (SELECT DISTINCT " + t_quoted + " AS v FROM " + rel +
-		                          " WHERE " + t_quoted + " IS NOT NULL) ORDER BY v LIMIT " +
-		                          std::to_string(max_levels + 1),
-		                      "inspecting treatment column " + spec.treatment);
+		auto probe =
+		    RunQuery(context,
+		             "SELECT CAST(v AS VARCHAR) FROM (SELECT DISTINCT " + t_quoted + " AS v FROM " + rel + " WHERE " +
+		                 t_quoted + " IS NOT NULL) ORDER BY v LIMIT " + std::to_string(max_levels + 1),
+		             "inspecting treatment column " + spec.treatment);
 		const idx_t found = probe->RowCount();
 		if (found < 2) {
 			throw BinderException("duckdo: treatment '%s' has %llu level(s); a contrast needs at least two",

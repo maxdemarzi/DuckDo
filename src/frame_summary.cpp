@@ -63,11 +63,31 @@ unique_ptr<FunctionData> BindFrameSummary(ClientContext &context, TableFunctionB
 	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
 	auto frame = BuildFrame(context, spec);
 
-	names = {"feature", "source", "kind", "level", "center", "scale", "n", "n_features", "n_treated",
-	         "n_rows_with_missing", "treated_label", "control_label", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BIGINT,  LogicalType::BIGINT,
-	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::VARCHAR,
+	names = {"feature",
+	         "source",
+	         "kind",
+	         "level",
+	         "center",
+	         "scale",
+	         "n",
+	         "n_features",
+	         "n_treated",
+	         "n_rows_with_missing",
+	         "treated_label",
+	         "control_label",
+	         "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 
 	vector<Value> warning_values;
@@ -81,28 +101,28 @@ unique_ptr<FunctionData> BindFrameSummary(ClientContext &context, TableFunctionB
 	// feature set still reports the frame.
 	auto row_for = [&](const Value &feature, const Value &source, const Value &kind, const Value &level,
 	                   const Value &center, const Value &scale) {
-		return vector<Value>{feature,
-		                     source,
-		                     kind,
-		                     level,
-		                     center,
-		                     scale,
-		                     Value::BIGINT(static_cast<int64_t>(frame.n)),
-		                     Value::BIGINT(static_cast<int64_t>(frame.features.size())),
-		                     Value::BIGINT(static_cast<int64_t>(frame.n_treated)),
-		                     Value::BIGINT(static_cast<int64_t>(frame.n_rows_with_missing)),
-		                     Value(frame.treated_label),
-		                     Value(frame.control_label),
-		                     warning_list};
+		return vector<Value> {feature,
+		                      source,
+		                      kind,
+		                      level,
+		                      center,
+		                      scale,
+		                      Value::BIGINT(static_cast<int64_t>(frame.n)),
+		                      Value::BIGINT(static_cast<int64_t>(frame.features.size())),
+		                      Value::BIGINT(static_cast<int64_t>(frame.n_treated)),
+		                      Value::BIGINT(static_cast<int64_t>(frame.n_rows_with_missing)),
+		                      Value(frame.treated_label),
+		                      Value(frame.control_label),
+		                      warning_list};
 	};
 
 	auto bind = make_uniq<ResultBindData>();
 	if (frame.features.empty()) {
 		// No covariates is a legitimate answer - `covariates := []` asks for it -
 		// and the frame still has a size, two arms and any warnings.
-		bind->rows.push_back(row_for(Value(LogicalType::VARCHAR), Value(LogicalType::VARCHAR),
-		                             Value("no covariates"), Value(LogicalType::VARCHAR),
-		                             Value(LogicalType::DOUBLE), Value(LogicalType::DOUBLE)));
+		bind->rows.push_back(row_for(Value(LogicalType::VARCHAR), Value(LogicalType::VARCHAR), Value("no covariates"),
+		                             Value(LogicalType::VARCHAR), Value(LogicalType::DOUBLE),
+		                             Value(LogicalType::DOUBLE)));
 		return std::move(bind);
 	}
 	for (auto &feature : frame.features) {

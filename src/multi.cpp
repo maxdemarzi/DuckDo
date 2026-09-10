@@ -203,11 +203,20 @@ unique_ptr<FunctionData> BindAteLevels(ClientContext &context, TableFunctionBind
 		level_count[k]++;
 	}
 
-	names = {"level",     "reference", "estimand", "estimator",        "estimate", "std_error",   "ci_low",
-	         "ci_high",   "p_value",   "naive_difference", "n_level",  "n_reference", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BIGINT,  LogicalType::BIGINT,
+	names = {"level",   "reference", "estimand",         "estimator", "estimate",    "std_error", "ci_low",
+	         "ci_high", "p_value",   "naive_difference", "n_level",   "n_reference", "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 
 	auto bind = make_uniq<ResultBindData>();
@@ -232,12 +241,13 @@ unique_ptr<FunctionData> BindAteLevels(ClientContext &context, TableFunctionBind
 		result.estimate = mean;
 		result.std_error = std::sqrt(variance / n);
 		result.Finalize();
-		const double naive = level_sum[k] / static_cast<double>(level_count[k]) -
-		                     level_sum[ref] / static_cast<double>(level_count[ref]);
+		const double naive =
+		    level_sum[k] / static_cast<double>(level_count[k]) - level_sum[ref] / static_cast<double>(level_count[ref]);
 		bind->rows.push_back({Value(frame.levels[k]), Value(frame.levels[ref]), Value("ATE"), Value("aipw"),
 		                      Value::DOUBLE(result.estimate), Value::DOUBLE(result.std_error),
-		                      Value::DOUBLE(result.ci_low), Value::DOUBLE(result.ci_high), Value::DOUBLE(result.p_value),
-		                      Value::DOUBLE(naive), Value::BIGINT(static_cast<int64_t>(level_count[k])),
+		                      Value::DOUBLE(result.ci_low), Value::DOUBLE(result.ci_high),
+		                      Value::DOUBLE(result.p_value), Value::DOUBLE(naive),
+		                      Value::BIGINT(static_cast<int64_t>(level_count[k])),
 		                      Value::BIGINT(static_cast<int64_t>(level_count[ref])), WarningValue(warnings)});
 	}
 	return std::move(bind);

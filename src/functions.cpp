@@ -363,10 +363,9 @@ unique_ptr<FunctionData> BindAteBy(ClientContext &context, TableFunctionBindInpu
 	vector<vector<Value>> rows(n_groups);
 	auto estimate_group = [&](idx_t g) {
 		CausalSpec group_spec = spec;
-		group_spec.relation =
-		    scratch.ok ? "(SELECT * EXCLUDE (__duckdo_group, __duckdo_row) FROM " + scratch.name +
-		                     ".src WHERE __duckdo_group = " + std::to_string(g + 1) + ")"
-		               : "(SELECT * FROM " + rel + " WHERE " + predicates[g] + ")";
+		group_spec.relation = scratch.ok ? "(SELECT * EXCLUDE (__duckdo_group, __duckdo_row) FROM " + scratch.name +
+		                                       ".src WHERE __duckdo_group = " + std::to_string(g + 1) + ")"
+		                                 : "(SELECT * FROM " + rel + " WHERE " + predicates[g] + ")";
 		for (auto &column : by) {
 			group_spec.exclude.push_back(column);
 		}

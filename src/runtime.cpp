@@ -61,7 +61,8 @@ const vector<ModelInfo> &ModelCatalog() {
 		// and the authors' citation. The URL is pinned to one revision, so the bytes
 		// behind it cannot change under a published DuckDo, and each file is checked
 		// against these digests before it is installed.
-		causalpfn.default_source = "https://huggingface.co/maxdemarzi/duckdo-causalpfn/resolve/3bbb1bd6b44d5deb51e0f246d45199eb11e5f2d5";
+		causalpfn.default_source =
+		    "https://huggingface.co/maxdemarzi/duckdo-causalpfn/resolve/3bbb1bd6b44d5deb51e0f246d45199eb11e5f2d5";
 		causalpfn.pinned_sha256 = {
 		    {"causalpfn_encode.onnx", "63872a723e825a461c5256cdfa5d35215697ed00fa1eab12b583be93157ffb83"},
 		    {"causalpfn_encode.weights.bin", "96c815bc6c73bfde6b862a79684d2fecb5677ac53dcbd68edb060ff500dd5b72"},
@@ -522,8 +523,7 @@ Prepared PrepareCommon(const CausalFrame &frame, const CausalSpec &spec, const M
 			    "%s accepts %llu covariates; the %llu most outcome-correlated were kept out of %llu. The rest are "
 			    "discarded entirely - ensemble := k spreads the choice across draws instead",
 			    model.id.c_str(), static_cast<unsigned long long>(model.max_covariates),
-			    static_cast<unsigned long long>(out.features.size()),
-			    static_cast<unsigned long long>(frame.X.cols)));
+			    static_cast<unsigned long long>(out.features.size()), static_cast<unsigned long long>(frame.X.cols)));
 		}
 		// Dropping confounders produces BIAS, and no interval built by resampling
 		// can cover bias. Measured on a DGP with twelve contributing covariates
@@ -744,8 +744,8 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 	                                    context_1d.size()),
 	    Ort::Value::CreateTensor<float>(memory, context_y.data(), context_y.size(), context_1d.data(),
 	                                    context_1d.size())};
-	auto cached = encode.Run(Ort::RunOptions {nullptr}, encode_inputs, context_tensors.data(),
-	                         context_tensors.size(), encode_outputs, 4);
+	auto cached = encode.Run(Ort::RunOptions {nullptr}, encode_inputs, context_tensors.data(), context_tensors.size(),
+	                         encode_outputs, 4);
 
 	// The cache is the largest thing here - 20 layers x context x 384 floats,
 	// twice - so it is borrowed rather than copied: `cached` owns it and the
@@ -753,8 +753,8 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 	auto borrow = [&](Ort::Value &value) {
 		auto info = value.GetTensorTypeAndShapeInfo();
 		auto shape = info.GetShape();
-		return Ort::Value::CreateTensor<float>(memory, value.GetTensorMutableData<float>(),
-		                                       info.GetElementCount(), shape.data(), shape.size());
+		return Ort::Value::CreateTensor<float>(memory, value.GetTensorMutableData<float>(), info.GetElementCount(),
+		                                       shape.data(), shape.size());
 	};
 
 	auto &decode = AcquireSession(dir + "/" + model.decode_graph, NumericThreads(), ResolveDevice(context));
@@ -779,12 +779,14 @@ CfmResult RunCausalPfn(ClientContext &context, const CausalFrame &frame, const C
 		for (int arm = 0; arm < 2; arm++) {
 			// do(T = arm) for every query row.
 			std::vector<float> query_t(count, static_cast<float>(arm));
-			std::array<Ort::Value, 6> inputs {
-			    borrow(cached[0]), borrow(cached[1]), borrow(cached[2]), borrow(cached[3]),
-			    Ort::Value::CreateTensor<float>(memory, query_x.data(), query_x.size(), query_shape.data(),
-			                                    query_shape.size()),
-			    Ort::Value::CreateTensor<float>(memory, query_t.data(), query_t.size(), query_1d.data(),
-			                                    query_1d.size())};
+			std::array<Ort::Value, 6> inputs {borrow(cached[0]),
+			                                  borrow(cached[1]),
+			                                  borrow(cached[2]),
+			                                  borrow(cached[3]),
+			                                  Ort::Value::CreateTensor<float>(memory, query_x.data(), query_x.size(),
+			                                                                  query_shape.data(), query_shape.size()),
+			                                  Ort::Value::CreateTensor<float>(memory, query_t.data(), query_t.size(),
+			                                                                  query_1d.data(), query_1d.size())};
 			auto outputs =
 			    decode.Run(Ort::RunOptions {nullptr}, decode_inputs, inputs.data(), inputs.size(), decode_outputs, 1);
 			const float *mu = outputs[0].GetTensorData<float>();
@@ -1030,10 +1032,9 @@ unique_ptr<FunctionData> BindDevices(ClientContext &, TableFunctionBindInput &, 
 	                      Value("built without ONNX Runtime; the classical estimators need no device")});
 	bind->rows.push_back({Value("cuda"), Value::BOOLEAN(false), Value("built without ONNX Runtime")});
 #endif
-	bind->rows.push_back(
-	    {Value("rocm"), Value::BOOLEAN(false), Value("not built: DuckDo builds against no ROCm package of ONNX Runtime")});
-	bind->rows.push_back(
-	    {Value("mlx"), Value::BOOLEAN(false), Value("not built: DuckDo has no Apple GPU backend")});
+	bind->rows.push_back({Value("rocm"), Value::BOOLEAN(false),
+	                      Value("not built: DuckDo builds against no ROCm package of ONNX Runtime")});
+	bind->rows.push_back({Value("mlx"), Value::BOOLEAN(false), Value("not built: DuckDo has no Apple GPU backend")});
 	return std::move(bind);
 }
 
@@ -1069,8 +1070,7 @@ string HexDigest(duckdb_mbedtls::MbedTlsWrapper::SHA256State &sha) {
 //! that exists is an artifact do_list_models reports as ready.
 //! With `expected` set, the digest is checked before the rename, so a file that
 //! fails verification is never installed - not even briefly.
-std::pair<int64_t, string> CopyAndHash(FileSystem &fs, const string &from, const string &to,
-                                       const string &expected) {
+std::pair<int64_t, string> CopyAndHash(FileSystem &fs, const string &from, const string &to, const string &expected) {
 	const string part = to + ".part";
 	int64_t total = 0;
 	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
@@ -1155,7 +1155,7 @@ unique_ptr<FunctionData> BindDownload(ClientContext &context, TableFunctionBindI
 	if (use_default) {
 		if (model->default_source.empty()) {
 			const char *script = model->kind == ModelKind::CAUSALPFN ? "export_causalpfn.py"
-			                                                          : "export_dopfn.py --repo <Do-PFN checkout>";
+			                                                         : "export_dopfn.py --repo <Do-PFN checkout>";
 			const string why = model->commercial
 			                       ? string("nothing is hosted for it")
 			                       : string("its upstream repository states no licence, so its weights cannot be "

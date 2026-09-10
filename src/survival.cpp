@@ -324,7 +324,8 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	if (!horizon_given) {
 		warnings.push_back("horizon defaulted to " + StringUtil::Format("%g", horizon) +
 		                   ", the last time both arms still had at least 5% of their subjects at risk. The last "
-		                   "observation in the shorter arm is " + StringUtil::Format("%g", naive_horizon) +
+		                   "observation in the shorter arm is " +
+		                   StringUtil::Format("%g", naive_horizon) +
 		                   ", but the curve out there rests on a handful of people. RMST is part of the estimand, "
 		                   "not a display detail - a different horizon is a different quantity");
 	}
@@ -334,9 +335,9 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 		                   "assumption that censoring is unrelated to the outcome");
 	}
 	if (trimmed > 0.0) {
-		warnings.push_back(std::to_string(static_cast<idx_t>(trimmed)) +
-		                   " propensity scores were trimmed to [" + StringUtil::Format("%g", spec.trim) + ", " +
-		                   StringUtil::Format("%g", 1.0 - spec.trim) + "]; those subjects have covariates that "
+		warnings.push_back(std::to_string(static_cast<idx_t>(trimmed)) + " propensity scores were trimmed to [" +
+		                   StringUtil::Format("%g", spec.trim) + ", " + StringUtil::Format("%g", 1.0 - spec.trim) +
+		                   "]; those subjects have covariates that "
 		                   "almost determine their treatment");
 	}
 	warnings.push_back("censoring is assumed independent of the event time given the covariates. Nothing in the "
@@ -352,12 +353,21 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 		warning_values.push_back(Value(w));
 	}
 
-	names = {"estimand",      "estimator",     "estimate", "std_error", "ci_low",           "ci_high",
-	         "horizon",       "rmst_treated",  "rmst_control", "n",     "n_events",         "censored_fraction",
-	         "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::BIGINT,  LogicalType::BIGINT, LogicalType::DOUBLE,
+	names = {"estimand", "estimator",         "estimate",     "std_error",    "ci_low",
+	         "ci_high",  "horizon",           "rmst_treated", "rmst_control", "n",
+	         "n_events", "censored_fraction", "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::DOUBLE,
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 
 	auto bind = make_uniq<ResultBindData>();

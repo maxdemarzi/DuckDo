@@ -490,8 +490,8 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 	}
 
 	names = {"leaf", "rule", "n", "mean_effect", "std_error", "cost", "action", "expected_gain"};
-	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::VARCHAR, LogicalType::DOUBLE};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::BIGINT,  LogicalType::DOUBLE,
+	                LogicalType::DOUBLE, LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::DOUBLE};
 
 	std::stable_sort(leaves.begin(), leaves.end(),
 	                 [](const PolicyLeaf &a, const PolicyLeaf &b) { return a.rule < b.rule; });

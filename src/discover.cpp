@@ -506,8 +506,7 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 		// Each replicate is seeded from (seed, rep), so the result does not depend
 		// on which thread reaches which replicate.
 		ParallelJobs(reps, [&](idx_t rep) {
-			std::mt19937_64 rng(static_cast<uint64_t>(out.spec.seed) ^ 0xD15C0DE5ULL ^
-			                    (rep * 0x9E3779B97F4A7C15ULL));
+			std::mt19937_64 rng(static_cast<uint64_t>(out.spec.seed) ^ 0xD15C0DE5ULL ^ (rep * 0x9E3779B97F4A7C15ULL));
 			std::uniform_int_distribution<idx_t> pick(0, t.n - 1);
 			vector<idx_t> rows(t.n);
 			for (auto &r : rows) {
@@ -577,8 +576,12 @@ unique_ptr<FunctionData> BindDiscover(ClientContext &context, TableFunctionBindI
 	const idx_t p = t.p;
 	const bool resampled = found.spec.bootstrap > 0;
 	names = {"source", "target", "edge", "in_graph", "stability", "orientation_stability", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::BOOLEAN, LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::BOOLEAN,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
 	                LogicalType::LIST(LogicalType::VARCHAR)};
 	auto bind = make_uniq<ResultBindData>();
 	const Value warnings = WarningValue(found.warnings);

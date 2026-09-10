@@ -168,8 +168,7 @@ unique_ptr<FunctionData> BindPool(ClientContext &context, TableFunctionBindInput
 		warnings.push_back("no estimand column, so every row is taken to be an ATE and weighted by n");
 	}
 	if (estimand != "ATE" && estimand != "ATT" && estimand != "ATC") {
-		throw BinderException("duckdo: do_ate_pool pools ATE, ATT or ATC estimates; %s holds '%s'", relation,
-		                      estimand);
+		throw BinderException("duckdo: do_ate_pool pools ATE, ATT or ATC estimates; %s holds '%s'", relation, estimand);
 	}
 	string weight_sql = "CAST(" + QuoteIdentifier(columns[2]) + " AS DOUBLE)";
 	if (estimand != "ATE") {
@@ -184,21 +183,20 @@ unique_ptr<FunctionData> BindPool(ClientContext &context, TableFunctionBindInput
 	}
 	const string estimator_col = find("estimator");
 	if (!estimator_col.empty()) {
-		auto kinds = RunQuery(context,
-		                      "SELECT count(DISTINCT " + QuoteIdentifier(estimator_col) + ") FROM " + rel + " WHERE " +
-		                          complete,
-		                      "do_ate_pool reading estimators");
+		auto kinds = RunQuery(
+		    context, "SELECT count(DISTINCT " + QuoteIdentifier(estimator_col) + ") FROM " + rel + " WHERE " + complete,
+		    "do_ate_pool reading estimators");
 		if (kinds->GetValue(0, 0).GetValue<int64_t>() > 1) {
 			warnings.push_back("the sites used different estimators; pooling is still exact, but a disagreement "
 			                   "between sites may be the estimators' rather than the data's");
 		}
 	}
 
-	auto data = RunQuery(context,
-	                     "SELECT CAST(" + QuoteIdentifier(columns[0]) + " AS DOUBLE), CAST(" +
-	                         QuoteIdentifier(columns[1]) + " AS DOUBLE), CAST(" + QuoteIdentifier(columns[2]) +
-	                         " AS DOUBLE), " + weight_sql + " FROM " + rel,
-	                     "do_ate_pool reading " + relation);
+	auto data =
+	    RunQuery(context,
+	             "SELECT CAST(" + QuoteIdentifier(columns[0]) + " AS DOUBLE), CAST(" + QuoteIdentifier(columns[1]) +
+	                 " AS DOUBLE), CAST(" + QuoteIdentifier(columns[2]) + " AS DOUBLE), " + weight_sql + " FROM " + rel,
+	             "do_ate_pool reading " + relation);
 	vector<double> est, se, n, w;
 	idx_t skipped = 0;
 	for (idx_t r = 0; r < data->RowCount(); r++) {
@@ -268,12 +266,12 @@ unique_ptr<FunctionData> BindPool(ClientContext &context, TableFunctionBindInput
 		warnings.push_back("a site reported a standard error of zero, so the heterogeneity test was not run");
 	}
 
-	warnings.insert(
-	    warnings.begin(),
-	    StringUtil::Format("the %s over every site's population together: each site's estimate weighted by its "
-	                       "share of %s. Exact for influence-function estimators with models fitted per site. "
-	                       "Assumes the sites are independent samples and no unit appears at two of them",
-	                       estimand, estimand == "ATE" ? "rows" : (estimand == "ATT" ? "treated rows" : "control rows")));
+	warnings.insert(warnings.begin(),
+	                StringUtil::Format(
+	                    "the %s over every site's population together: each site's estimate weighted by its "
+	                    "share of %s. Exact for influence-function estimators with models fitted per site. "
+	                    "Assumes the sites are independent samples and no unit appears at two of them",
+	                    estimand, estimand == "ATE" ? "rows" : (estimand == "ATT" ? "treated rows" : "control rows")));
 	if (skipped > 0) {
 		warnings.push_back(StringUtil::Format(
 		    "%llu rows with a NULL estimate, standard error or count were left out; a do_ate_by group that could "
@@ -292,11 +290,12 @@ unique_ptr<FunctionData> BindPool(ClientContext &context, TableFunctionBindInput
 		    static_cast<unsigned long long>(sites)));
 	}
 
-	names = {"estimand", "estimate",  "std_error", "ci_low",    "ci_high",   "p_value",
-	         "n_sites",  "n",         "q",         "q_p_value", "i_squared", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::BIGINT, LogicalType::BIGINT,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::LIST(LogicalType::VARCHAR)};
+	names = {"estimand", "estimate", "std_error", "ci_low",    "ci_high",   "p_value",
+	         "n_sites",  "n",        "q",         "q_p_value", "i_squared", "warnings"};
+	return_types = {LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                LogicalType::BIGINT,  LogicalType::BIGINT, LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE, LogicalType::LIST(LogicalType::VARCHAR)};
 	vector<Value> warning_values;
 	for (auto &warning : warnings) {
 		warning_values.push_back(Value(warning));

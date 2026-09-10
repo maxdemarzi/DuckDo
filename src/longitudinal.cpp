@@ -121,11 +121,11 @@ LongPanel LoadLong(ClientContext &context, const string &relation, const string 
 
 	// Periods are ordered on their own type so that 2 does not sort after 10,
 	// then carried as text to key the join.
-	auto order_probe = RunQuery(context,
-	                            "SELECT DISTINCT CAST(" + QuoteIdentifier(period_col) + " AS VARCHAR) AS p FROM " +
-	                                rel + " WHERE " + QuoteIdentifier(period_col) + " IS NOT NULL ORDER BY " +
-	                                QuoteIdentifier(period_col),
-	                            string(fn) + " ordering the periods of " + relation);
+	auto order_probe =
+	    RunQuery(context,
+	             "SELECT DISTINCT CAST(" + QuoteIdentifier(period_col) + " AS VARCHAR) AS p FROM " + rel + " WHERE " +
+	                 QuoteIdentifier(period_col) + " IS NOT NULL ORDER BY " + QuoteIdentifier(period_col),
+	             string(fn) + " ordering the periods of " + relation);
 
 	LongPanel panel;
 	std::map<string, idx_t> period_index;
@@ -188,8 +188,7 @@ LongPanel LoadLong(ClientContext &context, const string &relation, const string 
 	}
 
 	for (auto &rows : panel.by_unit) {
-		std::sort(rows.begin(), rows.end(),
-		          [](const LongRow &a, const LongRow &b) { return a.period < b.period; });
+		std::sort(rows.begin(), rows.end(), [](const LongRow &a, const LongRow &b) { return a.period < b.period; });
 	}
 	if (panel.units.size() < 20) {
 		throw BinderException("duckdo: %s needs at least twenty units in '%s'; found %llu. Inverse-probability "
@@ -472,12 +471,12 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 		warning_values.push_back(Value(w));
 	}
 
-	names = {"estimand",    "estimator", "estimate",   "std_error",   "ci_low",      "ci_high",
-	         "n_units",     "n_periods", "mean_weight", "max_weight", "effective_n", "warnings"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BIGINT, LogicalType::BIGINT,
+	names = {"estimand", "estimator", "estimate",    "std_error",  "ci_low",      "ci_high",
+	         "n_units",  "n_periods", "mean_weight", "max_weight", "effective_n", "warnings"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,
 	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
-	                LogicalType::LIST(LogicalType::VARCHAR)};
+	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::LIST(LogicalType::VARCHAR)};
 
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.push_back({Value("effect per treated period"), Value("msm-iptw"), Value::DOUBLE(estimate),
