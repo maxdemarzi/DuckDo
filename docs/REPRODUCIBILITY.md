@@ -12,7 +12,7 @@ relative, which is rounding. And DuckDo sends nothing anywhere, ever.
 
 ## No telemetry
 
-**DuckDo makes no network request at all.**
+**DuckDo makes no network request you did not ask for by name.**
 
 Not a usage report, not a crash report, not a version check, not an analytics ping.
 The extension contains no HTTP client and no socket code; the only two URLs in the
@@ -20,6 +20,16 @@ source are attribution strings naming where each model came from, printed by
 `do_list_models()` and never fetched. Model weights are exported on your own
 machine by `scripts/export/`, from a package you installed yourself, and read from
 a local directory.
+
+One function can reach the network: `do_download(model, source := ...)`, and only
+when `source` is a URL you typed. Even then DuckDo does not open the connection. It
+reads through DuckDB's own file system, which passes a URL to DuckDB's `httpfs`
+extension, so the request is DuckDB's, made by an extension you can see in
+`duckdb_extensions()`. If extension autoloading is enabled, as it is in DuckDB's
+default builds, DuckDB may *install* `httpfs` the first time a URL is opened. That
+is DuckDB's behaviour and a network fetch of its own, and it is worth knowing about.
+There is deliberately no default source, so no URL is ever reached that you did not
+write. Pointed at a directory, `do_download` touches no network at all.
 
 You do not have to take that on trust — it is one grep:
 

@@ -1,0 +1,87 @@
+# name: test/sql/download.test
+# description: do_download copies a model's artifacts through DuckDB's file system, hashing as it goes
+# group: [duckdo]
+#
+# Dependency-free: the source is a temporary directory of tiny stand-ins with
+# the real artifact names, written by COPY. do_download copies whatever the
+# catalog names and does not interpret the bytes, so stand-ins exercise every
+# path - copy, hash, keep, overwrite, failure - without 160 MB of weights.
+
+require duckdo
+
+statement ok
+COPY (SELECT 'encode graph') TO '__TEST_DIR__/causalpfn_encode.onnx' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 'encode weights') TO '__TEST_DIR__/causalpfn_encode.weights.bin' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 'decode graph') TO '__TEST_DIR__/causalpfn_decode.onnx' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 'decode weights') TO '__TEST_DIR__/causalpfn_decode.weights.bin' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 'manifest') TO '__TEST_DIR__/causalpfn.manifest.json' (FORMAT csv, HEADER false);
+
+# The destination does not exist yet; do_download creates it, nested.
+statement ok
+SET duckdo_model_dir = '__TEST_DIR__/downloaded/models';
+
+query II
+SELECT count(*), bool_and(status = 'downloaded')
+FROM do_download('causalpfn', source := '__TEST_DIR__');
+----
+5	true
+
+# The hash is not taken on trust: it has to match DuckDB's own sha256 of the
+# bytes that actually landed.
+query I
+SELECT bool_and(d.sha256 = sha256(b.content))
+FROM do_download('causalpfn', source := '__TEST_DIR__') d
+JOIN read_blob('__TEST_DIR__/downloaded/models/*') b
+  ON replace(b.filename, '\', '/') LIKE '%/' || d.file;
+----
+true
+
+# A second call keeps what is already there rather than silently replacing it.
+query I
+SELECT bool_and(status LIKE 'kept%') FROM do_download('causalpfn', source := '__TEST_DIR__');
+----
+true
+
+query I
+SELECT bool_and(status = 'downloaded')
+FROM do_download('causalpfn', source := '__TEST_DIR__', overwrite := true);
+----
+true
+
+# Both short names and full names are registered.
+query I
+SELECT count(*) FROM duckdo_download('causalpfn', source := '__TEST_DIR__');
+----
+5
+
+# No default source: a URL the user did not type is a network request they did
+# not make.
+statement error
+SELECT * FROM do_download('causalpfn');
+----
+source :=
+
+statement error
+SELECT * FROM do_download('no_such_model', source := '__TEST_DIR__');
+----
+unknown model
+
+# do_pfn's artifacts are not in the fake source, so this fails - and must not
+# leave a half-written file behind that could pass for a model.
+statement error
+SELECT * FROM do_download('do_pfn', source := '__TEST_DIR__');
+----
+could not copy
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/downloaded/models/*.part');
+----
+0

@@ -588,6 +588,25 @@ available, detail`. `detail` says why a model is unavailable and what to do abou
 covariates, has no fixed context ladder, carries no licence obligation, and does not shrink the
 population effect the way `do_pfn` does.
 
+### `do_download(model, source := ..., overwrite := false)`
+
+Copies every artifact the catalog names for `model` (graphs, weights and manifest) from `source`
+into `duckdo_model_dir`, and returns one row per file: `model, file, bytes, sha256, status, source`.
+
+```sql
+SELECT file, bytes, status FROM do_download('causalpfn', source := '/mnt/shared/duckdo-models');
+```
+
+- `source` is a directory or a URL, and there is **no default**. No hosted copy of the weights
+  exists, and a URL you did not type is a network request you did not make. A URL is read through
+  DuckDB's file system, so it needs DuckDB's `httpfs` extension; DuckDo itself opens no connection.
+- Each file is written to a `.part` file, hashed on the way, and renamed only once complete, so an
+  interrupted copy never looks like a model to `do_list_models()`.
+- Files already present are kept, with their hash reported, unless you pass `overwrite := true`.
+- `sha256` is the digest of the bytes that landed. Compare it against a checksum you trust from
+  wherever the files came from. DuckDo does not pin checksums, because there is no canonical copy to
+  pin them to yet.
+
 ### `do_devices()`
 
 `device, available`. Reports `cpu` when the build has ONNX Runtime; CUDA/ROCm/MLX are listed as

@@ -5,8 +5,9 @@ last change was worth.
 
 DuckDo makes DuckDB an in-process causal engine: treatment effects, assumption diagnostics and
 graph-based identification expressed as ordinary SQL over ordinary tables. No Python, no training
-loop, no data leaving the process, and **no network request of any kind** — not a usage ping, not
-a version check. Causal analysis runs on the data that is worth analysing.
+loop, no data leaving the process, and **no network request you did not ask for by name**: no
+usage ping, no version check. The one function that can reach the network is `do_download`, and it
+does so only when you hand it a URL. Causal analysis runs on the data that is worth analysing.
 
 ```sql
 SELECT estimand, estimator, round(estimate, 2) AS estimate, round(ci_low, 2), round(ci_high, 2)
@@ -477,7 +478,13 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   correctly specified AIPW restricted to the same five covariates returns 4.07, so the budget
   rather than the model does most of the damage. `ensemble := k` spreads the choice of covariates
   across draws, which widens the interval from ±0.006 to ±0.31, but dropped confounders are bias
-  and no resampling interval covers bias. Use CausalPFN. `model := 'causalfm'` is not exported.
+  and no resampling interval covers bias. Use CausalPFN.
+- **CausalFM is not exported, deliberately.** Its published front-door checkpoint returns the
+  same number, -0.032, for every row of every dataset, and its reported PEHE is exactly what that
+  constant scores (predicting zero does slightly better). Its IV checkpoint responds to its input
+  but beats predicting zero by only 7%, and where an instrument is strong enough to identify the
+  effect it returns roughly the confounded naive difference: 3.00 against a truth of 2.0, where
+  `do_iv` returns 2.04. The evidence reproduces with `scripts/causalfm_check.py`.
 - **The foundation-model path is close to the CausalPFN package's CPU speed, not level with it.**
   On 8,000 rows the default takes 31.3 s (median of three runs) against the package's 22.5 s, and
   `duckdo_query_chunk = 2048` closes the gap: 23.0 s at a 2.7 GB peak. It used to take 126 s,

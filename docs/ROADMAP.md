@@ -22,7 +22,7 @@ The timing is favourable. A class of **causal foundation models** (CFMs) — tra
 |---|---|---|---|---|---|
 | **CausalPFN** ([repo](https://github.com/vdblm/CausalPFN), [HF](https://huggingface.co/vdblm/causalpfn)) | Backdoor (ignorability) | — | Hugging Face | Apache-2.0 | CATE + ATE with calibrated intervals. Best default. |
 | **Do-PFN** ([repo](https://github.com/jr2021/Do-PFN)) | Non-identifiable prior | 7.3M | GitHub | CC BY 4.0 | Full interventional distribution; expresses uncertainty under hidden confounding. Tiny. |
-| **CausalFM** ([repo](https://github.com/yccm/CausalFM)) | Backdoor / front-door / IV | — | GitHub | verify at integration | Separate checkpoint per identification setting. |
+| **CausalFM** ([repo](https://github.com/yccm/CausalFM)) | Backdoor / front-door / IV | — | GitHub | Apache-2.0 (verified) | **Evaluated and not exported**: see section 9, item 2. |
 
 The reference architecture for running such models inside DuckDB already exists and is proven: `anofox_tabfm` statically links ONNX Runtime, compiles **weight-free** ONNX graphs into the extension binary, and downloads weights from Hugging Face into a user-owned cache on first use. DuckDo should borrow that shape rather than reinvent it.
 
@@ -229,7 +229,7 @@ src/
 | 3 | Diagnostics and refutation | 0.3.0 | yes | **DONE** — balance, overlap, diagnose, 5 refuters, E-value + robustness value |
 | 4 | Graphs and identification | 0.4.0 | yes | **DONE** — d-separation, backdoor/front-door/IV, covariate grading |
 | 5 | Inference runtime | 0.5.0 | yes (models opt-in) | **DONE** — ONNX Runtime linked behind a build flag, model catalog, session cache, and a parity gate the export refuses to pass below 1e-4 (measured 4.3e-06 to 8.1e-06) |
-| 6 | CFM estimators | 0.6.0 | opt-in | **DONE for CausalPFN and Do-PFN** — CausalPFN matches AIPW (3.061 vs 3.063, truth 2.981) with CATE correlation 0.9995 and no shrinkage; Do-PFN shrinks to 2.631, reproduced and reported. CausalFM not exported |
+| 6 | CFM estimators | 0.6.0 | opt-in | **DONE for CausalPFN and Do-PFN** — CausalPFN matches AIPW (3.061 vs 3.063, truth 2.981) with CATE correlation 0.9995 and no shrinkage; Do-PFN shrinks to 2.631, reproduced and reported. CausalFM evaluated and declined (section 9, item 2) |
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
@@ -460,7 +460,7 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
 2. **Model export.** Convert the reference PyTorch checkpoints to ONNX with dynamic axes on both the context (n rows) and feature dimensions:
    - **CausalPFN** — from the Hugging Face checkpoint. Its Python package pulls `faiss-cpu`, which strongly suggests retrieval-based context selection for datasets larger than the context window; that selection logic must be reimplemented in C++, not exported into the graph.
    - **Do-PFN** — 7.3M parameters, small enough to be an easy first target. Start here to de-risk the export pipeline.
-   - **CausalFM** — one checkpoint per identification setting, so the registry must key on `(model, setting)`.
+   - **CausalFM** — one checkpoint per identification setting, so the registry must key on `(model, setting)`. *Evaluated and not exported; see section 9, item 2.*
    - Export scripts live in `scripts/export/`, are pinned to exact upstream commits, and emit a manifest recording checkpoint hash, opset, and dynamic-axis names.
 3. **Weight-free graphs compiled into the binary**; weights downloaded on demand.
 4. **Download and cache.** `do_download` over `httpfs`, into `~/.cache/duckdo` (override via `duckdo_cache_dir`), with checksum verification, resume, and a clear message if the cache is not writable. Gated repositories use standard DuckDB secrets:
@@ -503,7 +503,7 @@ Phases 2, 3, and 4 are independently valuable and can proceed in parallel once P
    Whichever runs, the result row says so and reports the effective sample size.
 3. **CATE and ATE paths.** Per-row CATE from the model directly; ATE by marginalizing, with the **shrinkage bias** the CFM overview paper documents for population-level estimates corrected or, at minimum, reported. Do not quietly ship a known-biased ATE.
 4. **Interval calibration.** Use the models' native calibrated uncertainty where available; validate empirical coverage on held-out synthetic DGPs and correct if coverage is off. A 95% interval that covers 80% of the time is worse than no interval.
-5. **Model routing.** `model := 'causalpfn' | 'do_pfn' | 'causalfm'`, with the identification setting checked against the registered graph when one exists — asking for a backdoor model on a graph with an unblocked backdoor path is an error worth raising.
+5. **Model routing.** `model := 'causalpfn' | 'do_pfn'` (`'causalfm'` was planned and declined, see section 9), with the identification setting checked against the registered graph when one exists — asking for a backdoor model on a graph with an unblocked backdoor path is an error worth raising.
 6. **Classical fallback.** If weights are not downloaded, `do_ate` falls back to AIPW with an explicit note in the result rather than failing — but never the reverse, and never silently.
 7. **Head-to-head validation.** Same benchmark suite as Phase 2 (IHDP, Lalonde, ACIC, RealCause-Lalonde). Publish DuckDo's CFM numbers next to the published Python numbers and next to DuckDo's own classical estimators. If the CFM does not beat AIPW on a benchmark, say so in the docs.
 
@@ -629,7 +629,7 @@ to leave room for the 2.2x.
      name: duckdo
      description: Causal inference inside DuckDB — treatment effects, interventions
        and counterfactuals in SQL, with classical estimators and causal foundation
-       models (CausalPFN, Do-PFN, CausalFM) on ONNX Runtime
+       models (CausalPFN, Do-PFN) on ONNX Runtime
      version: '2026.MM.DD'
      language: C++
      build: cmake
@@ -695,9 +695,9 @@ to leave room for the 2.2x.
 5. ~~**No telemetry.**~~ **DONE and verified rather than asserted.** The extension contains no HTTP
    client and no socket code; the only two URLs in `src/` are attribution strings naming where each
    model came from, printed by `do_list_models()` and never fetched. `docs/REPRODUCIBILITY.md`
-   ships the one-line grep that checks it. Note that `do_download` — named in this document's
-   earlier drafts and in item 9 below — **does not exist**; weights are exported locally, so there
-   is currently no code path that fetches anything at all.
+   ships the one-line grep that checks it. `do_download` now exists (item 11 below). It reads through
+   DuckDB's file system, so DuckDo itself still opens no connection, and it has no default source,
+   so no URL is reached that the user did not write.
 
 ### Exit gate
 
@@ -775,7 +775,7 @@ Synthetic data with known ground truth is the backbone. A generator that emits D
 - **Zero model weights in the repository.** Only weight-free graphs and random-init test fixtures.
 - Per-model license reported in `do_list_models()` with a `commercial` boolean, gated behind `duckdo_accept_model_license` for anything non-permissive.
 - **Do-PFN is CC BY 4.0** — attribution is required downstream, so it must be surfaced in the docs and the model catalog, not buried.
-- CausalFM's license must be verified at integration time; the table in section 1 marks it as unconfirmed.
+- ~~CausalFM's license must be verified at integration time.~~ Verified: Apache-2.0, for both the original repository and the toolkit that ships the weights. Moot, since the model was not exported.
 
 ### Security and privacy
 
@@ -829,9 +829,32 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
    `[3.007, 3.121]` contains it. What remains is the model's *own* parameter uncertainty, which the
    ensemble does not touch — CausalPFN's package ships a calibration routine DuckDo has not
    reimplemented.
-2. **Export CausalFM.** Two of the three models from section 1 now run. CausalFM would add
-   *model-based* front-door and IV estimation; the classical versions already exist as `do_iv` and
-   `do_frontdoor`, so this is no longer a coherence gap, just an additional engine.
+2. ~~**Export CausalFM.**~~ **Evaluated and declined.** The evidence is in `scripts/causalfm_check.py`.
+   The weights exist: `yccm/CausalFM-toolkit` ships four checkpoints under Apache-2.0. They load, and
+   they reproduce the authors' published PEHE exactly, 0.8466 for front-door and 0.4223 for binary IV,
+   on the authors' own test sets with the authors' own protocol. That evaluation never reported the
+   baseline of predicting a constant. Measured against that baseline:
+
+   | checkpoint | PEHE | predicting zero | what the output does |
+   |---|---|---|---|
+   | front-door | 0.8466 | **0.8388** | varies by 4e-9 per row: -0.032 for every row of every dataset |
+   | binary IV | 0.4223 | 0.4527 | responds, 7% better than zero, on test sets where 8 of 10 instruments are weak (first-stage F 0.0-7.7) |
+   | standard | - | - | PEHE 0.85-1.85 against 0.07-0.1 for CausalPFN and AIPW on the same DGP; shrinks 24% at 25 covariates |
+
+   **The published front-door checkpoint is a constant function.** Its reported number is exactly
+   the score of a constant predictor. The IV checkpoint does respond to its input, but on a
+   strong-instrument DGP where the effect is identified it returns 2.997 against a truth of 2.0,
+   with the confounded naive difference at 2.937, while `do_iv` returns 2.039. Exporting either would
+   put a wrong answer behind DuckDo's SQL with DuckDo's name on it. The classical `do_frontdoor`
+   and `do_iv` remain the only engines for those settings. They are not immune either: on the
+   authors' weak-instrument data `do_iv` swings from -2.2 to 17.5. But it flags every one of those
+   cases `weak_instrument = true` instead of returning a confident number.
+
+   Two notes for anyone revisiting this. First, the toolkit's bundled TabPFN fork does not import
+   under scikit-learn 1.9, because its compat layer needs the removed `_is_pandas_df`. The check
+   script loads the networks by registering the package without running its `__init__`, which the
+   networks never needed. Second, the models require standardised X and Y. Given raw inputs, the
+   standard checkpoint's CATE correlates *negatively* with the truth.
 3. ~~**Statically link ONNX Runtime**~~ **DONE differently — the premise was wrong.** No official
    static build of ONNX Runtime is published, building one per platform is a multi-hour job, and
    the extension this roadmap named as its precedent (`anofox_tabfm`, risk 4) does not static-link
@@ -937,7 +960,16 @@ Phases 0–4, 7, 8 (partially) and 9 (partially) are done. What is next, in orde
     Three runs put that cell at 22.2 s. The slowdown was noise, and so was the explanation. A
     single run of the same configuration on this machine varies by up to a quarter, which is
     why every figure quoted here is now a median.
-11. **Write `do_download` and host the exported graphs**, rather than requiring every user to run
-    the export script. It does not exist today, which is also why DuckDo currently makes no network
-    request at all — a property worth keeping deliberately rather than losing by accident.
+11. ~~**Write `do_download`**~~ **DONE.** Hosting the exported graphs is still open, and it is not
+    DuckDo's decision alone. `do_download(model, source := ...)` copies a model's artifacts from a
+    directory or URL into the model directory through DuckDB's virtual file system. A URL
+    therefore goes through DuckDB's `httpfs`, and DuckDo still contains no HTTP client. Each file
+    lands in a `.part` file that is renamed only on success. Existing files are kept unless
+    `overwrite := true`. Every row carries the SHA-256 of the bytes that landed, and the tests
+    check it against DuckDB's own `sha256()`. There is no default source.
+
+    Hosting is the remaining half. It means redistributing the upstream weights somewhere public:
+    Apache-2.0 for CausalPFN, CC BY 4.0 with attribution for Do-PFN. That is the maintainer's
+    call. Once they are hosted, pin their checksums into the catalog and document that URL as the
+    source.
 12. **Submit** the `description.yml` PR to `duckdb/community-extensions`.

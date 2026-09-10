@@ -12,10 +12,13 @@
 //===----------------------------------------------------------------------===//
 #include "duckdo/runtime.hpp"
 
+#include "duckdb/common/file_open_flags.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdo/estimators.hpp"
 #include "duckdo/functions.hpp"
+#include "mbedtls_wrapper.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -905,9 +908,171 @@ unique_ptr<FunctionData> BindDevices(ClientContext &, TableFunctionBindInput &, 
 	return std::move(bind);
 }
 
+// --- do_download ------------------------------------------------------------
+//
+// DuckDo contains no HTTP client, and this does not add one. Every byte goes
+// through DuckDB's own virtual file system, which hands a local path to the
+// local file system and an HTTPS URL to the httpfs extension. So the network
+// is reachable from here only when the user calls this function with a URL, and
+// only through an extension DuckDB loads - nothing in DuckDo opens a socket.
+
+void EnsureDirectory(FileSystem &fs, const string &dir) {
+	if (dir.empty() || dir.back() == ':' || fs.DirectoryExists(dir)) {
+		return;
+	}
+	const auto cut = dir.find_last_of("/\\");
+	if (cut != string::npos && cut > 0) {
+		EnsureDirectory(fs, dir.substr(0, cut));
+	}
+	fs.CreateDirectory(dir);
+}
+
+string HexDigest(duckdb_mbedtls::MbedTlsWrapper::SHA256State &sha) {
+	char hex[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_TEXT];
+	sha.FinishHex(hex);
+	return string(hex, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_TEXT);
+}
+
+//! Stream one file to `to`, hashing on the way. The bytes land in a `.part` file
+//! that is renamed only once the copy has finished, so an interrupted download
+//! can never be mistaken for a model - which matters here, because an artifact
+//! that exists is an artifact do_list_models reports as ready.
+std::pair<int64_t, string> CopyAndHash(FileSystem &fs, const string &from, const string &to) {
+	const string part = to + ".part";
+	int64_t total = 0;
+	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
+	try {
+		auto in = fs.OpenFile(from, FileFlags::FILE_FLAGS_READ);
+		auto out = fs.OpenFile(part, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		vector<data_t> buffer(1 << 20);
+		while (true) {
+			const auto got = in->Read(buffer.data(), buffer.size());
+			if (got <= 0) {
+				break;
+			}
+			sha.AddBytes(const_data_ptr_t(buffer.data()), static_cast<idx_t>(got));
+			out->Write(buffer.data(), static_cast<idx_t>(got));
+			total += got;
+		}
+		out->Sync();
+		out->Close();
+		in->Close();
+	} catch (std::exception &ex) {
+		if (fs.FileExists(part)) {
+			fs.RemoveFile(part);
+		}
+		throw BinderException("duckdo: could not copy '%s': %s", from, ex.what());
+	}
+	if (fs.FileExists(to)) {
+		fs.RemoveFile(to);
+	}
+	fs.MoveFile(part, to);
+	return {total, HexDigest(sha)};
+}
+
+std::pair<int64_t, string> HashFile(FileSystem &fs, const string &path) {
+	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
+	auto in = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	vector<data_t> buffer(1 << 20);
+	int64_t total = 0;
+	while (true) {
+		const auto got = in->Read(buffer.data(), buffer.size());
+		if (got <= 0) {
+			break;
+		}
+		sha.AddBytes(const_data_ptr_t(buffer.data()), static_cast<idx_t>(got));
+		total += got;
+	}
+	return {total, HexDigest(sha)};
+}
+
+unique_ptr<FunctionData> BindDownload(ClientContext &context, TableFunctionBindInput &input,
+                                      vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"model", "file", "bytes", "sha256", "status", "source"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
+	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		throw BinderException("duckdo: do_download needs a model id, e.g. do_download('causalpfn', source := "
+		                      "'/path/to/exported/models')");
+	}
+	const string id = StringUtil::Lower(input.inputs[0].ToString());
+	const ModelInfo *model = FindModel(id);
+	if (!model) {
+		throw BinderException("duckdo: unknown model '%s'. Available: %s", id, KnownModels());
+	}
+
+	string source;
+	bool overwrite = false;
+	auto entry = input.named_parameters.find("source");
+	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
+		source = entry->second.ToString();
+	}
+	entry = input.named_parameters.find("overwrite");
+	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
+		overwrite = entry->second.GetValue<bool>();
+	}
+	if (source.empty()) {
+		// No hosted copy of the weights exists, so there is no default to fall
+		// back on - and a default URL is exactly the kind of network request a
+		// user should never make by accident.
+		const char *script =
+		    model->kind == ModelKind::CAUSALPFN ? "export_causalpfn.py" : "export_dopfn.py --repo <Do-PFN checkout>";
+		throw BinderException("duckdo: do_download needs source := '<directory or URL>' holding %s's exported "
+		                      "artifacts. There is no default: no hosted copy exists. Export them yourself with "
+		                      "`python scripts/export/%s --out <dir>`, then point source at that directory or at "
+		                      "wherever someone has already put them",
+		                      id, script);
+	}
+	while (source.size() > 1 && (source.back() == '/' || source.back() == '\\')) {
+		source.pop_back();
+	}
+
+	vector<string> files;
+	if (model->context_ladder.empty()) {
+		files.push_back(model->graph_pattern);
+	} else {
+		for (auto rung : model->context_ladder) {
+			files.push_back(StringUtil::Format(model->graph_pattern, static_cast<unsigned long long>(rung)));
+		}
+	}
+	files.push_back(model->weights_file);
+	if (model->Split()) {
+		files.push_back(model->decode_graph);
+		files.push_back(model->decode_weights);
+	}
+	if (!model->manifest_file.empty()) {
+		files.push_back(model->manifest_file);
+	}
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	const string dir = ModelDir(context);
+	EnsureDirectory(fs, dir);
+
+	auto bind = make_uniq<ResultBindData>();
+	for (auto &name : files) {
+		const string from = source + "/" + name;
+		const string to = dir + "/" + name;
+		if (!overwrite && fs.FileExists(to)) {
+			auto kept = HashFile(fs, to);
+			bind->rows.push_back({Value(id), Value(name), Value::BIGINT(kept.first), Value(kept.second),
+			                      Value("kept: already present; overwrite := true replaces it"), Value(from)});
+			continue;
+		}
+		auto copied = CopyAndHash(fs, from, to);
+		bind->rows.push_back({Value(id), Value(name), Value::BIGINT(copied.first), Value(copied.second),
+		                      Value("downloaded"), Value(from)});
+	}
+	return std::move(bind);
+}
+
 } // namespace
 
 void RegisterModelFunctions(ExtensionLoader &loader) {
+	TableFunction download("", {LogicalType::VARCHAR}, EmitRows, BindDownload, InitGlobal);
+	download.named_parameters["source"] = LogicalType::VARCHAR;
+	download.named_parameters["overwrite"] = LogicalType::BOOLEAN;
+	RegisterUnderBothNames(loader, download, "download");
+
 	TableFunction models("", vector<LogicalType>(), EmitRows, BindListModels, InitGlobal);
 	RegisterUnderBothNames(loader, models, "list_models");
 	TableFunction models_alias("", vector<LogicalType>(), EmitRows, BindListModels, InitGlobal);
