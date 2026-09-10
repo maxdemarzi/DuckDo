@@ -380,6 +380,9 @@ void RegisterEstimationFunctions(ExtensionLoader &loader) {
 	for (auto &entry : effects) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);
+		// Only where it is honoured. In the shared list, every function that
+		// ignored it would return intervals that look clustered and are not.
+		fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 		RegisterUnderBothNames(loader, fn, entry.name);
 	}
 
@@ -390,6 +393,7 @@ void RegisterEstimationFunctions(ExtensionLoader &loader) {
 	TableFunction by("", {LogicalType::VARCHAR}, EmitRows, BindAteBy, InitGlobal);
 	AddCommonNamedParameters(by);
 	by.named_parameters["by"] = LogicalType::LIST(LogicalType::VARCHAR);
+	by.named_parameters["cluster"] = LogicalType::VARCHAR;
 	RegisterUnderBothNames(loader, by, "ate_by");
 }
 

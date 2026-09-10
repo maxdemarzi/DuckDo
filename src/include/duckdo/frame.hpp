@@ -41,6 +41,10 @@ struct CausalSpec {
 	string refute_method;
 	//! Optional column carried through to per-row output so results can be joined.
 	string id_column;
+	//! Optional column naming the independent unit when a row is not one - an
+	//! order joined to its customer, a visit joined to its patient. Folds,
+	//! standard errors and bootstrap resamples then treat the cluster as the unit.
+	string cluster_column;
 	//! Optional boolean column naming a targeting rule, for do_policy_value.
 	string policy_column;
 	//! Optional numeric column carried through unencoded: the instrument for
@@ -123,6 +127,14 @@ struct CausalFrame {
 	//! Values of the `id :=` column, rendered as text, when one was given.
 	vector<string> ids;
 	bool has_id = false;
+	//! The `cluster :=` column: raw labels as read, then a dense index per row,
+	//! numbered in canonical order so the numbering follows the data rather
+	//! than storage. Filled by BuildCanonicalOrder, on the final rows.
+	vector<string> cluster_labels;
+	vector<idx_t> cluster;
+	idx_t n_clusters = 0;
+	bool has_cluster = false;
+	string cluster_name;
 	//! Values of the `policy :=` boolean column, when one was given.
 	vector<uint8_t> policy;
 	bool has_policy = false;

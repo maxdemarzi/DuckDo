@@ -15,10 +15,11 @@ parentheses (`'(SELECT * FROM customers WHERE year = 2026)'`).
 |---|---|---|---|
 | `treatment` | VARCHAR | required | Binary treatment column |
 | `outcome` | VARCHAR | required¹ | Numeric or boolean outcome column |
-| `covariates` | VARCHAR[] | all others | Adjustment set. Omit to use every column except the treatment, outcome, `id`, `policy` and `exclude` |
+| `covariates` | VARCHAR[] | all others | Adjustment set. Omit to use every column except the treatment, outcome, `id`, `cluster`, `policy` and `exclude` |
 | `exclude` | VARCHAR[] | `[]` | Columns to drop when `covariates` is not given |
 | `estimator` | VARCHAR | `aipw` | See the estimator table below |
-| `id` | VARCHAR | — | Column carried through to per-row output so results can be joined back |
+| `id` | VARCHAR | — | Column carried through to per-row output so results can be joined back. When its values repeat, a warning says so: repeated ids usually mean rows are not independent units |
+| `cluster` | VARCHAR | — | `do_ate`, `do_att`, `do_atc` and `do_ate_by` only. The column naming the independent unit when a row is not one, as after joining customers to their orders. See [Clustered rows](#clustered-rows-effects-across-a-one-to-many-join) |
 | `treated` / `control` | VARCHAR | — | Explicit level mapping when the treatment is not already 0/1. Must be given together |
 | `seed` | BIGINT | 42 | Seeds fold assignment, bootstrap and every other draw |
 | `folds` | BIGINT | 5 | Cross-fitting folds |
@@ -84,6 +85,44 @@ The grouping columns come back first, as VARCHAR, followed by the `do_ate`
 columns. A group too small to estimate yields a row with NULL estimates and the
 reason in `warnings`, rather than failing the whole query. Capped by
 `duckdo_max_groups`.
+
+### Clustered rows: effects across a one-to-many join
+
+```sql
+SELECT estimate, std_error, variance_method
+FROM do_ate('(SELECT * FROM customers JOIN orders USING (customer_id))',
+            treatment := 'discount', outcome := 'revenue', covariates := ['tenure'],
+            cluster := 'customer_id');
+```
+
+Every estimator treats rows as independent units. A one-to-many join breaks that without
+saying so. Join 4,000 customers to three orders each and you get 12,000 rows, but still only
+4,000 independent units. Treated as independent, those rows give the same estimate with a
+standard error of 0.0203, against 0.0352 for the customers themselves. The interval is 42% too
+narrow, and nothing in the result says so. With `cluster := 'customer_id'`, the joined rows give
+back 1.978 and 0.0352, the customers' own answer to every printed digit.
+
+`cluster :=` names the unit, and three things then follow it:
+
+- **Folds.** All of a cluster's rows go to one fold, stratified by the cluster's majority arm.
+  Split across folds, a unit's rows would let the nuisance models see the rows they are scored
+  on.
+- **Standard errors.** Each row's influence contribution is summed within its cluster before
+  squaring, with a G/(G−1) correction. This covers the influence function (`aipw`, `ipw`,
+  `dr_learner`), the DML sandwich and `naive`'s two-sample formula. With every row its own
+  cluster, it reduces to the ordinary standard error.
+- **The bootstrap.** Estimators with bootstrap intervals resample whole clusters.
+
+`variance_method` names the column and the cluster count. Clusters are numbered in content
+order, so the result still does not depend on row order. NULL cluster values are refused, and
+so are fewer than 10 clusters. Below 50 clusters a warning says the interval is optimistic.
+
+`cluster :=` is accepted only by `do_ate`, `do_att`, `do_atc` and `do_ate_by`. Every other
+function rejects it rather than ignoring it, because an interval that looks clustered and is not
+is worse than none.
+
+DuckDo cannot detect the problem on its own: a join leaves no trace in the rows. The one sign it
+can see is a repeated `id :=`, and any function given one warns when its values repeat.
 
 ### `do_ape`
 

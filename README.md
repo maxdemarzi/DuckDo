@@ -380,6 +380,27 @@ implies the same distribution in either direction. Also read `orientation_stabil
 and sometimes join a and b. At `alpha := 0.001` it is 0.98. Discovery assumes no hidden common
 causes, and real data usually has them.
 
+**When rows are not units, say what the unit is.** Joining customers to their orders turns each
+customer into several rows, and every estimator treats rows as independent. The estimate survives
+this, but the interval does not:
+
+| 4,000 customers | estimate | std. error |
+|---|---|---|
+| one row each | 1.978 | 0.0352 |
+| joined to 3 orders each | 1.979 | 0.0203 |
+| joined, `cluster := 'customer_id'` | 1.978 | 0.0352 |
+
+```sql
+SELECT estimate, std_error, variance_method
+FROM do_ate('(SELECT * FROM customers JOIN orders USING (customer_id))',
+            treatment := 'discount', outcome := 'revenue', cluster := 'customer_id');
+```
+
+The join gives an interval 42% too narrow, with no warning, because a join leaves no trace in the
+rows. `cluster :=` makes the customer the unit for cross-fitting folds, standard errors and
+bootstrap resamples, and gives back the customers' own answer. A repeated `id :=` is the one sign
+DuckDo can see without being told, so any function given one warns when its values repeat.
+
 ### Interventions - querying a world that did not happen
 
 ```sql

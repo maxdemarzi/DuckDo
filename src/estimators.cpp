@@ -55,6 +55,33 @@ namespace {
 vector<idx_t> AssignFolds(const CausalFrame &frame, idx_t folds, int64_t seed) {
 	vector<idx_t> assignment(frame.n, 0);
 	std::mt19937_64 rng(static_cast<uint64_t>(seed));
+	if (frame.has_cluster) {
+		// Every row of a cluster lands in one fold. A unit with rows on both sides
+		// of a split lets the nuisance models see the rows they are scored on.
+		// Clusters are stratified by their majority arm.
+		vector<double> treated(frame.n_clusters, 0.0), size(frame.n_clusters, 0.0);
+		for (idx_t i = 0; i < frame.n; i++) {
+			treated[frame.cluster[i]] += frame.t[i];
+			size[frame.cluster[i]] += 1.0;
+		}
+		vector<idx_t> fold_of(frame.n_clusters, 0);
+		for (bool majority_treated : {false, true}) {
+			vector<idx_t> clusters;
+			for (idx_t g = 0; g < frame.n_clusters; g++) {
+				if ((2.0 * treated[g] >= size[g]) == majority_treated) {
+					clusters.push_back(g);
+				}
+			}
+			std::shuffle(clusters.begin(), clusters.end(), rng);
+			for (idx_t k = 0; k < clusters.size(); k++) {
+				fold_of[clusters[k]] = k % folds;
+			}
+		}
+		for (idx_t i = 0; i < frame.n; i++) {
+			assignment[i] = fold_of[frame.cluster[i]];
+		}
+		return assignment;
+	}
 	for (double arm : {0.0, 1.0}) {
 		vector<idx_t> rows = frame.ArmRows(arm);
 		std::shuffle(rows.begin(), rows.end(), rng);
@@ -185,9 +212,33 @@ vector<double> AipwPseudoOutcome(const CausalFrame &frame, const NuisanceFit &fi
 
 namespace {
 
+//! Cluster-robust standard error of a mean over `rows`, from each row's
+//! centred contribution. Rows of one cluster are not independent, so their
+//! deviations are summed within the cluster before squaring, with the usual
+//! G / (G - 1) correction. With every row its own cluster this is exactly the
+//! ordinary influence-function standard error.
+double ClusterSe(const CausalFrame &frame, const vector<idx_t> &rows, const vector<double> &centred) {
+	vector<double> total(frame.n_clusters, 0.0);
+	vector<uint8_t> seen(frame.n_clusters, 0);
+	for (auto r : rows) {
+		total[frame.cluster[r]] += centred[r];
+		seen[frame.cluster[r]] = 1;
+	}
+	double acc = 0.0, clusters = 0.0;
+	for (idx_t g = 0; g < frame.n_clusters; g++) {
+		acc += total[g] * total[g];
+		clusters += seen[g];
+	}
+	if (clusters < 2.0 || rows.empty()) {
+		return 0.0;
+	}
+	return std::sqrt(clusters / (clusters - 1.0) * acc) / static_cast<double>(rows.size());
+}
+
 //! Mean and influence-function standard error over `rows` of a per-row score
 //! whose mean is the target parameter.
-void MeanAndInfluenceSe(const vector<double> &score, const vector<idx_t> &rows, double &estimate, double &se) {
+void MeanAndInfluenceSe(const CausalFrame &frame, const vector<double> &score, const vector<idx_t> &rows,
+                        double &estimate, double &se) {
 	if (rows.empty()) {
 		estimate = 0.0;
 		se = 0.0;
@@ -198,6 +249,14 @@ void MeanAndInfluenceSe(const vector<double> &score, const vector<idx_t> &rows, 
 		sum += score[r];
 	}
 	estimate = sum / static_cast<double>(rows.size());
+	if (frame.has_cluster) {
+		vector<double> centred(frame.n, 0.0);
+		for (auto r : rows) {
+			centred[r] = score[r] - estimate;
+		}
+		se = ClusterSe(frame, rows, centred);
+		return;
+	}
 	double var = 0.0;
 	for (auto r : rows) {
 		const double d = score[r] - estimate;
@@ -219,6 +278,18 @@ EffectResult Naive(const CausalFrame &frame) {
 	const double v1 = Variance(y1) / static_cast<double>(std::max<size_t>(y1.size(), 1));
 	const double v0 = Variance(y0) / static_cast<double>(std::max<size_t>(y0.size(), 1));
 	res.std_error = std::sqrt(v1 + v0);
+	if (frame.has_cluster && !y1.empty() && !y0.empty()) {
+		// The difference in means as an average of per-row contributions, so the
+		// contributions can be summed within clusters.
+		const double m1 = Mean(y1), m0 = Mean(y0);
+		const double p1 = static_cast<double>(y1.size()) / static_cast<double>(frame.n);
+		const double p0 = 1.0 - p1;
+		vector<double> centred(frame.n, 0.0);
+		for (idx_t i = 0; i < frame.n; i++) {
+			centred[i] = frame.t[i] == 1.0 ? (frame.y[i] - m1) / p1 : -(frame.y[i] - m0) / p0;
+		}
+		res.std_error = ClusterSe(frame, frame.AllRows(), centred);
+	}
 	res.warnings.push_back("'naive' adjusts for nothing; it is a baseline, not a causal estimate");
 	return res;
 }
@@ -253,7 +324,7 @@ EffectResult Ipw(const CausalFrame &frame, const NuisanceFit &fit, Estimand esti
 		score[i] = c1 - c0;
 	}
 	double centred_est = 0.0;
-	MeanAndInfluenceSe(score, fit.rows, centred_est, res.std_error);
+	MeanAndInfluenceSe(frame, score, fit.rows, centred_est, res.std_error);
 	res.estimate = m1 - m0;
 	if (estimand != Estimand::ATE) {
 		res.warnings.push_back("'ipw' reports the ATE; use estimator := 'aipw' for ATT/ATC");
@@ -267,7 +338,7 @@ EffectResult Aipw(const CausalFrame &frame, const NuisanceFit &fit, Estimand est
 	res.variance_method = "influence function";
 	if (estimand == Estimand::ATE) {
 		auto psi = AipwPseudoOutcome(frame, fit);
-		MeanAndInfluenceSe(psi, fit.rows, res.estimate, res.std_error);
+		MeanAndInfluenceSe(frame, psi, fit.rows, res.estimate, res.std_error);
 		return res;
 	}
 	// ATT / ATC: reweight the doubly-robust score onto the arm of interest.
@@ -294,7 +365,7 @@ EffectResult Aipw(const CausalFrame &frame, const NuisanceFit &fit, Estimand est
 			score[i] = (t * w * (frame.y[i] - fit.mu1[i]) - (1.0 - t) * (frame.y[i] - fit.mu1[i])) / share;
 		}
 	}
-	MeanAndInfluenceSe(score, fit.rows, res.estimate, res.std_error);
+	MeanAndInfluenceSe(frame, score, fit.rows, res.estimate, res.std_error);
 	return res;
 }
 
@@ -330,6 +401,15 @@ EffectResult Dml(const CausalFrame &frame, const NuisanceFit &fit) {
 	const double n = static_cast<double>(fit.rows.size());
 	const double bread = den / n;
 	res.std_error = std::sqrt(meat / n) / (std::fabs(bread) * std::sqrt(n));
+	if (frame.has_cluster) {
+		vector<double> scores(frame.n, 0.0);
+		for (auto i : fit.rows) {
+			const double g = fit.e[i] * fit.mu1[i] + (1.0 - fit.e[i]) * fit.mu0[i];
+			const double tt = frame.t[i] - fit.e[i];
+			scores[i] = tt * ((frame.y[i] - g) - res.estimate * tt);
+		}
+		res.std_error = ClusterSe(frame, fit.rows, scores) / std::fabs(bread);
+	}
 	return res;
 }
 
@@ -465,13 +545,35 @@ double BootstrapSe(const CausalFrame &frame, const CausalSpec &spec, Estimand es
 	vector<double> draws;
 	draws.reserve(reps);
 
+	// Clustered data resamples whole clusters: resampling rows would treat the
+	// rows of one unit as independent draws, which is the error being corrected.
+	vector<vector<idx_t>> members;
+	if (frame.has_cluster) {
+		members.resize(frame.n_clusters);
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			const idx_t r = frame.Draw(rank);
+			members[frame.cluster[r]].push_back(r);
+		}
+	}
+	std::uniform_int_distribution<idx_t> pick_cluster(0, frame.n_clusters > 0 ? frame.n_clusters - 1 : 0);
+
 	for (idx_t b = 0; b < reps; b++) {
 		vector<idx_t> rows(frame.n);
 		vector<idx_t> rows_t0, rows_t1;
-		for (idx_t i = 0; i < frame.n; i++) {
-			const idx_t r = frame.Draw(pick(rng));
-			rows[i] = r;
-			(frame.t[r] == 1.0 ? rows_t1 : rows_t0).push_back(r);
+		if (frame.has_cluster) {
+			rows.clear();
+			for (idx_t g = 0; g < frame.n_clusters; g++) {
+				for (auto r : members[pick_cluster(rng)]) {
+					rows.push_back(r);
+					(frame.t[r] == 1.0 ? rows_t1 : rows_t0).push_back(r);
+				}
+			}
+		} else {
+			for (idx_t i = 0; i < frame.n; i++) {
+				const idx_t r = frame.Draw(pick(rng));
+				rows[i] = r;
+				(frame.t[r] == 1.0 ? rows_t1 : rows_t0).push_back(r);
+			}
 		}
 		if (rows_t0.size() < 3 || rows_t1.size() < 3) {
 			continue;
@@ -577,6 +679,10 @@ EffectResult EstimateEffect(const CausalFrame &frame, const CausalSpec &spec, Es
 		}
 	}
 
+	if (frame.has_cluster && res.variance_method != "none") {
+		res.variance_method += StringUtil::Format(", clustered on '%s' (%llu clusters)", frame.cluster_name,
+		                                          static_cast<unsigned long long>(frame.n_clusters));
+	}
 	res.estimand = estimand;
 	res.n = frame.n;
 	res.n_treated = frame.n_treated;

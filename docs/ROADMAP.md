@@ -233,7 +233,7 @@ src/
 | 7 | The `do()` surface | 0.7.0 | **yes** | **DONE on classical backends** — `do_predict`, `do_counterfactual`, `do_policy_value`, `do_uplift`, `do_optimal_policy`. Gains a CFM engine in phase 6 |
 | 8 | Scale and performance | 0.8.0 | — | **DONE bar spill** — `do_ate_by`, parallel dense accumulation (1M × 50 in 18.9 s against a 30 s gate, down from 101 s), `duckdo_max_rows` default raised to 1M, `scripts/benchmark.py`. Memory spill outstanding |
 | 9 | Ship | 1.0.0 | — | **PARTIAL** — `description.yml` and `docs/FUNCTIONS.md` are written; the submission PR and the wider docs site are outstanding |
-| 10 | Frontier | post-1.0 | — | **IN PROGRESS** — continuous and multi-valued treatments, panel/DiD (plain and doubly robust), synthetic control, longitudinal MSMs, survival (RMST), mediation and causal discovery landed; federated / multi-table estimation outstanding |
+| 10 | Frontier | post-1.0 | — | **IN PROGRESS** — continuous and multi-valued treatments, panel/DiD (plain and doubly robust), synthetic control, longitudinal MSMs, survival (RMST), mediation, causal discovery and cluster-robust estimation across one-to-many joins landed; federated pooling across sites outstanding |
 
 Phases 2, 3, and 4 are independently valuable and can proceed in parallel once Phase 1 lands. Phases 5 and 6 are strictly sequential.
 
@@ -766,7 +766,20 @@ Roughly in order of value per unit of effort:
    Comments are now skipped, and an undirected edge is an error that names both ends. That same error is how the proposal's unoriented edges are made impossible to skip.
 
    Still open: tests for non-Gaussian or mixed data, and FCI for hidden confounders. FCI is the honest answer to the assumption real data breaks most often.
-7. **Federated / multi-table estimation** — effects across joins without materializing the join.
+7. **Federated / multi-table estimation** — effects across joins without materializing the join. **DONE for effects across joins**; federated pooling is still open.
+
+   Taken literally, "without materializing the join" is not a goal DuckDo should have. Cross-fitted nuisance models need row-level data, so the frame is materialised by design, and a join is already a valid first argument. What actually went wrong across joins was correctness. A one-to-many join, such as customers joined to their orders, turns one unit into several rows, and every estimator treated them as independent. On 4,000 units joined to three orders each, the estimate was unchanged, but the standard error fell from 0.0352 to 0.0203: an interval 42% too narrow, with no warning. `id :=` did not help, because it was never checked for repeats.
+
+   `cluster :=` on `do_ate`, `do_att`, `do_atc` and `do_ate_by` makes the named column the unit, in three places:
+   - Folds are assigned by cluster, stratified by majority arm. Before, a unit's rows landed on both sides of a split, and the nuisance models saw the rows they were scored on.
+   - Influence-function, DML-sandwich and two-sample standard errors are summed within clusters.
+   - Bootstrap estimators resample whole clusters.
+
+   The joined rows then give back 1.978 and 0.0352, the units' own answer to every printed digit. Singleton clusters reproduce the ordinary standard error, as the G/(G−1) algebra says they should.
+
+   The parameter is registered only on the functions that honour it, so everywhere else it is rejected rather than ignored. Unclustered results are bitwise identical to before, across all nine estimators, ATT, ATC and `do_ate_by`, confirmed by diffing 17 values recorded at full precision. A repeated `id :=` now warns everywhere, since it is the one sign of the problem DuckDo can see without being told.
+
+   Still open: federated estimation across sites. Each site would share only (n, Σψ, Σψ²), and those pool exactly into an AIPW estimate and standard error. Clustering in the remaining functions (`do_cate`, the IV, mediation and survival estimators) is also still open.
 
 ---
 

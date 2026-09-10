@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace duckdb {
@@ -26,7 +28,63 @@ const char *EstimandName(Estimand e) {
 	}
 }
 
+static void SortCanonical(CausalFrame &frame);
+
+//! Settle what a unit is, once the rows are final and in canonical order.
+//!
+//! `cluster :=` labels are numbered densely in canonical order, so the numbering
+//! follows the data, and there have to be enough clusters for cluster-robust
+//! inference to mean anything. Without it, a repeated `id :=` is the one sign
+//! DuckDo can see that rows are not independent units: a one-to-many join, such
+//! as customers to their orders, turns each customer into several rows, and
+//! every interval computed as if they were independent is too narrow by about
+//! the square root of the repetition. Measured: 4,000 units joined to three
+//! orders each gave a standard error of 0.0203 against 0.0352 for the units
+//! themselves, with the same estimate and no warning.
+static void FinishUnits(CausalFrame &frame) {
+	if (frame.has_cluster) {
+		std::unordered_map<string, idx_t> index;
+		frame.cluster.assign(frame.n, 0);
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			const idx_t r = frame.canonical[rank];
+			const idx_t next = index.size();
+			frame.cluster[r] = index.emplace(frame.cluster_labels[r], next).first->second;
+		}
+		frame.n_clusters = index.size();
+		vector<string>().swap(frame.cluster_labels);
+		if (frame.n_clusters < 10) {
+			throw BinderException("duckdo: cluster column '%s' has only %llu distinct values. Cluster-robust "
+			                      "standard errors need many clusters - at least 10, and they are only reliable "
+			                      "past about 50",
+			                      frame.cluster_name, static_cast<unsigned long long>(frame.n_clusters));
+		}
+		if (frame.n_clusters < 50) {
+			frame.warnings.push_back(StringUtil::Format(
+			    "only %llu clusters; cluster-robust standard errors understate uncertainty below about 50",
+			    static_cast<unsigned long long>(frame.n_clusters)));
+		}
+		if (frame.n_clusters == frame.n) {
+			frame.warnings.push_back("every row is its own cluster, so cluster := changes only a small-sample "
+			                         "correction");
+		}
+	} else if (frame.has_id) {
+		std::unordered_set<string> distinct(frame.ids.begin(), frame.ids.end());
+		if (distinct.size() < frame.n) {
+			frame.warnings.push_back(StringUtil::Format(
+			    "id := repeats: %llu rows share %llu values. If rows with the same id are one unit - a join to "
+			    "orders, visits or events - they are not independent, and intervals computed as if they were are "
+			    "too narrow. do_ate, do_att, do_atc and do_ate_by take cluster := with the same column",
+			    static_cast<unsigned long long>(frame.n), static_cast<unsigned long long>(distinct.size())));
+		}
+	}
+}
+
 void BuildCanonicalOrder(CausalFrame &frame) {
+	SortCanonical(frame);
+	FinishUnits(frame);
+}
+
+static void SortCanonical(CausalFrame &frame) {
 	const idx_t n = frame.n;
 	const idx_t cols = frame.X.cols;
 	frame.canonical.resize(n);
@@ -306,6 +364,7 @@ CausalSpec CausalSpec::Parse(ClientContext &context, const vector<Value> &inputs
 	spec.policy = OptionalString(named, "policy", "");
 	spec.refute_method = OptionalString(named, "method", "placebo_treatment");
 	spec.id_column = OptionalString(named, "id", "");
+	spec.cluster_column = OptionalString(named, "cluster", "");
 	spec.policy_column = OptionalString(named, "policy", "");
 	spec.grid = OptionalIdx(named, "grid", 20);
 	spec.aux_column = OptionalString(named, "instrument", OptionalString(named, "mediator", ""));
@@ -461,6 +520,16 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		frame.has_id = true;
 	}
 
+	idx_t cluster_idx = DConstants::INVALID_INDEX;
+	if (!spec.cluster_column.empty()) {
+		cluster_idx = FindColumn(names, spec.cluster_column);
+		if (cluster_idx == DConstants::INVALID_INDEX) {
+			MissingColumn("cluster", spec.cluster_column, spec.relation, names);
+		}
+		frame.has_cluster = true;
+		frame.cluster_name = names[cluster_idx];
+	}
+
 	idx_t policy_idx = DConstants::INVALID_INDEX;
 	if (!spec.policy_column.empty()) {
 		policy_idx = FindColumn(names, spec.policy_column);
@@ -505,7 +574,7 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		// what was asked for.
 	} else {
 		for (idx_t i = 0; i < names.size(); i++) {
-			if (i == t_idx || i == y_idx || i == id_idx || i == policy_idx || i == aux_idx) {
+			if (i == t_idx || i == y_idx || i == id_idx || i == policy_idx || i == aux_idx || i == cluster_idx) {
 				continue;
 			}
 			bool excluded = false;
@@ -718,6 +787,11 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 		projection += plans[i].categorical ? plans[i].sql : ("CAST(" + plans[i].sql + " AS DOUBLE)");
 		projection += " AS __duckdo_c" + std::to_string(i);
 	}
+	// Last, after the covariates, so none of the positions above move.
+	const idx_t cluster_col = cov_base + plans.size();
+	if (frame.has_cluster) {
+		projection += ", CAST(" + QuoteIdentifier(names[cluster_idx]) + " AS VARCHAR) AS __duckdo_cluster";
+	}
 	string where = t_quoted + " IS NOT NULL";
 	if (!y_quoted.empty()) {
 		where += " AND " + y_quoted + " IS NOT NULL";
@@ -806,6 +880,15 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 					auto &aux_vec = chunk.data[aux_col];
 					const bool valid = FlatVector::Validity(aux_vec).RowIsValid(i);
 					frame.aux.push_back(valid ? FlatVector::GetData<double>(aux_vec)[i] : 0.0);
+				}
+				if (frame.has_cluster) {
+					auto &cluster_vec = chunk.data[cluster_col];
+					if (!FlatVector::Validity(cluster_vec).RowIsValid(i)) {
+						throw BinderException("duckdo: cluster column '%s' is NULL on some rows. Every row needs "
+						                      "the unit it belongs to; filter those rows out or fill them first",
+						                      frame.cluster_name);
+					}
+					frame.cluster_labels.push_back(FlatVector::GetData<string_t>(cluster_vec)[i].GetString());
 				}
 				for (idx_t c = 0; c < ncols; c++) {
 					auto &vec = chunk.data[c + cov_base];

@@ -1,0 +1,111 @@
+# name: test/sql/cluster.test
+# description: rows that are not independent units - a one-to-many join - get cluster-robust inference
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.31);
+
+statement ok
+CREATE TABLE units AS SELECT i AS unit_id, x, (random() < 1/(1+exp(-x)))::INT AS t, i % 4 AS grp
+FROM (SELECT i, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x FROM range(4000) r(i));
+
+statement ok
+CREATE TABLE outcomes AS SELECT unit_id, grp, x, t,
+    2.0*t + x + sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS y FROM units;
+
+# Each unit joined to three orders: 12,000 rows, 4,000 independent units.
+statement ok
+CREATE TABLE joined AS SELECT o.*, k FROM outcomes o JOIN (SELECT unit_id, k FROM units, range(3) r(k)) USING (unit_id);
+
+# The bug, recorded. Treating the joined rows as independent shrinks the
+# standard error by the square root of three, with the same estimate.
+query I
+SELECT round((SELECT std_error FROM do_ate('outcomes', treatment := 't', outcome := 'y', covariates := ['x'])) /
+             (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'])), 1);
+----
+1.7
+
+# cluster := puts it back: the same estimate, and a standard error within 10%
+# of the one the units themselves give.
+query II
+SELECT abs(j.estimate - u.estimate) < 0.02, j.std_error / u.std_error BETWEEN 0.9 AND 1.1
+FROM do_ate('outcomes', treatment := 't', outcome := 'y', covariates := ['x']) u,
+     do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id') j;
+----
+true	true
+
+query I
+SELECT variance_method FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id');
+----
+influence function, clustered on 'unit_id' (4000 clusters)
+
+# Every variance route clusters: the two-sample formula, the influence
+# function, the DML sandwich and the bootstrap.
+query IIII
+SELECT
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'naive', cluster := 'unit_id')) /
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'naive')) > 1.5,
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'ipw', cluster := 'unit_id')) /
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'ipw')) > 1.5,
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'dml', cluster := 'unit_id')) /
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 'dml')) > 1.5,
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 't_learner', cluster := 'unit_id')) /
+  (SELECT std_error FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], estimator := 't_learner')) > 1.5;
+----
+true	true	true	true
+
+# Clusters are numbered in content order, so row order still does not matter.
+statement ok
+CREATE TABLE joined_reordered AS SELECT * FROM joined ORDER BY hash(unit_id * 7 + k);
+
+query II
+SELECT abs(a.estimate - b.estimate) < 1e-9, abs(a.std_error - b.std_error) < 1e-9
+FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id') a,
+     do_ate('joined_reordered', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id') b;
+----
+true	true
+
+# A repeated id := is the one sign of the problem DuckDo can see without being
+# told, so it is named - and not on a table where ids are unique.
+query II
+SELECT
+  (SELECT len(list_filter(warnings, w -> w LIKE 'id := repeats%')) FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], id := 'unit_id')),
+  (SELECT len(list_filter(warnings, w -> w LIKE 'id := repeats%')) FROM do_ate('outcomes', treatment := 't', outcome := 'y', covariates := ['x'], id := 'unit_id'));
+----
+1	0
+
+# do_ate_by clusters within every group.
+query I
+SELECT count(*)
+FROM do_ate_by('joined', treatment := 't', outcome := 'y', covariates := ['x'], by := ['grp'], cluster := 'unit_id') c
+JOIN do_ate_by('joined', treatment := 't', outcome := 'y', covariates := ['x'], by := ['grp']) u USING (grp)
+WHERE c.std_error / u.std_error > 1.5;
+----
+4
+
+# --- refusals -----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_ate('SELECT *, CASE WHEN unit_id % 100 = 0 THEN NULL ELSE unit_id END AS u2 FROM joined',
+                     treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'u2');
+----
+is NULL on some rows
+
+statement error
+SELECT * FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'grp');
+----
+only 4 distinct values
+
+statement error
+SELECT * FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'nope');
+----
+nope
+
+# Only functions that honour cluster := accept it. Anywhere else it would be
+# ignored, and an interval that looks clustered and is not is worse than none.
+statement error
+SELECT * FROM do_cate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id');
+----
+cluster
