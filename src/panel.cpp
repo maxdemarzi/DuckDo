@@ -78,6 +78,13 @@ struct Panel {
 	idx_t n_units = 0;
 	idx_t n_periods = 0;
 	idx_t n_never = 0;
+	//! Unit-level covariates, one standardised row per unit, read at each unit's
+	//! first observed period so they are pre-treatment by construction. Present
+	//! only when covariates := was given, and then every group-time cell is
+	//! estimated doubly robustly rather than by a raw difference of mean changes.
+	Matrix X;
+	bool has_covariates = false;
+	vector<string> warnings;
 
 	double Y(idx_t unit, idx_t period) const {
 		return y[unit * n_periods + period];
@@ -96,7 +103,8 @@ string RequireColumn(const named_parameter_map_t &named, const char *key, const 
 }
 
 Panel LoadPanel(ClientContext &context, const string &relation, const string &unit_col, const string &period_col,
-                const string &treatment_col, const string &outcome_col, const char *fn) {
+                const string &treatment_col, const string &outcome_col, const char *fn,
+                const vector<string> &covariates = {}) {
 	const string rel = RelationSql(relation);
 	const string sql = "SELECT CAST(" + QuoteIdentifier(unit_col) + " AS VARCHAR) AS u, " + "CAST(" +
 	                   QuoteIdentifier(period_col) + " AS VARCHAR) AS p, " + "CAST(" + QuoteIdentifier(outcome_col) +
@@ -174,6 +182,87 @@ Panel LoadPanel(ClientContext &context, const string &relation, const string &un
 	if (panel.n_never == panel.n_units) {
 		throw BinderException("duckdo: no unit in '%s' is ever treated, so there is no effect to estimate", relation);
 	}
+
+	if (!covariates.empty()) {
+		for (auto &c : covariates) {
+			if (StringUtil::CIEquals(c, unit_col) || StringUtil::CIEquals(c, period_col) ||
+			    StringUtil::CIEquals(c, treatment_col) || StringUtil::CIEquals(c, outcome_col)) {
+				throw BinderException("duckdo: '%s' cannot be a covariate of %s: it is the unit, period, treatment or "
+				                      "outcome column",
+				                      c, fn);
+			}
+		}
+		string select, casts;
+		for (auto &c : covariates) {
+			select += ", " + QuoteIdentifier(c);
+			casts += ", CAST(" + QuoteIdentifier(c) + " AS DOUBLE)";
+		}
+		auto typed = RunQuery(context, "SELECT " + select.substr(2) + " FROM " + rel + " LIMIT 0",
+		                      string(fn) + " inspecting its covariates");
+		for (idx_t j = 0; j < covariates.size(); j++) {
+			const auto &type = typed->types[j];
+			if (!type.IsNumeric() && type.id() != LogicalTypeId::BOOLEAN) {
+				throw BinderException("duckdo: covariate '%s' has type %s; %s takes numeric covariates only. Encode it "
+				                      "first, e.g. one indicator column per level",
+				                      covariates[j], type.ToString(), fn);
+			}
+		}
+		// Each unit's values at the first period it is observed in: pre-treatment
+		// for every cohort, so the treatment cannot have moved them.
+		const string u_q = QuoteIdentifier(unit_col), p_q = QuoteIdentifier(period_col);
+		auto baseline = RunQuery(context,
+		                         "SELECT CAST(" + u_q + " AS VARCHAR)" + casts + " FROM " + rel + " WHERE " + u_q +
+		                             " IS NOT NULL AND " + p_q + " IS NOT NULL QUALIFY row_number() OVER (PARTITION BY " +
+		                             u_q + " ORDER BY " + p_q + ") = 1",
+		                         string(fn) + " reading baseline covariates");
+		const idx_t p = covariates.size();
+		panel.X.Resize(panel.n_units, p);
+		vector<uint8_t> present(panel.n_units * p, 0);
+		for (idx_t r = 0; r < baseline->RowCount(); r++) {
+			auto found = unit_index.find(baseline->GetValue(0, r).ToString());
+			if (found == unit_index.end()) {
+				continue;
+			}
+			for (idx_t j = 0; j < p; j++) {
+				const Value v = baseline->GetValue(1 + j, r);
+				if (!v.IsNull()) {
+					panel.X.At(found->second, j) = v.GetValue<double>();
+					present[found->second * p + j] = 1;
+				}
+			}
+		}
+		idx_t imputed = 0;
+		for (idx_t j = 0; j < p; j++) {
+			double sum = 0.0, count = 0.0;
+			for (idx_t u = 0; u < panel.n_units; u++) {
+				if (present[u * p + j]) {
+					sum += panel.X.At(u, j);
+					count += 1.0;
+				}
+			}
+			const double mean = count > 0.0 ? sum / count : 0.0;
+			double squares = 0.0;
+			for (idx_t u = 0; u < panel.n_units; u++) {
+				if (!present[u * p + j]) {
+					panel.X.At(u, j) = mean;
+					imputed++;
+				}
+				const double d = panel.X.At(u, j) - mean;
+				squares += d * d;
+			}
+			const double sd =
+			    std::max(std::sqrt(squares / std::max(1.0, static_cast<double>(panel.n_units) - 1.0)), 1e-12);
+			for (idx_t u = 0; u < panel.n_units; u++) {
+				panel.X.At(u, j) = (panel.X.At(u, j) - mean) / sd;
+			}
+		}
+		if (imputed > 0) {
+			panel.warnings.push_back(StringUtil::Format(
+			    "%llu baseline covariate values were NULL and were replaced by the column mean",
+			    static_cast<unsigned long long>(imputed)));
+		}
+		panel.has_covariates = true;
+	}
 	return panel;
 }
 
@@ -186,6 +275,108 @@ struct GroupTime {
 	idx_t n_control = 0;
 	bool valid = false;
 };
+
+//! One group-time comparison. Without covariates it is the Callaway-Sant'Anna
+//! cell - the treated cohort's mean change minus the comparison group's - with
+//! the arithmetic unchanged line for line, so an existing do_did returns the
+//! same bits it always did.
+//!
+//! With covariates it is Sant'Anna and Zhao's doubly robust panel estimator:
+//!
+//!   ATT(g,t) = E[ (w1 - w0) (dY - m0(X)) ]
+//!   w1 = D / E[D],   w0 = [p(X)(1-D)/(1-p(X))] / E[p(X)(1-D)/(1-p(X))]
+//!
+//! m0 regresses the change on X in the comparison group and p models being in
+//! the cohort rather than the comparison. It is consistent if either is right.
+//! Parametric, as in the paper, not cross-fitted: the interval is the cluster
+//! bootstrap, which refits both models on every draw.
+struct CellResult {
+	double att = 0.0;
+	idx_t n_treated = 0;
+	idx_t n_control = 0;
+	bool valid = false;
+};
+
+CellResult CellEffect(const Panel &panel, const vector<idx_t> &treated, const vector<idx_t> &comparison, idx_t t,
+                      idx_t base) {
+	CellResult cell;
+	if (!panel.has_covariates) {
+		double treated_change = 0.0;
+		idx_t treated_count = 0;
+		for (auto u : treated) {
+			if (panel.Seen(u, t) && panel.Seen(u, base)) {
+				treated_change += panel.Y(u, t) - panel.Y(u, base);
+				treated_count++;
+			}
+		}
+		double control_change = 0.0;
+		idx_t control_count = 0;
+		for (auto u : comparison) {
+			if (panel.Seen(u, t) && panel.Seen(u, base)) {
+				control_change += panel.Y(u, t) - panel.Y(u, base);
+				control_count++;
+			}
+		}
+		if (treated_count == 0 || control_count == 0) {
+			return cell;
+		}
+		cell.att = treated_change / static_cast<double>(treated_count) -
+		           control_change / static_cast<double>(control_count);
+		cell.n_treated = treated_count;
+		cell.n_control = control_count;
+		cell.valid = true;
+		return cell;
+	}
+
+	// A bootstrap draw can repeat a unit; each repeat is another row below, which
+	// is exactly the weighting a resample means. A unit is never in both lists:
+	// the comparison is never-treated or not yet treated as of t.
+	vector<double> change(panel.n_units, 0.0);
+	vector<double> in_cohort(panel.n_units, 0.0);
+	vector<idx_t> treated_rows, control_rows, all_rows;
+	for (auto u : treated) {
+		if (panel.Seen(u, t) && panel.Seen(u, base)) {
+			change[u] = panel.Y(u, t) - panel.Y(u, base);
+			in_cohort[u] = 1.0;
+			treated_rows.push_back(u);
+			all_rows.push_back(u);
+		}
+	}
+	for (auto u : comparison) {
+		if (panel.Seen(u, t) && panel.Seen(u, base)) {
+			change[u] = panel.Y(u, t) - panel.Y(u, base);
+			control_rows.push_back(u);
+			all_rows.push_back(u);
+		}
+	}
+	// Both working models need something to fit. A cohort of one, or a
+	// comparison group smaller than the covariate count, is left out rather than
+	// guessed at.
+	const idx_t cols = panel.X.cols;
+	if (treated_rows.size() < 2 || control_rows.size() < cols + 2) {
+		return cell;
+	}
+	const double lambda = 1e-6 * static_cast<double>(all_rows.size()) + 1e-8;
+	auto outcome = FitRidge(panel.X, change, control_rows, {}, lambda);
+	auto propensity = FitLogistic(panel.X, in_cohort, all_rows, {}, std::max(lambda, 1.0), 30);
+
+	double treated_term = 0.0;
+	for (auto u : treated_rows) {
+		treated_term += change[u] - outcome.Predict(panel.X.Row(u), cols);
+	}
+	double control_term = 0.0, control_weight = 0.0;
+	for (auto u : control_rows) {
+		const double p = std::min(std::max(propensity.Predict(panel.X.Row(u), cols), 1e-3), 1.0 - 1e-3);
+		const double w = p / (1.0 - p);
+		control_term += w * (change[u] - outcome.Predict(panel.X.Row(u), cols));
+		control_weight += w;
+	}
+	cell.att = treated_term / static_cast<double>(treated_rows.size()) - control_term / control_weight;
+	cell.n_treated = treated_rows.size();
+	cell.n_control = control_rows.size();
+	cell.valid = true;
+	return cell;
+}
 
 //! Compute every ATT(g, t) over a (possibly resampled) set of units.
 vector<GroupTime> GroupTimeEffects(const Panel &panel, const vector<idx_t> &units) {
@@ -226,31 +417,11 @@ vector<GroupTime> GroupTimeEffects(const Panel &panel, const vector<idx_t> &unit
 				comparison = &not_yet;
 			}
 
-			double treated_change = 0.0;
-			idx_t treated_count = 0;
-			for (auto u : entry.second) {
-				if (panel.Seen(u, t) && panel.Seen(u, base)) {
-					treated_change += panel.Y(u, t) - panel.Y(u, base);
-					treated_count++;
-				}
-			}
-			double control_change = 0.0;
-			idx_t control_count = 0;
-			for (auto u : *comparison) {
-				if (panel.Seen(u, t) && panel.Seen(u, base)) {
-					control_change += panel.Y(u, t) - panel.Y(u, base);
-					control_count++;
-				}
-			}
-			if (treated_count == 0 || control_count == 0) {
-				cells.push_back(cell);
-				continue;
-			}
-			cell.att = treated_change / static_cast<double>(treated_count) -
-			           control_change / static_cast<double>(control_count);
-			cell.n_treated = treated_count;
-			cell.n_control = control_count;
-			cell.valid = true;
+			const auto effect = CellEffect(panel, entry.second, *comparison, t, base);
+			cell.att = effect.att;
+			cell.n_treated = effect.n_treated;
+			cell.n_control = effect.n_control;
+			cell.valid = effect.valid;
 			cells.push_back(cell);
 		}
 	}
@@ -302,31 +473,14 @@ std::map<int64_t, std::pair<double, idx_t>> EventStudy(const Panel &panel, const
 				}
 				comparison = &not_yet;
 			}
-			double treated_change = 0.0;
-			idx_t treated_count = 0;
-			for (auto u : entry.second) {
-				if (panel.Seen(u, t) && panel.Seen(u, base)) {
-					treated_change += panel.Y(u, t) - panel.Y(u, base);
-					treated_count++;
-				}
-			}
-			double control_change = 0.0;
-			idx_t control_count = 0;
-			for (auto u : *comparison) {
-				if (panel.Seen(u, t) && panel.Seen(u, base)) {
-					control_change += panel.Y(u, t) - panel.Y(u, base);
-					control_count++;
-				}
-			}
-			if (treated_count == 0 || control_count == 0) {
+			const auto effect = CellEffect(panel, entry.second, *comparison, t, base);
+			if (!effect.valid) {
 				continue;
 			}
-			const double att = treated_change / static_cast<double>(treated_count) -
-			                   control_change / static_cast<double>(control_count);
 			const int64_t relative = static_cast<int64_t>(t) - static_cast<int64_t>(g);
 			auto &slot = by_relative[relative];
-			slot.first += att * static_cast<double>(treated_count);
-			slot.second += treated_count;
+			slot.first += effect.att * static_cast<double>(effect.n_treated);
+			slot.second += effect.n_treated;
 		}
 	}
 	for (auto &entry : by_relative) {
@@ -359,7 +513,7 @@ unique_ptr<FunctionData> BindDid(ClientContext &context, TableFunctionBindInput 
 	const string outcome = RequireColumn(input.named_parameters, "outcome", "do_did");
 
 	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
-	auto panel = LoadPanel(context, relation, unit, period, treatment, outcome, "do_did");
+	auto panel = LoadPanel(context, relation, unit, period, treatment, outcome, "do_did", spec.covariates);
 	auto units = AllUnits(panel);
 	auto cells = GroupTimeEffects(panel, units);
 	const double att = AggregateAtt(cells);
@@ -427,8 +581,17 @@ unique_ptr<FunctionData> BindDid(ClientContext &context, TableFunctionBindInput 
 	const double pre_trend = pre_weight > 0 ? pre_sum / static_cast<double>(pre_weight) : 0.0;
 
 	vector<string> warnings;
-	warnings.push_back("group-time ATT aggregated by cohort size (Callaway-Sant'Anna); two-way fixed effects is "
-	                   "not used because it misweights under staggered adoption");
+	if (panel.has_covariates) {
+		warnings.push_back("group-time ATT aggregated by cohort size (Callaway-Sant'Anna), each cell doubly robust "
+		                   "(Sant'Anna-Zhao): parallel trends is assumed only conditional on the covariates, read at "
+		                   "each unit's first observed period");
+	} else {
+		warnings.push_back("group-time ATT aggregated by cohort size (Callaway-Sant'Anna); two-way fixed effects is "
+		                   "not used because it misweights under staggered adoption");
+	}
+	for (auto &w : panel.warnings) {
+		warnings.push_back(w);
+	}
 	if (panel.n_never == 0) {
 		warnings.push_back("no never-treated units; not-yet-treated units were used as the comparison");
 	}
@@ -452,7 +615,8 @@ unique_ptr<FunctionData> BindDid(ClientContext &context, TableFunctionBindInput 
 	}
 	auto bind = make_uniq<ResultBindData>();
 	bind->rows.push_back(
-	    {Value("ATT"), Value("callaway-santanna"), Value::DOUBLE(att),
+	    {Value("ATT"), Value(panel.has_covariates ? "callaway-santanna, doubly robust" : "callaway-santanna"),
+	     Value::DOUBLE(att),
 	     se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
 	     se > 0.0 ? Value::DOUBLE(att - Z95 * se) : Value(LogicalType::DOUBLE),
 	     se > 0.0 ? Value::DOUBLE(att + Z95 * se) : Value(LogicalType::DOUBLE),
@@ -476,7 +640,7 @@ unique_ptr<FunctionData> BindEventStudy(ClientContext &context, TableFunctionBin
 	const string outcome = RequireColumn(input.named_parameters, "outcome", "do_event_study");
 
 	auto spec = CausalSpec::Parse(context, input.inputs, input.named_parameters);
-	auto panel = LoadPanel(context, relation, unit, period, treatment, outcome, "do_event_study");
+	auto panel = LoadPanel(context, relation, unit, period, treatment, outcome, "do_event_study", spec.covariates);
 	auto units = AllUnits(panel);
 	auto point = EventStudy(panel, units);
 

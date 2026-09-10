@@ -317,6 +317,23 @@ On a staggered panel with a true ATT of exactly 5.0, comparing treated to untrea
 **6.560**; `do_did` gives **4.878** with an interval covering the truth, and the event study shows
 pre-periods at −0.02 and 0.20 against post-periods of 4.93 to 5.03.
 
+**When parallel trends holds only given covariates, pass them.** `do_did(..., covariates := ['x'])`
+estimates each cell doubly robustly (Sant'Anna–Zhao). It matches the comparison group's trend to the
+treated cohort's covariates through an outcome model, a propensity model, or both. The test case is
+a panel where units with a high `x` trend up faster *and* are likelier to be treated, with a true
+effect of 2.0:
+
+| | estimate | 95% interval | pre-trend |
+|---|---|---|---|
+| plain `do_did` | 3.877 | [3.638, 4.115] | −0.982 |
+| `covariates := ['x']` | **1.841** | [1.600, 2.082] | −0.049 |
+
+The event study shows the difference directly. Unconditionally the pre-periods drift, down to −1.34,
+and the post-periods climb from 2.63 to 5.12 as the x-driven trend compounds. Conditioning on x, the
+pre-periods sit at −0.08 and −0.02 and the post-periods stay between 1.74 and 1.92. The pre-trend is
+the diagnostic that catches this, which is why `do_event_study` takes the same `covariates :=`.
+Until now both functions accepted `covariates :=` and silently ignored it.
+
 ### Interventions - querying a world that did not happen
 
 ```sql

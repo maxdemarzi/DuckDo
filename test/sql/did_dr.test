@@ -1,0 +1,109 @@
+# name: test/sql/did_dr.test
+# description: doubly robust difference-in-differences when parallel trends holds only given covariates
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.33);
+
+# Outcomes trend with a covariate, and units with a high value of it take up the
+# treatment more often. So the treated would have trended up faster anyway:
+# parallel trends fails unconditionally and holds given x. True effect: 2.0.
+statement ok
+CREATE TABLE trend_panel AS
+WITH units AS (
+  SELECT u,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x,
+         random() AS r,
+         (u % 5) * 1.0 AS unit_fe
+  FROM range(800) t(u)),
+ assigned AS (SELECT *, CASE WHEN r < 1.0/(1.0+exp(-1.5*x)) THEN 4 ELSE NULL END AS cohort FROM units),
+ grid AS (SELECT * FROM assigned, range(1, 9) g(p))
+SELECT u AS unit, p AS period, x, (x > 0) AS x_positive, 'segment_' || (u % 3) AS segment,
+       (cohort IS NOT NULL AND p >= cohort) AS treated,
+       unit_fe + 0.5*p + 0.6*x*p + 2.0*((cohort IS NOT NULL AND p >= cohort)::INT)
+         + sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS y
+FROM grid;
+
+# Unconditionally, the treated trend up faster anyway, so plain DiD is badly off.
+query I
+SELECT abs(estimate - 2.0) > 1.0
+FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y');
+----
+true
+
+# Given x, parallel trends holds, and the doubly robust cells recover the effect.
+query II
+SELECT abs(estimate - 2.0) < 0.3, ci_low < 2.0 AND 2.0 < ci_high
+FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+            covariates := ['x']);
+----
+true	true
+
+# It says which estimator ran.
+query I
+SELECT estimator FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated',
+                             outcome := 'y', covariates := ['x']);
+----
+callaway-santanna, doubly robust
+
+query I
+SELECT len(list_filter(warnings, w -> w LIKE '%conditional on the covariates%')) = 1
+FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+            covariates := ['x']);
+----
+true
+
+# covariates := used to be accepted and silently ignored. Explicitly none is
+# still none, and must give exactly the unconditional estimate.
+query I
+SELECT a.estimate = b.estimate
+FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y') a,
+     do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+            covariates := []) b;
+----
+true
+
+# The pre-trend is the diagnostic that catches this. Unconditionally the
+# pre-treatment periods drift; conditioning on x flattens them.
+query I
+SELECT max(abs(att)) > 0.5
+FROM do_event_study('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y')
+WHERE is_pre_treatment;
+----
+true
+
+query I
+SELECT bool_and(abs(att) < 0.3)
+FROM do_event_study('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+                    covariates := ['x'])
+WHERE is_pre_treatment;
+----
+true
+
+# And every post-treatment period recovers the constant effect.
+query I
+SELECT bool_and(abs(att - 2.0) < 0.4)
+FROM do_event_study('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+                    covariates := ['x'])
+WHERE NOT is_pre_treatment;
+----
+true
+
+# A boolean covariate is accepted.
+statement ok
+SELECT * FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+                     covariates := ['x_positive']);
+
+statement error
+SELECT * FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+                     covariates := ['segment']);
+----
+numeric covariates only
+
+statement error
+SELECT * FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
+                     covariates := ['y']);
+----
+cannot be a covariate

@@ -180,6 +180,28 @@ otherwise; `warnings` says which was used. Standard errors come from a unit-leve
 `pre_trend` is the cohort-weighted average effect over pre-treatment periods. Under parallel trends
 it should be near zero, and a value large relative to the standard error raises a warning.
 
+**`covariates := [...]` makes every cell doubly robust** (Sant'Anna and Zhao, 2020). Plain DiD
+assumes the treated cohort and its comparison group would have trended in parallel. With covariates,
+that is assumed only among units that are alike on them. Each group-time cell then combines two
+working models: a regression of the outcome's change on the covariates in the comparison group, and
+a propensity model for being in the cohort rather than the comparison. The cell is consistent if
+either model is right.
+
+- Covariates are read at each unit's first observed period, so they are pre-treatment by
+  construction.
+- They must be numeric or boolean. NULLs are replaced by the column mean, with a warning.
+- The unit, period, treatment and outcome columns are refused as covariates.
+- The `estimator` column reads `callaway-santanna, doubly robust`, and the bootstrap refits both
+  models on every draw.
+
+`do_event_study` takes the same `covariates :=` and estimates every relative period the same way.
+That turns its pre-periods into a check of *conditional* parallel trends. Take a panel where units
+with high `x` trend faster and are also likelier to be treated, with a true effect of 2.0: plain
+DiD gives 3.877, and `covariates := ['x']` gives 1.841 [1.600, 2.082].
+
+Without covariates the output is unchanged to the last bit. The parameter used to be accepted and
+silently ignored; it now does what it says.
+
 ### `do_event_study`
 
 ```sql
