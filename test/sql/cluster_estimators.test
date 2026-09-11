@@ -171,7 +171,8 @@ FROM do_iv('wj', treatment := 'd', outcome := 'y_iv', instrument := 'z', covaria
 
 # --- the diagnostics -----------------------------------------------------------
 
-# do_refute's tolerance is two standard errors of the original estimate. On the
+# do_refute's tolerance for a method that perturbs the data is two standard
+# errors of the original estimate. On the
 # join it has to be the clustered one, or a refuter is judged against an
 # interval sqrt(3) too narrow.
 query II
@@ -207,12 +208,13 @@ SELECT count(*) FROM (
 
 # On a real effect, the refuters behave. Two are stable across seeds and must
 # pass on their own rule. The placebo and bootstrap refuters compare the
-# estimate with one random redraw, and at their tolerance they fail by chance
-# for some seeds: over 20 seeds, the placebo failed 4 times and the bootstrap
-# once. Which redraw a seed produces also differs between standard libraries,
-# so a fixed seed that passes on Windows can fail on Linux. For those two the
-# test asserts what holds for every redraw: the placebo estimate collapses
-# toward zero (from 2.06), and the bootstrap stays within three tolerances.
+# estimate with one random redraw, so each fails by chance for some seeds: with
+# the placebo judged against its own standard error, 1 of 40 seeds, and the
+# bootstrap 1 of 40. Which redraw a seed produces also differs between standard
+# libraries, so a fixed seed that passes on Windows can fail elsewhere. For
+# those two the test asserts what holds for every redraw: the placebo estimate
+# collapses toward zero (from 2.06), and the bootstrap stays within three
+# tolerances.
 query IIII
 SELECT
   (SELECT passed FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause', cluster := 'i')),

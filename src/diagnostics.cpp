@@ -452,7 +452,14 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 
 	const auto refuted = EstimateEffect(perturbed, spec, Estimand::ATE);
 	const double difference = refuted.estimate - original.estimate;
-	const double tolerance = 2.0 * std::max(original.std_error, 1e-12);
+	// A placebo estimate is judged against its own standard error, not the
+	// original's. It is an estimate on permuted data, which is noisier than the
+	// real assignment: 0.051 against 0.040 on the worked example, so the
+	// original's standard error made a nominal 5% false alarm rate 12% over 40
+	// seeds. The other methods perturb the data and ask whether the estimate
+	// moved, so their scale is the original's standard error.
+	const double scale = zero_expected ? refuted.std_error : original.std_error;
+	const double tolerance = 2.0 * std::max(scale, 1e-12);
 	const bool passed = zero_expected ? std::fabs(refuted.estimate) <= tolerance : std::fabs(difference) <= tolerance;
 
 	names = {"method", "original_estimate", "refuted_estimate", "difference", "tolerance", "passed", "detail"};

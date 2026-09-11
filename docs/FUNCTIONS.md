@@ -144,8 +144,8 @@ Without `cluster :=`, every result is bit-identical to what it was before cluste
 
 The diagnostics accept it too. `do_refute`'s placebo permutes treatment across clusters, its
 subset refuter keeps or drops whole clusters, and its bootstrap draws whole clusters, counting a
-cluster drawn twice as two. Its tolerance, two standard errors of the original estimate, is the
-clustered one. `do_sensitivity` builds its robustness value and E-value from the clustered
+cluster drawn twice as two. The standard errors its tolerance is built from are the clustered
+ones. `do_sensitivity` builds its robustness value and E-value from the clustered
 interval, and `do_diagnose` counts clusters, not rows, as the sample. `do_frame_summary` reports
 no uncertainty and refuses the parameter. `do_msm` and the panel functions take the unit as
 `unit :=` already.
@@ -408,6 +408,15 @@ Extra parameters: `method` (VARCHAR, default `placebo_treatment`), `fraction`
 
 Returns `method, original_estimate, refuted_estimate, difference, tolerance,
 passed, detail`.
+
+`passed` compares against two standard errors, and which standard error depends on what the
+method expects. The placebo expects zero, so it is judged by its own: `|refuted_estimate|` against
+twice the standard error of the estimate on permuted data, which is the noisier of the two (0.051
+against 0.040 on the example above). Judging it by the original's turned a nominal 5% false alarm
+into 12% over 40 seeds. The other methods expect the estimate not to move, so they are judged by
+the original's: `|difference|` against twice its standard error. Both rules are tests at about the
+5% level, so an occasional `false` on sound data is the rule working, not a defect — read the
+estimate and the tolerance beside it.
 
 ### `do_sensitivity`
 
