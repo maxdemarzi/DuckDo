@@ -546,10 +546,11 @@ Cpdag RunPc(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_
 // edge is an arrowhead, a tail, or a circle meaning the data did not decide, and
 // a <-> b says neither causes the other and something hidden causes both. It
 // starts from PC's skeleton and separating sets, removes the edges a hidden
-// common cause can fake (the possible-d-sep stage), and orients with rules R1-R4
-// and R8, assuming no selection bias. R9 and R10, which turn some circles into
-// tails along long paths, are not implemented. An edge they would have written
-// a --> b stays a o-> b, which sends it to review rather than past it.
+// common cause can fake (the possible-d-sep stage), and orients with Zhang's rules
+// R1-R4 and R8-R10, assuming no selection bias - under which those rules are
+// complete. R9 and R10 search paths, with a step budget; a search that runs out
+// finds nothing, so the edge keeps its circle and goes to review rather than
+// past it.
 
 enum PagMark : uint8_t { kNone = 0, kCircle = 1, kArrow = 2, kTail = 3 };
 
@@ -740,8 +741,110 @@ bool ExtendDiscriminating(const Pag &g, idx_t v, idx_t c, vector<uint8_t> &on_pa
 	return false;
 }
 
-//! Zhang's rules R1-R4 and R8, to a fixed point. Every rule turns a circle into
-//! something else and nothing turns anything back into a circle, so it ends.
+//! Whether cur - next can be the next step of an uncovered potentially directed
+//! path that has reached cur from prev: no arrowhead at cur and no tail at next,
+//! and prev and next not adjacent.
+bool PdStep(const Pag &g, idx_t prev, idx_t cur, idx_t next) {
+	return g.Adjacent(cur, next) && g.At(next, cur) != kArrow && g.At(cur, next) != kTail && !g.Adjacent(prev, next);
+}
+
+//! Is there an uncovered potentially directed path from cur, reached from prev,
+//! on to target? Simple paths only, found depth-first. The search gives up after
+//! a fixed number of steps, and a search that gave up counts as no path: the
+//! rule that asked does not fire, and its edge keeps a circle for review.
+bool UncoveredPdPath(const Pag &g, idx_t prev, idx_t cur, idx_t target, vector<uint8_t> &on_path, idx_t &budget) {
+	for (idx_t next = 0; next < g.p; next++) {
+		if (on_path[next] || !PdStep(g, prev, cur, next)) {
+			continue;
+		}
+		if (next == target) {
+			return true;
+		}
+		if (budget == 0) {
+			return false;
+		}
+		budget--;
+		on_path[next] = 1;
+		const bool found = UncoveredPdPath(g, cur, next, target, on_path, budget);
+		on_path[next] = 0;
+		if (found) {
+			return true;
+		}
+	}
+	return false;
+}
+
+const idx_t kPathSearchBudget = 100000;
+
+//! The neighbours m of a from which an uncovered potentially directed path
+//! <a, m, ..., target> leads on to target. m may be target itself.
+vector<idx_t> PdPathStarts(const Pag &g, idx_t a, idx_t target) {
+	vector<idx_t> starts;
+	for (idx_t m = 0; m < g.p; m++) {
+		if (m == a || !g.Adjacent(a, m) || g.At(m, a) == kArrow || g.At(a, m) == kTail) {
+			continue;
+		}
+		if (m == target) {
+			starts.push_back(m);
+			continue;
+		}
+		vector<uint8_t> on_path(g.p, 0);
+		on_path[a] = on_path[m] = 1;
+		idx_t budget = kPathSearchBudget;
+		if (UncoveredPdPath(g, a, m, target, on_path, budget)) {
+			starts.push_back(m);
+		}
+	}
+	return starts;
+}
+
+//! R9 and R10 for a o-> c: whether the circle at a can become a tail.
+bool TailByR9OrR10(const Pag &g, idx_t a, idx_t c) {
+	const idx_t p = g.p;
+	// R9: an uncovered potentially directed path <a, b, t, ..., c>, with b and c
+	// apart. Together with a o-> c it would close a cycle unless a --> c.
+	for (idx_t b = 0; b < p; b++) {
+		if (b == a || b == c || !g.Adjacent(a, b) || g.Adjacent(b, c) || g.At(b, a) == kArrow || g.At(a, b) == kTail) {
+			continue;
+		}
+		vector<uint8_t> on_path(p, 0);
+		on_path[a] = on_path[b] = 1;
+		idx_t budget = kPathSearchBudget;
+		if (UncoveredPdPath(g, a, b, c, on_path, budget)) {
+			return true;
+		}
+	}
+	// R10: b --> c <-- t, with uncovered potentially directed paths from a to b
+	// and from a to t that leave a through two different neighbours, m and w,
+	// that are not adjacent.
+	vector<idx_t> parents;
+	for (idx_t b = 0; b < p; b++) {
+		if (b != a && g.Adjacent(b, c) && g.Directed(b, c)) {
+			parents.push_back(b);
+		}
+	}
+	for (idx_t x = 0; x < parents.size(); x++) {
+		const auto to_b = PdPathStarts(g, a, parents[x]);
+		if (to_b.empty()) {
+			continue;
+		}
+		for (idx_t y = x + 1; y < parents.size(); y++) {
+			const auto to_t = PdPathStarts(g, a, parents[y]);
+			for (auto m : to_b) {
+				for (auto w : to_t) {
+					if (m != w && !g.Adjacent(m, w)) {
+						return true;
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+//! Zhang's rules R1-R4 and R8-R10, to a fixed point, assuming no selection bias
+//! (so R5-R7 never apply). Every rule turns a circle into something else and
+//! nothing turns anything back into a circle, so it ends.
 void ApplyRules(Pag &g, const Sepsets &sepset) {
 	const idx_t p = g.p;
 	bool changed = true;
@@ -826,6 +929,20 @@ void ApplyRules(Pag &g, const Sepsets &sepset) {
 					}
 					changed = true;
 					break;
+				}
+			}
+		}
+		if (changed) {
+			continue;
+		}
+		// R9 and R10 search paths rather than triangles, so they run only once the
+		// cheaper rules have nothing left to do.
+		for (idx_t a = 0; a < p; a++) {
+			for (idx_t c = 0; c < p; c++) {
+				if (a != c && g.Adjacent(a, c) && g.At(a, c) == kArrow && g.At(c, a) == kCircle &&
+				    TailByR9OrR10(g, a, c)) {
+					g.Set(c, a, kTail);
+					changed = true;
 				}
 			}
 		}
@@ -932,8 +1049,8 @@ void RunFciDiscovery(Discovery &out) {
 
 	out.warnings.push_back(StringUtil::Format(
 	    "FCI with Fisher-z tests at alpha %g on %llu complete rows. It allows hidden common causes, and assumes "
-	    "faithfulness, linear-Gaussian dependence and no selection bias. Its orientation rules are R1-R4 and R8; R9 "
-	    "and R10 are not implemented, so some edges a complete FCI would write --> are left o->",
+	    "faithfulness, linear-Gaussian dependence and no selection bias. Its orientation rules are R1-R4 and R8-R10, "
+	    "complete under those assumptions, so a circle that remains is one the data cannot settle",
 	    out.spec.alpha, static_cast<unsigned long long>(t.n)));
 	if (t.dropped > 0) {
 		out.warnings.push_back(StringUtil::Format("%llu rows with a NULL in a selected column were dropped",
@@ -962,7 +1079,7 @@ void NoteRankTest(Discovery &out, const vector<string> &coarse) {
 		warning = StringUtil::Replace(warning, "Fisher-z tests", "rank-based Fisher-z tests (normal scores)");
 		warning =
 		    StringUtil::Replace(warning, "linear-Gaussian dependence",
-		                        "a Gaussian copula: that monotone transforms of the variables are jointly Gaussian");
+		                        "a Gaussian copula (that monotone transforms of the variables are jointly Gaussian)");
 	}
 	for (auto &name : coarse) {
 		out.warnings.push_back(StringUtil::Format(

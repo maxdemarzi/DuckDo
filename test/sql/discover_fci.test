@@ -60,6 +60,67 @@ FROM do_discover('causal_world', algorithm := 'fci') WHERE in_graph;
 ----
 ao->c bo->c c-->d d-->f go-oh
 
+# R9. a -> b -> m -> c <- a, and d -> c. The colliders at c give a o-> c and
+# m o-> c, and nothing short of a path rule can say more: a -> c or a <-> c
+# fit every triangle. But a o-o b o-o m o-> c is an uncovered potentially
+# directed path from a to c, and a <-> c would close it into a cycle, so
+# a --> c. The same holds for m, the other way round. d o-> c has no such
+# path, so it stays open.
+statement ok
+SELECT setseed(0.41);
+
+statement ok
+CREATE TABLE r9_world AS
+WITH n AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS d,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3
+  FROM range(5000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.6*e1 AS b FROM n),
+ s2 AS (SELECT *, 0.8*b + 0.6*e2 AS m FROM s1)
+SELECT a, b, m, 0.7*a + 0.7*m + 0.7*d + 0.6*e3 AS c, d FROM s2;
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('r9_world', algorithm := 'fci') WHERE in_graph;
+----
+ao-ob a-->c bo-om do->c m-->c
+
+# R10. a -> b -> m -> t -> c, with a -> m, a -> t, a -> c and b -> c. The only
+# unshielded collider is b -> c <- t, and R3 adds a o-> c. R9 turns b o-> c
+# and t o-> c into -->, along the uncovered paths b-m-t-c and t-m-b-c. That
+# leaves a o-> c, which R9 cannot settle: every path from a through m is
+# covered. R10 can: c has two parents, b and t, reached from a through two
+# neighbours that are not adjacent - b and t themselves - so a --> c.
+# Found by searching random DAGs for a case where R10 alone changes the
+# graph; without R9 and R10 all three stay o->. The coefficients are chosen
+# so no conditioning set of up to three comes within 7 standard errors of
+# cancelling an edge.
+statement ok
+SELECT setseed(0.53);
+
+statement ok
+CREATE TABLE r10_world AS
+WITH n AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e4
+  FROM range(5000) t(i)),
+ s1 AS (SELECT *, -0.96*a + 0.6*e1 AS b FROM n),
+ s2 AS (SELECT *, 0.43*a - 0.96*b + 0.6*e2 AS m FROM s1),
+ s3 AS (SELECT *, -0.72*a + 0.79*m + 0.6*e3 AS t FROM s2)
+SELECT a, b, m, t, -0.76*a + 0.36*b - 0.66*t + 0.6*e4 AS c FROM s3;
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('r10_world', algorithm := 'fci') WHERE in_graph;
+----
+ao-ob a-->c ao-om ao-ot b-->c bo-om mo-ot t-->c
+
 # --- the proposal and the review gate -------------------------------------------
 
 # b <-> c becomes a latent node with an arrow into each; the two o-> edges are

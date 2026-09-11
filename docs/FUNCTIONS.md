@@ -489,10 +489,16 @@ not decide. `edge` then reads:
 - `o-o`: undecided.
 
 It starts from PC's skeleton, removes the edges a hidden common cause can fake with a
-possible-d-sep search, and orients with rules R1-R4 and R8, assuming no selection bias. R9 and R10
-are not implemented, so some edges a complete FCI would write `-->` stay `o->`: they go to review
-instead of past it. `orientation_stability` is the share of resamples that give the pair the same
-two marks.
+possible-d-sep search, and orients with Zhang's rules R1-R4 and R8-R10, assuming no selection bias
+(R5-R7 exist only for selection bias). Under that assumption the orientation is complete: a circle
+that remains is one the data cannot settle. R9 and R10 follow uncovered potentially directed paths
+rather than triangles. Each path search stops after a fixed number of steps, and a search that
+stops finds nothing, so on a very large, dense graph an edge can keep a circle a complete search
+would have removed. It then goes to review rather than past it. `orientation_stability` is the
+share of resamples that give the pair the same two marks. Tails found by R9 and R10 depend on a
+longer stretch of the graph being right, so they tend to be less stable than the colliders they
+start from: on the five-variable world in `test/sql/discover_fci.test`, 0.72 against 0.8 before
+those rules existed.
 
 Take a -> b <- u -> c <- d, with u unmeasured. PC finds a collider at b and another at c, claiming
 the b-c edge in opposite directions, and warns that they conflict. FCI returns `a o-> b`,
