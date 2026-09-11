@@ -1,6 +1,6 @@
 """Measure what DuckDo actually reproduces, rather than asserting it.
 
-Phase 9 of docs/ROADMAP.md asks for a reproducibility statement. A statement is
+Phase 9 of dev/ROADMAP.md asks for a reproducibility statement. A statement is
 worth nothing unless something checks it, so each claim below is a run:
 
   1. same query twice              -> identical to the last bit

@@ -20,12 +20,6 @@ FROM do_ate('customers',
 -- ATE | aipw | 12.84 | 8.59 | 17.09
 ```
 
-> **Status: every roadmap phase through 9 is implemented.** Estimators, diagnostics, graph
-> identification, the `do()` surface and segmented estimation are cross-checked against EconML and
-> DoWhy. **Two causal foundation models run inside DuckDB** on ONNX Runtime — CausalPFN and Do-PFN.
-> That path is opt-in at build time (`-DDUCKDO_WITH_ONNX=ON`) so the default build keeps zero
-> dependencies and needs no downloads.
-
 New here? **[docs/TUTORIAL.md](docs/TUTORIAL.md)** walks one real question end to end in about
 five minutes, and **[docs/EXAMPLES.md](docs/EXAMPLES.md)** works three more — an A/B test nobody
 complied with, a pricing question where the naive answer has the wrong *sign*, and a retention
@@ -351,7 +345,6 @@ The event study shows the difference directly. Unconditionally the pre-periods d
 and the post-periods climb from 2.63 to 5.12 as the x-driven trend compounds. Conditioning on x, the
 pre-periods sit at −0.08 and −0.02 and the post-periods stay between 1.74 and 1.92. The pre-trend is
 the diagnostic that catches this, which is why `do_event_study` takes the same `covariates :=`.
-Until now both functions accepted `covariates :=` and silently ignored it.
 
 **When no comparison group trends like the treated unit, build one.** `do_synth` fits a synthetic
 control (Abadie, Diamond and Hainmueller): non-negative donor weights, summing to one, that reproduce
@@ -518,8 +511,8 @@ effect, the adjusted estimators have a benchmark to reproduce rather than improv
 
 All four land within 7% of the benchmark on a noisy 445-row sample (185 treated).
 
-Reproduce with `test/sql/estimators.test` and `python scripts/crosscheck_econml.py`
-(the latter needs `econml` and `dowhy`; it is a dev tool, not shipped).
+Reproduce the first table with the estimator tests in the repository, and the cross-check with
+`python scripts/crosscheck_econml.py`, which needs `econml` and `dowhy` installed.
 
 ### And does the foundation model beat them?
 
@@ -616,8 +609,8 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
 - **Base learners are regularised GLMs, and this is measurable.** On a DGP whose effect is a step
   function, `do_cate` posts a PEHE of **0.992** where EconML's `CausalForestDML` posts **0.213** and
   `model := 'causalpfn'` posts 0.451. The average effect is barely touched (0.020 against 0.011),
-  so this costs you targeting rules, not headline numbers. Gradient-boosted base learners are a
-  Phase 2 follow-up; until then, reach for the foundation model when the structure is unknown.
+  so this costs you targeting rules, not headline numbers. Gradient-boosted base learners are
+  planned; until then, reach for the foundation model when the structure is unknown.
   Full table in [docs/BENCHMARKS.md](docs/BENCHMARKS.md#where-the-classical-path-loses).
 - **Data is read on a separate connection**, so uncommitted changes in your current transaction are
   not visible to an estimation call.
@@ -651,75 +644,10 @@ Stated plainly, because a causal tool that hides its limits is worse than none.
   build still ships without it, because a shared dependency is exactly what the dependency-free
   default is protecting. There is no static build to link: none is published upstream.
 
-## Testing
-
-```sh
-./build/release/test/unittest "test/*"
-```
-
-```sh
-# with foundation models as well
-DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
-```
-
-341 assertions in the dependency-free build, 378 with the foundation-model path enabled, across
-estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
-time-varying treatment, survival, the `do()` surface and end-to-end inference for both models.
-
-Three further dev-only harnesses, none shipped:
-
-```sh
-python scripts/crosscheck_econml.py    # grades the estimators against EconML and DoWhy on IHDP
-python scripts/coverage_check.py       # measures do_cate's empirical interval coverage
-python scripts/benchmark.py            # seconds and peak memory, with a gate on both
-python scripts/check_docs.py           # every SQL block in the docs still runs
-```
-
-`check_docs.py` executes every block in the tutorial and the worked examples, in order,
-against a fresh database — those two documents quote real output, and quoting real output
-is worth nothing if the queries above it have stopped working. The README, assumptions
-guide and function reference use illustrative fragments against tables that do not exist,
-so those are parsed rather than executed, which catches a malformed query but not a stale
-column name.
-
-CI also runs DuckDB's `format` and `tidy` checks. Note that `.clang-format` and `.clang-tidy` in
-this repo are symlinks into `duckdb/`; git checks them out as plain text files on Windows, where
-`clang-format --style=file` then silently reads the *path* as if it were the config and reports
-every file as needing reformatting. Point it at `duckdb/.clang-format` directly there. The pinned
-version is `clang_format==11.0.1` — later versions disagree about line breaks and will produce a
-diff CI rejects.
-
-## Submitting to community extensions
-
-[description.yml](description.yml) is ready to copy into a fork of
-`duckdb/community-extensions`; update `version` and `ref` to the release commit first. Its
-`hello_world` deliberately needs no download - a first impression that requires a 300 MB fetch is a
-first impression most people never have.
-
-## Building
-### Managing dependencies
-DuckDo currently has **no external dependencies** - the numerics are hand-rolled in `src/linalg.cpp`,
-so `vcpkg.json` lists nothing and you can skip vcpkg entirely. That changes in Phase 5, when ONNX
-Runtime arrives for the foundation-model path.
-
-### Build steps
-Now to build the extension, run:
-```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/duckdo/duckdo.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `duckdo.duckdb_extension` is the loadable binary as it would be distributed.
-
 ## Running the extension
 
-Start the shell with `./build/release/duckdb`, then:
+Build it first ([CONTRIBUTING.md](CONTRIBUTING.md)), start the shell with
+`./build/release/duckdb`, and then:
 
 ```sql
 -- A tiny randomised experiment: treatment is assigned by coin flip, so the
@@ -745,57 +673,7 @@ FROM do_diagnose('trial', treatment := 'nudged', outcome := 'minutes',
                  covariates := ['tenure']);
 ```
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
-```sh
-make test
-```
+## Building it, and working on it
 
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
-
-CLI:
-```shell
-duckdb -unsigned
-```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
-
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL duckdo;
-LOAD duckdo;
-```
-
-## Setting up CLion
-
-### Opening project
-Configuring CLion with this extension requires a little work. Firstly, make sure that the DuckDB submodule is available.
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+Building from source, running the test suite, the development harnesses and the release
+checklist are in [CONTRIBUTING.md](CONTRIBUTING.md).

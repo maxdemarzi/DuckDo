@@ -1,6 +1,6 @@
 """Grade DuckDo's estimators against EconML and DoWhy on identical data.
 
-This is the Phase 2 exit gate from docs/ROADMAP.md. Recovering synthetic truth
+This is the Phase 2 exit gate from dev/ROADMAP.md. Recovering synthetic truth
 is necessary but not sufficient: the estimators also have to agree with
 established implementations, on the same rows, to the same estimand.
 

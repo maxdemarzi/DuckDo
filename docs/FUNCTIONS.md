@@ -304,8 +304,7 @@ That turns its pre-periods into a check of *conditional* parallel trends. Take a
 with high `x` trend faster and are also likelier to be treated, with a true effect of 2.0: plain
 DiD gives 3.877, and `covariates := ['x']` gives 1.841 [1.600, 2.082].
 
-Without covariates the output is unchanged to the last bit. The parameter used to be accepted and
-silently ignored; it now does what it says.
+Without covariates the output is unchanged to the last bit.
 
 ### `do_event_study`
 
@@ -497,8 +496,7 @@ stops finds nothing, so on a very large, dense graph an edge can keep a circle a
 would have removed. It then goes to review rather than past it. `orientation_stability` is the
 share of resamples that give the pair the same two marks. Tails found by R9 and R10 depend on a
 longer stretch of the graph being right, so they tend to be less stable than the colliders they
-start from: on the five-variable world in `test/sql/discover_fci.test`, 0.72 against 0.8 before
-those rules existed.
+start from: on the five-variable world above, 0.72 against 0.8 before those rules existed.
 
 Take a -> b <- u -> c <- d, with u unmeasured. PC finds a collider at b and another at c, claiming
 the b-c edge in opposite directions, and warns that they conflict. FCI returns `a o-> b`,

@@ -155,8 +155,8 @@ canonical row order sorts on the outcome first, so the order, the propensity fol
 changed from call to call. `do_diagnose` without an outcome had the same flaw, hidden by its
 three-decimal rounding. A missing outcome now reads as 0.0, and every function that has an outcome
 is bit-identical to before. None of the checks called a function without an outcome, which is why
-none caught it. `scripts/reproducibility_check.py` now does, and `test/sql/no_outcome.test`
-repeats all three functions and requires every run to match the first.
+none caught it. `scripts/reproducibility_check.py` now does, and the test suite repeats all three
+functions and requires every run to match the first.
 
 ### Deliberately different
 

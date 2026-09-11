@@ -270,8 +270,8 @@ python scripts/bench_headtohead.py
 ```
 
 IHDP is fetched from the CEVAE mirror on first run and cached. `--quick` runs one
-replication instead of ten. The script is a dev tool and is not shipped with the
-extension.
+replication instead of ten. The script lives in the repository; it is not part of
+the installed extension.
 
 Two related harnesses: `scripts/crosscheck_econml.py` gates DuckDo against EconML
 on agreement rather than accuracy, and `scripts/benchmark.py` tracks DuckDo's own
