@@ -347,11 +347,11 @@ vector<idx_t> SampleContext(const CausalFrame &frame, idx_t size, int64_t seed, 
 	// Keep the arm proportions of the source table.
 	idx_t want_treated = static_cast<idx_t>(
 	    std::llround(static_cast<double>(size) * static_cast<double>(treated.size()) / static_cast<double>(frame.n)));
-	want_treated = std::min(want_treated, treated.size());
+	want_treated = std::min<idx_t>(want_treated, treated.size());
 	idx_t want_control = size - want_treated;
 	if (want_control > control.size()) {
 		want_control = control.size();
-		want_treated = std::min(size - want_control, treated.size());
+		want_treated = std::min<idx_t>(size - want_control, treated.size());
 	}
 	vector<idx_t> rows;
 	if (resample) {

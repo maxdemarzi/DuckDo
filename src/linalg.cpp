@@ -206,8 +206,8 @@ static void BuildNormalEquations(const Matrix &X, const vector<double> &z, const
 		vector<vector<double>> partial_xtz(blocks, vector<double>(p, 0.0));
 		const idx_t span = (rows.size() + blocks - 1) / blocks;
 		auto run_block = [&](idx_t b) {
-			const idx_t begin = std::min(b * span, rows.size());
-			const idx_t end = std::min(begin + span, rows.size());
+			const idx_t begin = std::min<idx_t>(b * span, rows.size());
+			const idx_t end = std::min<idx_t>(begin + span, rows.size());
 			AccumulateBlock(X, z, rows, w, begin, end, partial_xtx[b].data(), partial_xtz[b].data());
 		};
 
