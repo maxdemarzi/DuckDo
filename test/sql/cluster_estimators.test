@@ -168,9 +168,70 @@ FROM do_iv('wj', treatment := 'd', outcome := 'y_iv', instrument := 'z', covaria
 ----
 1
 
-# The diagnostics still refuse: their resampling refuters and balance statistics
-# draw rows, and would report an unclustered answer under a clustered name.
-statement error
-SELECT * FROM do_balance('wj', treatment := 't', covariates := ['x1'], cluster := 'i');
+# --- the diagnostics -----------------------------------------------------------
+
+# do_refute's tolerance is two standard errors of the original estimate. On the
+# join it has to be the clustered one, or a refuter is judged against an
+# interval sqrt(3) too narrow.
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT tolerance FROM do_refute('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause')) AS b,
+  (SELECT tolerance FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause')) AS j,
+  (SELECT tolerance FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause', cluster := 'i')) AS c);
 ----
-cluster
+true	true
+
+# do_sensitivity builds its robustness value and E-value from the clustered interval.
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT std_error FROM do_sensitivity('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'])) AS b,
+  (SELECT std_error FROM do_sensitivity('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'])) AS j,
+  (SELECT std_error FROM do_sensitivity('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], cluster := 'i')) AS c);
+----
+true	true
+
+# Every refuter runs on a clustered frame. Reordering a clustered frame used to
+# renumber its clusters from labels already released, and a subset copied its
+# parent's cluster ids unchanged; nothing reached either path while the
+# diagnostics refused cluster :=.
+query I
+SELECT count(*) FROM (
+  SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'placebo_treatment', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'subset', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'bootstrap', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'unobserved_confounder', cluster := 'i'));
+----
+5
+
+# On a real effect, the four refuters that should pass do.
+query I
+SELECT bool_and(passed) FROM (
+  SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'placebo_treatment', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'subset', cluster := 'i')
+  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'bootstrap', cluster := 'i'));
+----
+true
+
+# The placebo permutes treatment across clusters, and says so.
+query I
+SELECT detail LIKE 'treatment permuted across clusters%' FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'placebo_treatment', cluster := 'i');
+----
+true
+
+# do_diagnose counts the clusters, not the rows, as the sample.
+query I
+SELECT detail LIKE '9000 rows in 3000 clusters:%'
+FROM do_diagnose('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], cluster := 'i')
+WHERE check_name = 'sample_size';
+----
+true
+
+# do_balance and do_overlap report no interval; their propensity folds follow clusters.
+query II
+SELECT
+  (SELECT count(*) FROM do_balance('wj', treatment := 't', covariates := ['x1', 'x2'], cluster := 'i')) > 0,
+  (SELECT count(*) FROM do_overlap('wj', treatment := 't', covariates := ['x1', 'x2'], cluster := 'i')) > 0;
+----
+true	true

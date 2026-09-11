@@ -44,7 +44,17 @@ static void SortCanonical(CausalFrame &frame);
 //! orders each gave a standard error of 0.0203 against 0.0352 for the units
 //! themselves, with the same estimate and no warning.
 static void FinishUnits(CausalFrame &frame) {
-	if (frame.has_cluster) {
+	if (frame.has_cluster && frame.cluster_labels.empty()) {
+		// Already numbered: this frame is being reordered after its rows' content
+		// changed - a refuter's added column, a permuted treatment. The labels were
+		// released after numbering, so renumbering would read what is gone; the ids
+		// stand, and only the member lists follow the new canonical order.
+		frame.cluster_members.assign(frame.n_clusters, {});
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			const idx_t r = frame.canonical[rank];
+			frame.cluster_members[frame.cluster[r]].push_back(r);
+		}
+	} else if (frame.has_cluster) {
 		std::unordered_map<string, idx_t> index;
 		frame.cluster.assign(frame.n, 0);
 		for (idx_t rank = 0; rank < frame.n; rank++) {
@@ -896,13 +906,20 @@ CausalFrame BuildFrame(ClientContext &context, const CausalSpec &spec) {
 			const auto *t_data = FlatVector::GetData<double>(chunk.data[0]);
 			const auto &t_valid = FlatVector::Validity(chunk.data[0]);
 			const auto *y_data = FlatVector::GetData<double>(chunk.data[1]);
+			// Without an outcome the column is CAST(NULL AS DOUBLE), and a NULL's data
+			// slot holds whatever memory the vector had. It used to be copied as it was,
+			// and the canonical order sorts on the outcome first, so do_balance and
+			// do_overlap put rows in different folds on every call and their
+			// propensity-weighted results moved from one call to the next. With an
+			// outcome, NULLs are filtered out before this point, so nothing else moves.
+			const auto &y_valid = FlatVector::Validity(chunk.data[1]);
 			for (idx_t i = 0; i < count; i++) {
 				if (!t_valid.RowIsValid(i)) {
 					// Rows outside the two treatment levels, when treated:=/control:= narrowed them.
 					continue;
 				}
 				frame.t.push_back(t_data[i]);
-				frame.y.push_back(y_data[i]);
+				frame.y.push_back(y_valid.RowIsValid(i) ? y_data[i] : 0.0);
 				frame.source_row.push_back(emitted + i);
 				if (frame.has_id) {
 					auto &id_vec = chunk.data[2];

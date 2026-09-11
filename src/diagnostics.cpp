@@ -174,11 +174,22 @@ unique_ptr<FunctionData> BindDiagnose(ClientContext &context, TableFunctionBindI
 	// Sample size and treatment prevalence.
 	const idx_t n_control = frame.n - frame.n_treated;
 	const double prevalence = static_cast<double>(frame.n_treated) / static_cast<double>(frame.n);
-	AddCheck(*bind, "sample_size", frame.n >= 200 ? "pass" : "warn",
-	         StringUtil::Format("%llu rows: %llu treated, %llu control", static_cast<unsigned long long>(frame.n),
-	                            static_cast<unsigned long long>(frame.n_treated),
-	                            static_cast<unsigned long long>(n_control)),
-	         frame.n >= 200 ? "info" : "medium");
+	if (frame.has_cluster) {
+		// With clusters, the independent units are the clusters, so they are what
+		// the sample-size check counts.
+		AddCheck(*bind, "sample_size", frame.n_clusters >= 200 ? "pass" : "warn",
+		         StringUtil::Format(
+		             "%llu rows in %llu clusters: %llu treated rows, %llu control",
+		             static_cast<unsigned long long>(frame.n), static_cast<unsigned long long>(frame.n_clusters),
+		             static_cast<unsigned long long>(frame.n_treated), static_cast<unsigned long long>(n_control)),
+		         frame.n_clusters >= 200 ? "info" : "medium");
+	} else {
+		AddCheck(*bind, "sample_size", frame.n >= 200 ? "pass" : "warn",
+		         StringUtil::Format("%llu rows: %llu treated, %llu control", static_cast<unsigned long long>(frame.n),
+		                            static_cast<unsigned long long>(frame.n_treated),
+		                            static_cast<unsigned long long>(n_control)),
+		         frame.n >= 200 ? "info" : "medium");
+	}
 	AddCheck(*bind, "treatment_prevalence", (prevalence > 0.05 && prevalence < 0.95) ? "pass" : "warn",
 	         StringUtil::Format("%.1f%% of rows are treated ('%s' vs '%s')", prevalence * 100.0, frame.treated_label,
 	                            frame.control_label),
@@ -242,7 +253,10 @@ unique_ptr<FunctionData> BindDiagnose(ClientContext &context, TableFunctionBindI
 // --- do_refute --------------------------------------------------------------
 
 //! Build a frame restricted to `rows`, preserving encoding and metadata.
-CausalFrame SubFrame(const CausalFrame &src, const vector<idx_t> &rows) {
+//! With clusters, the subset renumbers its own: `labels` names each row's
+//! cluster, and defaults to the parent's cluster id. A bootstrap passes a label
+//! per draw, so a cluster drawn twice is two clusters.
+CausalFrame SubFrame(const CausalFrame &src, const vector<idx_t> &rows, const vector<string> *labels = nullptr) {
 	CausalFrame out = src;
 	out.n = rows.size();
 	out.X.Resize(rows.size(), src.X.cols);
@@ -267,6 +281,14 @@ CausalFrame SubFrame(const CausalFrame &src, const vector<idx_t> &rows) {
 		if (out.t[i] == 1.0) {
 			out.n_treated++;
 		}
+	}
+	if (src.has_cluster) {
+		out.cluster_labels.assign(rows.size(), string());
+		for (idx_t i = 0; i < rows.size(); i++) {
+			out.cluster_labels[i] = labels ? (*labels)[i] : std::to_string(src.cluster[rows[i]]);
+		}
+		out.cluster.clear();
+		out.cluster_members.clear();
 	}
 	// A subset is a different set of rows, so the parent's canonical order does
 	// not describe it.
@@ -318,14 +340,28 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 		// Permute the arm labels across canonical ranks. Shuffling the vector in
 		// place would permute them across storage positions, which makes the
 		// refutation depend on how the table happens to be laid out.
-		vector<double> labels;
-		labels.reserve(frame.n);
-		for (idx_t rank = 0; rank < frame.n; rank++) {
-			labels.push_back(frame.t[frame.Draw(rank)]);
-		}
-		std::shuffle(labels.begin(), labels.end(), rng);
-		for (idx_t rank = 0; rank < frame.n; rank++) {
-			perturbed.t[frame.Draw(rank)] = labels[rank];
+		if (frame.has_cluster) {
+			// Whole clusters' treatment, not rows': the clustered interval assumes a
+			// unit-level assignment, and a row-level shuffle would give the placebo a
+			// precision the real treatment never had.
+			vector<double> cluster_arm(frame.n_clusters, 0.0);
+			for (idx_t g = 0; g < frame.n_clusters; g++) {
+				cluster_arm[g] = frame.t[frame.cluster_members[g].front()];
+			}
+			std::shuffle(cluster_arm.begin(), cluster_arm.end(), rng);
+			for (idx_t i = 0; i < frame.n; i++) {
+				perturbed.t[i] = cluster_arm[frame.cluster[i]];
+			}
+		} else {
+			vector<double> labels;
+			labels.reserve(frame.n);
+			for (idx_t rank = 0; rank < frame.n; rank++) {
+				labels.push_back(frame.t[frame.Draw(rank)]);
+			}
+			std::shuffle(labels.begin(), labels.end(), rng);
+			for (idx_t rank = 0; rank < frame.n; rank++) {
+				perturbed.t[frame.Draw(rank)] = labels[rank];
+			}
 		}
 		BuildCanonicalOrder(perturbed);
 		perturbed.n_treated = 0;
@@ -335,7 +371,9 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 			}
 		}
 		zero_expected = true;
-		detail = "treatment permuted at random; a real effect should collapse to zero";
+		detail = frame.has_cluster
+		             ? "treatment permuted across clusters at random; a real effect should collapse to zero"
+		             : "treatment permuted at random; a real effect should collapse to zero";
 	} else if (method == "random_common_cause") {
 		std::normal_distribution<double> normal(0.0, 1.0);
 		vector<double> noise(frame.n);
@@ -347,9 +385,18 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 	} else if (method == "subset") {
 		vector<idx_t> rows;
 		std::uniform_real_distribution<double> uniform(0.0, 1.0);
-		for (idx_t rank = 0; rank < frame.n; rank++) {
-			if (uniform(rng) < spec.fraction) {
-				rows.push_back(frame.Draw(rank));
+		if (frame.has_cluster) {
+			// Keep or drop whole clusters.
+			for (idx_t g = 0; g < frame.n_clusters; g++) {
+				if (uniform(rng) < spec.fraction) {
+					rows.insert(rows.end(), frame.cluster_members[g].begin(), frame.cluster_members[g].end());
+				}
+			}
+		} else {
+			for (idx_t rank = 0; rank < frame.n; rank++) {
+				if (uniform(rng) < spec.fraction) {
+					rows.push_back(frame.Draw(rank));
+				}
 			}
 		}
 		if (rows.size() < 16) {
@@ -359,12 +406,28 @@ unique_ptr<FunctionData> BindRefute(ClientContext &context, TableFunctionBindInp
 		detail = StringUtil::Format("re-estimated on a random %.0f%% subset; the estimate should be stable",
 		                            spec.fraction * 100.0);
 	} else if (method == "bootstrap") {
-		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
-		vector<idx_t> rows(frame.n);
-		for (auto &r : rows) {
-			r = frame.Draw(pick(rng));
+		if (frame.has_cluster) {
+			// Whole clusters, and each draw its own unit: a cluster drawn twice
+			// counts as two, which is what makes a cluster bootstrap one.
+			std::uniform_int_distribution<idx_t> pick_cluster(0, frame.n_clusters - 1);
+			vector<idx_t> rows;
+			vector<string> labels;
+			for (idx_t d = 0; d < frame.n_clusters; d++) {
+				const idx_t g = pick_cluster(rng);
+				for (auto r : frame.cluster_members[g]) {
+					rows.push_back(r);
+					labels.push_back(std::to_string(g) + "#" + std::to_string(d));
+				}
+			}
+			perturbed = SubFrame(frame, rows, &labels);
+		} else {
+			std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
+			vector<idx_t> rows(frame.n);
+			for (auto &r : rows) {
+				r = frame.Draw(pick(rng));
+			}
+			perturbed = SubFrame(frame, rows);
 		}
-		perturbed = SubFrame(frame, rows);
 		detail = "re-estimated on a bootstrap resample; the estimate should be stable";
 	} else if (method == "unobserved_confounder") {
 		// Simulate a confounder correlated with both arms and the outcome at the
@@ -495,6 +558,7 @@ void RegisterDiagnosticFunctions(ExtensionLoader &loader) {
 	for (auto &entry : entries) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);
+		fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 		fn.named_parameters["method"] = LogicalType::VARCHAR;
 		fn.named_parameters["fraction"] = LogicalType::DOUBLE;
 		fn.named_parameters["strength"] = LogicalType::DOUBLE;

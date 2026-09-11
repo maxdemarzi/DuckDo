@@ -804,6 +804,12 @@ to leave room for the 2.2x.
    The first harness for this was itself wrong: ordering the generating query by `random()` draws
    from the same stream that fills the columns, so it compared *different data* and made the result
    look far worse than it is.
+
+   A later pass found two functions the check had never covered, and both failed it. `do_balance`
+   and `do_overlap` take no outcome, and the frame read that missing outcome from a NULL vector's
+   data slots, whatever memory held. The canonical order sorts on the outcome, so their propensity
+   folds moved on every call. It is fixed; the other functions are bit-identical across the fix,
+   and the check now runs a no-outcome case.
 5. ~~**No telemetry.**~~ **DONE and verified rather than asserted.** The extension contains no HTTP
    client and no socket code. `src/` holds three URLs. Two are attribution strings naming where each
    model came from, which `do_list_models()` prints and nothing fetches. The third is the pinned
@@ -902,7 +908,9 @@ Roughly in order of value per unit of effort:
 
    Clustering now reaches every estimator that reports an interval, through three shared pieces: the influence-function sum, a cluster-robust (CR1) sandwich in `linalg`, and a resampler that draws whole clusters. Every unclustered result is bit-identical to before, checked by fingerprinting the full output of 14 functions. On 3,000 rows joined to three copies each, every clustered interval comes back to the rows' own: 1.00 for the closed-form ones, 0.99 for `do_predict`, and 1.00 to 1.05 for the bootstraps. Unclustered they sit at 0.56 to 0.60, around 1/sqrt(3). `test/sql/cluster_estimators.test` holds each one to that.
 
-   Still open: a secure-aggregation protocol, since `do_ate_pool` trusts the rows it is given; and clustering in the diagnostics, whose resampling refuters draw rows and so still refuse `cluster :=`.
+   The diagnostics cluster too. `do_refute`'s placebo, subset and bootstrap refuters randomise whole clusters, and its tolerance is the clustered one. `do_sensitivity` works from the clustered interval, and `do_diagnose` counts clusters as the sample. Enabling them exposed a latent crash. A refuter that reorders a frame renumbered its clusters from labels already released after the first numbering, and the subset frame copied its parent's cluster ids unchanged. The numbering is now safe to rerun, and a subset renumbers its own clusters. Nothing had reached either path, because the diagnostics refused `cluster :=`.
+
+   Still open: a secure-aggregation protocol, since `do_ate_pool` trusts the rows it is given.
 
 ---
 

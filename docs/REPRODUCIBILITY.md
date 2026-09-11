@@ -62,6 +62,7 @@ Verified on 20,000 rows, comparing full-precision output rather than rounded:
 | `duckdo_threads` = 1, 2, 8, auto | **identical** |
 | DuckDB `threads` = 1, 4 | **identical** |
 | `do_cate` over 20,000 rows, run twice | **identical** |
+| `do_balance` and `do_overlap`, which take no outcome, run twice | **identical**, since a fix: see below |
 | a bootstrap interval, same seed | **identical** |
 | `model := 'causalpfn'`, run twice | **identical** |
 | `duckdo_query_chunk` = 256 vs 4096 | **identical** |
@@ -141,6 +142,21 @@ and an ulp of drift cannot reorder two distinct values.
 It costs 0.8 s on the 1M × 50 frame, and the estimates are unchanged in accuracy:
 across ten IHDP replications the paired change in absolute error is 0.027 ± 0.039,
 an interval comfortably containing zero.
+
+### No outcome, which used to matter and no longer does
+
+`do_balance` and `do_overlap` take no outcome, and until a fix, neither repeated itself. Called
+twice on the same table, `do_balance` gave a weighted standardised difference of -0.00581 once and
+-0.00353 the next time. `do_overlap` moved rows between propensity buckets.
+
+The frame's outcome column, with no outcome to read, is `CAST(NULL AS DOUBLE)`. It was copied from
+the vector's data slots without checking them, so its "values" were whatever memory held. The
+canonical row order sorts on the outcome first, so the order, the propensity folds and the weights
+changed from call to call. `do_diagnose` without an outcome had the same flaw, hidden by its
+three-decimal rounding. A missing outcome now reads as 0.0, and every function that has an outcome
+is bit-identical to before. None of the checks called a function without an outcome, which is why
+none caught it. `scripts/reproducibility_check.py` now does, and `test/sql/no_outcome.test`
+repeats all three functions and requires every run to match the first.
 
 ### Deliberately different
 

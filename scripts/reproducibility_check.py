@@ -15,6 +15,7 @@ worth nothing unless something checks it, so each claim below is a run:
   6. foundation model, repeated    -> identical
   7. ensemble draws, same seed     -> identical; different seed -> differs
   8. duckdo_query_chunk            -> identical, so the knob is a cost knob only
+  9. no outcome, run twice        -> identical (do_balance, do_overlap)
 
 Case 5 is the one that fails, and it is here precisely because it fails: a
 reproducibility page listing only the things that work is advertising.
@@ -90,6 +91,16 @@ CATE_DIGEST = ("SELECT count(*)::VARCHAR || '|' || sum(cate)::VARCHAR || '|' || 
                "sum(cate*cate)::VARCHAR FROM do_cate('analysis', "
                "treatment := 'got_discount', outcome := 'revenue', exclude := ['customer_id']);")
 
+# do_balance and do_overlap take no outcome. Their frame's outcome column used
+# to be read from a NULL vector's data slots - whatever memory held - and the
+# canonical order sorts on it first, so their propensity folds moved on every
+# call. Nothing here covered a function without an outcome, so nothing caught it.
+NO_OUTCOME = ("SELECT (SELECT string_agg(covariate || ':' || smd_weighted::VARCHAR, '|' ORDER BY covariate) "
+              "FROM do_balance('analysis', treatment := 'got_discount', "
+              "covariates := ['age', 'tenure_months', 'prior_spend'])) || '#' || "
+              "(SELECT string_agg(bucket::VARCHAR || ':' || n_treated::VARCHAR || ':' || n_control::VARCHAR, "
+              "'|' ORDER BY bucket) FROM do_overlap('analysis', treatment := 'got_discount', "
+              "covariates := ['age', 'tenure_months', 'prior_spend']));")
 IPW_CI = ("SELECT estimate::VARCHAR || '|' || ci_low::VARCHAR || '|' || ci_high::VARCHAR "
           "FROM do_ate('analysis', treatment := 'got_discount', outcome := 'revenue', "
           "exclude := ['customer_id'], estimator := 'ipw', bootstrap_reps := 60%s);")
@@ -145,6 +156,10 @@ def main():
     ok &= report("do_cate over 20000 rows, run twice",
                  [run(args.duckdb, args.models, CATE_DIGEST),
                   run(args.duckdb, args.models, CATE_DIGEST)])
+
+    ok &= report("no outcome: do_balance, do_overlap, run twice",
+                 [run(args.duckdb, args.models, NO_OUTCOME),
+                  run(args.duckdb, args.models, NO_OUTCOME)])
 
     ok &= report("bootstrap interval, same seed",
                  [run(args.duckdb, args.models, IPW_CI % ""),

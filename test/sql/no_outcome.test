@@ -1,0 +1,66 @@
+# name: test/sql/no_outcome.test
+# description: functions called without an outcome give the same answer on every call
+# group: [duckdo]
+#
+# Without an outcome, the frame's outcome column is CAST(NULL AS DOUBLE), and it
+# used to be copied from the vector's data slots without checking them - so the
+# "values" were whatever memory held. The canonical row order sorts on the
+# outcome first, so fold membership, and with it the propensity weights, moved
+# from one call to the next: do_balance's weighted SMD changed in the third
+# decimal between calls on the same table. Each function below runs several
+# times and every run has to match the first exactly.
+
+require duckdo
+
+statement ok
+SELECT setseed(0.73);
+
+statement ok
+CREATE TABLE b AS
+SELECT x1, x2, (random() < 1/(1+exp(-0.8*x1)))::INT AS t
+FROM (SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1,
+             sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2
+      FROM range(3000));
+
+statement ok
+CREATE TABLE balance_first AS SELECT * FROM do_balance('b', treatment := 't', covariates := ['x1', 'x2']);
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM do_balance('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM balance_first)
+  UNION ALL
+  (SELECT * FROM do_balance('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM balance_first)
+  UNION ALL
+  (SELECT * FROM do_balance('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM balance_first)
+  UNION ALL
+  (SELECT * FROM do_balance('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM balance_first));
+----
+0
+
+statement ok
+CREATE TABLE overlap_first AS SELECT * FROM do_overlap('b', treatment := 't', covariates := ['x1', 'x2']);
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM do_overlap('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM overlap_first)
+  UNION ALL
+  (SELECT * FROM do_overlap('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM overlap_first)
+  UNION ALL
+  (SELECT * FROM do_overlap('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM overlap_first)
+  UNION ALL
+  (SELECT * FROM do_overlap('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM overlap_first));
+----
+0
+
+statement ok
+CREATE TABLE diagnose_first AS SELECT * FROM do_diagnose('b', treatment := 't', covariates := ['x1', 'x2']);
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM do_diagnose('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM diagnose_first)
+  UNION ALL
+  (SELECT * FROM do_diagnose('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM diagnose_first)
+  UNION ALL
+  (SELECT * FROM do_diagnose('b', treatment := 't', covariates := ['x1', 'x2']) EXCEPT SELECT * FROM diagnose_first));
+----
+0

@@ -19,7 +19,7 @@ parentheses (`'(SELECT * FROM customers WHERE year = 2026)'`).
 | `exclude` | VARCHAR[] | `[]` | Columns to drop when `covariates` is not given |
 | `estimator` | VARCHAR | `aipw` | See the estimator table below |
 | `id` | VARCHAR | — | Column carried through to per-row output so results can be joined back. When its values repeat, a warning says so: repeated ids usually mean rows are not independent units |
-| `cluster` | VARCHAR | — | The column naming the independent unit when a row is not one, as after joining customers to their orders. Accepted by every estimator that reports an interval; the diagnostics refuse it. See [Clustered rows](#clustered-rows-effects-across-a-one-to-many-join) |
+| `cluster` | VARCHAR | — | The column naming the independent unit when a row is not one, as after joining customers to their orders. Accepted by every estimator that reports an interval, and by the diagnostics. `do_msm` and the panel functions take `unit :=` instead. See [Clustered rows](#clustered-rows-effects-across-a-one-to-many-join) |
 | `treated` / `control` | VARCHAR | — | Explicit level mapping when the treatment is not already 0/1. Must be given together |
 | `seed` | BIGINT | 42 | Seeds fold assignment, bootstrap and every other draw |
 | `folds` | BIGINT | 5 | Cross-fitting folds |
@@ -133,17 +133,22 @@ through whichever variance method it uses:
 | influence function, summed within clusters | `do_ate`, `do_att`, `do_atc`, `do_ate_by`, `do_ate_levels`, `do_ape`, `do_policy_value`, `do_optimal_policy` |
 | cluster-robust (CR1) sandwich | `do_cate`, `do_dose_response`, `do_iv` (both stages), `do_predict`, `do_counterfactual` |
 | bootstrap of whole clusters | the bootstrap estimators behind `do_ate`, `do_frontdoor`, `do_mediate`, `do_rmst` |
-| folds only, no interval reported | `do_uplift` |
+| resampling whole clusters | `do_refute`'s placebo, subset and bootstrap refuters |
+| through the clustered estimate | `do_sensitivity`, and `do_refute`'s tolerance |
+| folds and counts only, no interval reported | `do_uplift`, `do_balance`, `do_overlap`, `do_diagnose` |
 
 Measured on 3,000 rows joined to three copies each: unclustered, every interval narrows to about
 0.58 of the rows' own, which is 1/sqrt(3). Clustered on the row id, the closed-form intervals come
 back to 1.00 of it (0.99 for `do_predict`), and the bootstrap ones to between 1.00 and 1.05.
 Without `cluster :=`, every result is bit-identical to what it was before clustering existed.
 
-The diagnostics (`do_balance`, `do_overlap`, `do_diagnose`, `do_refute`, `do_sensitivity`) reject
-`cluster :=` rather than ignore it. Their resampling refuters and balance statistics draw rows,
-and would report an unclustered answer under a clustered name. `do_msm` and the panel functions
-take the unit as `unit :=` already.
+The diagnostics accept it too. `do_refute`'s placebo permutes treatment across clusters, its
+subset refuter keeps or drops whole clusters, and its bootstrap draws whole clusters, counting a
+cluster drawn twice as two. Its tolerance, two standard errors of the original estimate, is the
+clustered one. `do_sensitivity` builds its robustness value and E-value from the clustered
+interval, and `do_diagnose` counts clusters, not rows, as the sample. `do_frame_summary` reports
+no uncertainty and refuses the parameter. `do_msm` and the panel functions take the unit as
+`unit :=` already.
 
 DuckDo cannot detect the problem on its own: a join leaves no trace in the rows. The one sign it
 can see is a repeated `id :=`, and any function given one warns when its values repeat.
