@@ -31,6 +31,35 @@ against EconML, DoWhy and the CausalPFN package on identical rows, with the loss
 **[docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md)** says what is reproducible to the bit, what
 is not, and how to pin it.
 
+## ELI5
+
+You email a discount to some customers. The ones who got it spend more. Did the discount cause
+that, or did you send it to the people who were going to spend more anyway?
+
+`SELECT` cannot separate those. It reports what happened, and comparing the two groups only
+answers the question when the groups are alike in every other way. Send the coupon to your most
+loyal customers and the coupon takes credit for their loyalty.
+
+```sql
+-- What the groups did. The discount and everything else that differs between them.
+SELECT received_discount, avg(revenue) FROM customers GROUP BY received_discount;
+
+-- What the discount was worth: like compared with like, with an interval around it.
+SELECT estimate, ci_low, ci_high
+FROM do_ate('customers', treatment := 'received_discount', outcome := 'revenue',
+            covariates := ['age', 'income', 'tenure']);
+```
+
+`do_ate` asks what would have happened to the same people under the other choice. It weighs each
+customer against others who look like them — same age, income and tenure, one who got the discount
+and one who did not — and reports the difference, how uncertain it is, and anything that looked
+wrong along the way.
+
+The catch is the covariate list. This works only if you measured the things that drive both who
+got the discount and what they spent; anything you left out lands in the answer as bias, and no
+amount of data fixes it. [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md) is that list, in plain words,
+and `do_diagnose` checks the parts data can check.
+
 ## What works today
 
 Everything below runs with no downloads, no ONNX and no network.
