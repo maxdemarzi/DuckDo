@@ -826,7 +826,7 @@ treatment, and the result warns about it. The default horizon is the last period
 regimes still had 5% of the units following them. Here that is 4 of 10.
 
 The interval resamples whole units and refits both weight models, so it accounts for the weights
-being estimated. `do_msm`'s interval does not. The assumptions are those of any inverse-probability
+being estimated. `do_msm`'s interval does not. Over 86 simulated panels of 5,000 units from the world above, the 95% interval covered the truth 93% of the time at horizons 4 and 10: close to nominal, and slightly narrow. Its standard error averaged 0.046 against a true spread of 0.048 at horizon 4, and 0.30 against 0.34 at horizon 10. 14 more panels had a period in which no unit was still following one of the regimes, and `do_msm_rmst` refuses a horizon that runs into such a period. The assumptions are those of any inverse-probability
 method: no unmeasured confounder of treatment and the event at any period, and dropout that
 depends only on the measured history.
 
