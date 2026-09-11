@@ -616,7 +616,63 @@ Grades each covariate: `covariate, role, verdict, reason`.
 
 ### `do_dseparated(graph, x, y [, z])`
 
-Scalar, returns BOOLEAN. `z` is an optional VARCHAR[] conditioning set.
+Scalar, returns BOOLEAN. `z` is an optional VARCHAR[] conditioning set. It reads a registered
+graph and nothing else: no table, no rows.
+
+**Does the graph imply that `x` and `y` are independent once `z` is held fixed?** True when every
+path between them is blocked, false when at least one stays open. This is the primitive under
+`do_identify` and `do_validate` — an adjustment set is valid exactly when it blocks every backdoor
+path from the treatment to the outcome — exposed so you can put your own questions to the graph.
+
+```sql
+CALL do_graph_create('sales_dag', 'digraph {
+  intent [latent];
+  season -> discount;  season -> revenue;
+  discount -> clicks;  clicks -> revenue;
+  intent -> discount;  intent -> revenue;
+  coupon_mail -> discount;
+}');
+
+SELECT do_dseparated('sales_dag', 'season', 'coupon_mail');                -- true
+SELECT do_dseparated('sales_dag', 'season', 'coupon_mail', ['discount']);  -- false
+```
+
+Those two lines are the whole point. Nothing links the season to the coupon mailing, so the graph
+says they are independent — and then conditioning on `discount` makes them dependent. Both cause
+it, and among customers who got the discount, learning that it was peak season explains the
+discount away, so the mailing becomes less likely. **Adding a variable to an adjustment set can
+create the association you were adjusting to remove.**
+
+Which is why a path is not the same as a dependence:
+
+| the path through `m` | carries dependence when |
+|---|---|
+| chain, `x -> m -> y` | `m` is **not** in `z` |
+| fork, `x <- m -> y` | `m` is **not** in `z` |
+| collider, `x -> m <- y` | `m` **or one of its descendants** is in `z` |
+
+Blocking one path is not enough; every path has to be blocked. Conditioning on `discount` closes
+the chain from the mailing to revenue and opens two collider paths at once, so the mailing and
+revenue stay dependent until the rest are closed too:
+
+```sql
+SELECT do_dseparated('sales_dag', 'coupon_mail', 'revenue');                     -- false: open chain
+SELECT do_dseparated('sales_dag', 'coupon_mail', 'revenue', ['discount']);       -- false: collider opened
+SELECT do_dseparated('sales_dag', 'coupon_mail', 'revenue',
+                     ['discount', 'intent', 'season']);                          -- true
+```
+
+**Why `d`-separated and not `separated`.** d-separation is the standard name for this criterion
+(Pearl), and the `d` is for *directional*: separation that reads the direction of the arrows.
+Ordinary graph separation asks whether a path exists between two nodes, which would make the
+season and the coupon mailing "connected" through `discount` and stop there. The question worth
+asking is whether a path carries dependence, and the answer turns on direction — the collider row
+in the table above is the entire difference. Keeping the term means what DuckDo returns is what
+the textbooks, and every other causal library, call d-separation.
+
+Every d-separation is also a prediction you can test: if the graph says `x` and `y` are
+independent given `z` and your rows disagree, the graph is wrong. That is the check `do_discover`
+automates in the other direction, reading a graph off the data instead of grading one.
 
 ### `do_iv`
 
