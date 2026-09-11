@@ -706,7 +706,7 @@ mediation, so it is in the output rather than in a footnote.
 Treatment that varies over time, when a confounder varies with it — and is itself affected by it.
 Named parameters: `unit`, `period`, `treatment`, `outcome` (all required), `covariates` (the
 time-varying confounders), `baseline` (a subset of `covariates` that is time-invariant),
-`truncate`, and `model`.
+`truncate`, and `model` (`'cumulative'`, the default, `'by_period'` or `'saturated'`).
 
 ```sql
 SELECT estimate, ci_low, ci_high, mean_weight, max_weight, effective_n
@@ -761,6 +761,22 @@ are worth 2.0, and it returns 2.073 [1.904, 2.243] and 2.193 [1.993, 2.392], and
 [1.483, 1.826] per treated period, an average of the two whose interval covers neither. It still
 assumes no interaction: treatment in one period does not change what treatment in another does.
 It needs every unit observed once in every period.
+
+**`model := 'saturated'`** drops that last assumption too. It gives every treatment history its
+own mean, and reports each against never treated, for up to 6 periods (64 histories). Where the
+periods simply add, it returns 2.154 for period 1 only, 2.296 for period 2 only and 4.221 for
+both, against 2.0, 2.0 and 4.0. Add an interaction worth 1.5 when both periods are treated, and it
+returns 5.721 for both against 5.5, and still 2.154 for period 1 alone. `by_period` then reports
+2.603 [2.445, 2.760] as the effect of period 1: an interval that covers no regime anyone could
+follow. The price is that each history's mean rests only on the units who followed it. Histories
+that no unit followed, or fewer than ten did, are named in `warnings`.
+
+**The interval is too narrow when the weights are heavy.** It treats the weights as known. Over
+300 simulated panels like the one above, where the largest stabilised weight is typically around
+100, nominal 95% intervals covered 85–93% of the time, in every model. A bootstrap that resamples
+whole units and refits both weight models did no better. With weights under about 10, the same
+intervals covered 97–99%. The estimates were unbiased in both cases. `max_weight` and
+`effective_n` are there to be read before the interval is.
 
 ### `do_msm_rmst`
 

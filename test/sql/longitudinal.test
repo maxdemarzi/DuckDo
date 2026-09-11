@@ -204,7 +204,87 @@ statement error
 SELECT * FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
                      covariates := ['l'], model := 'quadratic');
 ----
-model must be 'cumulative' or 'by_period'
+model must be 'cumulative', 'by_period' or 'saturated'
+
+# model := 'saturated' gives every treatment history its own mean. Where the
+# periods simply add, it agrees with by_period.
+query II
+SELECT estimand, abs(estimate - CASE WHEN estimand LIKE 'treated in every%' THEN 4.0 ELSE 2.0 END) < 0.35
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'saturated')
+ORDER BY estimand;
+----
+treated in every period vs never treated	true
+treated in period 1 only vs never treated	true
+treated in period 2 only vs never treated	true
+
+# Add an interaction worth 1.5 when both periods are treated. Both periods are
+# then worth 5.5 together, and period 1 alone still 2.0. by_period assumes the
+# periods add, and reports an effect of period 1 whose interval excludes 2.0: a
+# number that describes no regime anyone could follow. saturated recovers both.
+statement ok
+CREATE TABLE interaction AS
+SELECT id, 1 AS period, l1 AS l, a1 AS a, NULL::DOUBLE AS y FROM wide
+UNION ALL
+SELECT id, 2 AS period, l2 AS l, a2 AS a, y + 1.5 * a1 * a2 AS y FROM wide;
+
+query II
+SELECT estimand, abs(estimate - CASE WHEN estimand LIKE 'treated in every%' THEN 5.5 ELSE 2.0 END) < 0.35
+FROM do_msm('interaction', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'saturated')
+ORDER BY estimand;
+----
+treated in every period vs never treated	true
+treated in period 1 only vs never treated	true
+treated in period 2 only vs never treated	true
+
+query I
+SELECT NOT (ci_low < 2.0 AND 2.0 < ci_high)
+FROM do_msm('interaction', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'by_period')
+WHERE estimand = 'effect of treatment in period 1';
+----
+true
+
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE '%gives every treatment history its own mean%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'saturated')
+LIMIT 1;
+----
+true
+
+# The interval treats the weights as known. With weights this heavy that makes it
+# too narrow, not conservative, and the warning says so.
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE 'the interval treats the weights as known. When the weights are heavy it is too narrow%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y', covariates := ['l']);
+----
+true
+
+# Seven periods have 128 histories, too many to give each its own mean.
+statement ok
+CREATE TABLE seven AS
+SELECT i AS id, p AS period, random() AS l, (random() < 0.5)::INT AS a,
+       CASE WHEN p = 7 THEN random() END AS y
+FROM range(40) r(i), range(1, 8) q(p);
+
+statement error
+SELECT * FROM do_msm('seven', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l'], model := 'saturated');
+----
+use model := 'by_period'
+
+# Without a never-treated unit there is nothing to compare the histories with.
+statement ok
+CREATE TABLE treated_first AS
+SELECT id, period, l, CASE WHEN period = 1 THEN 1 ELSE a END AS a, y FROM longdata;
+
+statement error
+SELECT * FROM do_msm('treated_first', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l'], model := 'saturated');
+----
+no never-treated history
 
 # A unit seen in only one of the periods has no treatment to give the other.
 statement ok

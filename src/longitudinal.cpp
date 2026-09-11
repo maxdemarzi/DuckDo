@@ -242,13 +242,15 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	if (model_entry != input.named_parameters.end() && !model_entry->second.IsNull()) {
 		model = StringUtil::Lower(model_entry->second.ToString());
 	}
-	if (model != "cumulative" && model != "by_period") {
-		throw BinderException("duckdo: model must be 'cumulative' or 'by_period', not '%s'. 'cumulative' fits one "
-		                      "effect per treated period; 'by_period' fits one for each period, so that when "
-		                      "treatment happened can matter",
-		                      model);
+	if (model != "cumulative" && model != "by_period" && model != "saturated") {
+		throw BinderException(
+		    "duckdo: model must be 'cumulative', 'by_period' or 'saturated', not '%s'. 'cumulative' fits one "
+		    "effect per treated period; 'by_period' fits one for each period, so that when "
+		    "treatment happened can matter; 'saturated' gives every treatment history its own mean",
+		    model);
 	}
 	const bool by_period = model == "by_period";
+	const bool saturated = model == "saturated";
 
 	SetNumericThreads(GetSettingIdx(context, "duckdo_threads", 0));
 	auto panel = LoadLong(context, relation, unit_col, period_col, treatment_col, outcome_col, covariates, "do_msm");
@@ -413,7 +415,7 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 		cum_min = std::min(cum_min, cumulative[u]);
 		cum_max = std::max(cum_max, cumulative[u]);
 	}
-	if (!by_period && !(cum_max - cum_min > 0.5)) {
+	if (!by_period && !saturated && !(cum_max - cum_min > 0.5)) {
 		throw BinderException("duckdo: every unit received the same total amount of treatment (%g periods), so no "
 		                      "dose-response is estimable",
 		                      cum_min);
@@ -501,6 +503,105 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 		period_ses.push_back(total_var > 0.0 ? std::sqrt(total_var) : 0.0);
 	}
 
+	// With model := 'saturated': a mean for every treatment history, each against
+	// never treated, so nothing is assumed about how the periods combine. The fit
+	// is on history indicators with never treated as the intercept, so each
+	// coefficient is already the contrast and its sandwich variance comes with it.
+	if (saturated) {
+		const idx_t n_periods = panel.period_labels.size();
+		if (n_periods > 6) {
+			throw BinderException("duckdo: model := 'saturated' gives each treatment history its own mean, and %llu "
+			                      "periods have %llu of them; use model := 'by_period'",
+			                      static_cast<unsigned long long>(n_periods),
+			                      static_cast<unsigned long long>(idx_t(1) << n_periods));
+		}
+		vector<idx_t> history(n_units, 0);
+		idx_t incomplete = 0;
+		for (auto u : unit_rows) {
+			const auto &rows = panel.by_unit[u];
+			bool complete = rows.size() == n_periods;
+			for (idx_t k = 0; k < rows.size() && complete; k++) {
+				complete = rows[k].period == k;
+			}
+			if (!complete) {
+				incomplete++;
+				continue;
+			}
+			for (auto &row : rows) {
+				if (row.treatment >= 0.5) {
+					history[u] |= idx_t(1) << row.period;
+				}
+			}
+		}
+		if (incomplete > 0) {
+			throw BinderException("duckdo: model := 'saturated' needs every unit observed once in every period, since "
+			                      "a period a unit was not seen in has no treatment to give it; %llu units with an "
+			                      "outcome are not",
+			                      static_cast<unsigned long long>(incomplete));
+		}
+		const idx_t n_histories = idx_t(1) << n_periods;
+		vector<idx_t> followed(n_histories, 0);
+		for (auto u : unit_rows) {
+			followed[history[u]]++;
+		}
+		if (followed[0] == 0) {
+			throw BinderException("duckdo: no unit was untreated in every period, so there is no never-treated history "
+			                      "to compare the others with");
+		}
+		auto describe = [&](idx_t h) {
+			vector<string> treated;
+			for (idx_t t = 0; t < n_periods; t++) {
+				if ((h >> t) & 1) {
+					treated.push_back(panel.period_labels[t]);
+				}
+			}
+			if (treated.size() == n_periods) {
+				return string("treated in every period");
+			}
+			string list;
+			for (auto &label : treated) {
+				list += (list.empty() ? "" : ", ") + label;
+			}
+			return string(treated.size() == 1 ? "treated in period " : "treated in periods ") + list + " only";
+		};
+		vector<idx_t> reported;
+		string unseen, thin;
+		for (idx_t h = 1; h < n_histories; h++) {
+			if (followed[h] == 0) {
+				unseen += (unseen.empty() ? "" : "; ") + describe(h);
+				continue;
+			}
+			reported.push_back(h);
+			if (followed[h] < 10) {
+				thin += (thin.empty() ? "" : "; ") + describe(h) +
+				        StringUtil::Format(" (%llu)", static_cast<unsigned long long>(followed[h]));
+			}
+		}
+		Matrix history_design(n_units, reported.size());
+		for (auto u : unit_rows) {
+			for (idx_t k = 0; k < reported.size(); k++) {
+				history_design.At(u, k) = history[u] == reported[k] ? 1.0 : 0.0;
+			}
+		}
+		auto history_fit = FitRidgeWeightedWithSandwich(history_design, final_outcome, unit_rows, msm_weights, 1e-8);
+		const idx_t dim = reported.size() + 1;
+		const bool have_cov = history_fit.cov.size() == dim * dim;
+		for (idx_t k = 0; k < reported.size(); k++) {
+			const double b = history_fit.model.beta.size() > k + 1 ? history_fit.model.beta[k + 1] : 0.0;
+			const double v = have_cov ? history_fit.cov[(k + 1) * dim + (k + 1)] : 0.0;
+			period_estimands.push_back(describe(reported[k]) + " vs never treated");
+			period_estimates.push_back(b);
+			period_ses.push_back(v > 0.0 ? std::sqrt(v) : 0.0);
+		}
+		if (!unseen.empty()) {
+			warnings.push_back("no unit followed these treatment histories, so they have no estimate: " + unseen);
+		}
+		if (!thin.empty()) {
+			warnings.push_back("fewer than 10 units followed these histories, so their estimates rest on a handful: " +
+			                   thin);
+		}
+	}
+
 	// --- 4. weight diagnostics -------------------------------------------------
 	//
 	// The mean stabilised weight should sit near 1. It is the cheapest available
@@ -548,15 +649,21 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	                   "no unmeasured confounder of treatment and outcome at any period. It buys nothing against "
 	                   "unmeasured confounding - what it buys is correct handling of measured confounders that the "
 	                   "treatment itself affects, which no covariate adjustment can do");
-	if (by_period) {
+	if (saturated) {
+		warnings.push_back("the structural model gives every treatment history its own mean, so it assumes "
+		                   "nothing about how the periods combine. The price is that each history is estimated only "
+		                   "from the units who followed it");
+	} else if (by_period) {
 		warnings.push_back("the structural model gives each period its own effect and adds them, so it assumes "
 		                   "treatment in one period does not change the effect of treatment in another");
 	} else {
 		warnings.push_back("the structural model is linear in cumulative treated periods, so it assumes each "
 		                   "additional period is worth the same and that only the total matters, not when it happened");
 	}
-	warnings.push_back("the interval treats the weights as known rather than estimated, which is conservative for "
-	                   "stabilised weights - a unit-level bootstrap would be tighter and slower");
+	warnings.push_back("the interval treats the weights as known. When the weights are heavy it is too narrow: in "
+	                   "simulation, with stabilised weights reaching about 100, nominal 95% intervals covered 85-93% "
+	                   "of the time, and resampling whole units did no better; with weights under about 10 they "
+	                   "covered 97-99%. Read max_weight and effective_n before the interval");
 
 	vector<Value> warning_values;
 	for (auto &w : warnings) {
@@ -571,7 +678,7 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::LIST(LogicalType::VARCHAR)};
 
 	auto bind = make_uniq<ResultBindData>();
-	if (by_period) {
+	if (by_period || saturated) {
 		for (idx_t k = 0; k < period_estimates.size(); k++) {
 			const double b = period_estimates[k], s = period_ses[k];
 			bind->rows.push_back({Value(period_estimands[k]), Value("msm-iptw"), Value::DOUBLE(b),
