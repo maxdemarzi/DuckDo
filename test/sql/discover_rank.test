@@ -1,0 +1,84 @@
+# name: test/sql/discover_rank.test
+# description: rank-based tests recover a graph from skewed data that linear correlation misreads
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.77);
+
+# A linear-Gaussian world: a and b cause c, which causes d, which causes f.
+statement ok
+CREATE TABLE latent_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS b,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, b, c, d, 0.8*d + 0.6*e3 AS f FROM s2;
+
+# What gets measured is the same world through different monotone transforms:
+# log-scale, cubed, skewed. The causal structure has not changed; the
+# relationships have stopped being linear.
+statement ok
+CREATE TABLE skewed AS
+SELECT exp(1.5*a) AS a, b*b*b AS b, exp(c) AS c, d + d*d*d AS d, sinh(2*f) AS f FROM latent_world;
+
+# Rank-based tests recover the graph exactly.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('skewed', test := 'rank') WHERE in_graph;
+----
+a->c b->c c->d d->f
+
+# Linear correlation on the same columns does not.
+query I
+SELECT (SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+        FROM do_discover('skewed') WHERE in_graph) <> 'a->c b->c c->d d->f';
+----
+true
+
+# Ranks do not care which monotone transform the data went through. Another
+# one gives the same output, to the last bit, in every column. (These stay
+# strictly monotone in floating point; adding a constant would merge tiny
+# values into ties.)
+statement ok
+CREATE TABLE reskewed AS SELECT a*a AS a, 2*b AS b, sqrt(c) AS c, 2*d AS d, f*f*f AS f FROM skewed;
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM do_discover('skewed', test := 'rank')
+  EXCEPT SELECT * FROM do_discover('reskewed', test := 'rank'));
+----
+0
+
+# FCI takes the same tests, and finds no hidden cause where there is none.
+query I
+SELECT count(*) FILTER (WHERE edge = '<->') FROM do_discover('skewed', algorithm := 'fci', test := 'rank') WHERE in_graph;
+----
+0
+
+# The warning says what the rank test assumes instead.
+query I
+SELECT len(list_filter((SELECT warnings FROM do_discover('skewed', test := 'rank') LIMIT 1), lambda w: w LIKE '%Gaussian copula%'));
+----
+1
+
+# A column too coarse for ranks to mean much is named.
+statement ok
+CREATE TABLE with_flag AS SELECT *, (a > 1)::INT AS flag FROM skewed;
+
+query I
+SELECT len(list_filter((SELECT warnings FROM do_discover('with_flag', test := 'rank') LIMIT 1),
+                       lambda w: w LIKE 'column ''flag'' has fewer than 10 distinct values%'));
+----
+1
+
+statement error
+SELECT * FROM do_discover('skewed', test := 'kendall');
+----
+test must be 'pearson' or 'rank'

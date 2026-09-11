@@ -72,6 +72,8 @@ struct DiscoverSpec {
 	int64_t seed = 42;
 	//! "pc" assumes no hidden common causes; "fci" allows them.
 	string algorithm = "pc";
+	//! "pearson" assumes linear-Gaussian dependence; "rank" only a Gaussian copula.
+	string test = "pearson";
 };
 
 vector<string> ListParameter(const named_parameter_map_t &named, const char *key) {
@@ -133,6 +135,15 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 		throw BinderException("duckdo: algorithm must be 'pc' or 'fci', not '%s'. 'fci' allows hidden common causes; "
 		                      "'pc' assumes there are none",
 		                      spec.algorithm);
+	}
+	entry = named.find("test");
+	if (entry != named.end() && !entry->second.IsNull()) {
+		spec.test = StringUtil::Lower(entry->second.ToString());
+	}
+	if (spec.test != "pearson" && spec.test != "rank") {
+		throw BinderException("duckdo: test must be 'pearson' or 'rank', not '%s'. 'rank' tests on normal scores, "
+		                      "which only assumes that monotone transforms of the variables are jointly Gaussian",
+		                      spec.test);
 	}
 	return spec;
 }
@@ -235,6 +246,44 @@ NumericTable LoadNumeric(ClientContext &context, const DiscoverSpec &spec, const
 		}
 	}
 	return table;
+}
+
+//! Replace each column by its normal scores, Phi^-1(rank / (n + 1)), with tied
+//! values sharing their average rank. The correlation of normal scores estimates
+//! the latent correlation whenever monotone transforms of the variables are
+//! jointly Gaussian - a Gaussian copula - so the same Fisher-z tests then read
+//! conditional independence correctly in skewed, heavy-tailed or log-scale data
+//! that linear correlation misreads. Returns the columns too coarse for that.
+vector<string> RankNormalScores(NumericTable &t) {
+	vector<string> coarse;
+	vector<idx_t> order(t.n);
+	vector<double> column(t.n);
+	for (idx_t j = 0; j < t.p; j++) {
+		for (idx_t r = 0; r < t.n; r++) {
+			column[r] = t.data[r * t.p + j];
+		}
+		std::iota(order.begin(), order.end(), 0);
+		std::stable_sort(order.begin(), order.end(), [&](idx_t a, idx_t b) { return column[a] < column[b]; });
+		idx_t distinct = 0;
+		for (idx_t start = 0; start < t.n;) {
+			idx_t end = start + 1;
+			while (end < t.n && column[order[end]] == column[order[start]]) {
+				end++;
+			}
+			// The average of the 1-based ranks start + 1 .. end.
+			const double rank = 0.5 * static_cast<double>(start + end + 1);
+			const double score = NormalQuantile(rank / static_cast<double>(t.n + 1));
+			for (idx_t k = start; k < end; k++) {
+				t.data[order[k] * t.p + j] = score;
+			}
+			distinct++;
+			start = end;
+		}
+		if (distinct < 10) {
+			coarse.push_back(t.names[j]);
+		}
+	}
+	return coarse;
 }
 
 //! Rows in content order, so the bootstrap follows the data rather than where
@@ -903,12 +952,37 @@ void RunFciDiscovery(Discovery &out) {
 	                       "or a hidden common cause");
 }
 
+//! With test := 'rank', say what the tests assume in place of linear-Gaussian
+//! dependence, and name any column too coarse for ranks to mean much.
+void NoteRankTest(Discovery &out, const vector<string> &coarse) {
+	if (out.spec.test != "rank") {
+		return;
+	}
+	for (auto &warning : out.warnings) {
+		warning = StringUtil::Replace(warning, "Fisher-z tests", "rank-based Fisher-z tests (normal scores)");
+		warning =
+		    StringUtil::Replace(warning, "linear-Gaussian dependence",
+		                        "a Gaussian copula: that monotone transforms of the variables are jointly Gaussian");
+	}
+	for (auto &name : coarse) {
+		out.warnings.push_back(StringUtil::Format(
+		    "column '%s' has fewer than 10 distinct values; rank-based tests assume continuous variables, and ties "
+		    "this heavy weaken them",
+		    name));
+	}
+}
+
 Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, const char *fn) {
 	Discovery out;
 	out.spec = ParseDiscover(context, input, fn);
 	out.table = LoadNumeric(context, out.spec, fn);
+	vector<string> coarse;
+	if (out.spec.test == "rank") {
+		coarse = RankNormalScores(out.table);
+	}
 	if (out.spec.algorithm == "fci") {
 		RunFciDiscovery(out);
+		NoteRankTest(out, coarse);
 		return out;
 	}
 	const auto &t = out.table;
@@ -980,6 +1054,7 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 	}
 	out.warnings.push_back("this is a proposal, not a graph: do_graph_create refuses do_discover_dot's output until "
 	                       "its review marker is deleted and every undirected edge is given a direction");
+	NoteRankTest(out, coarse);
 	return out;
 }
 
@@ -1149,6 +1224,9 @@ unique_ptr<FunctionData> BindFciDot(const Discovery &found, vector<LogicalType> 
 	}
 	dot += "}\n";
 
+	if (found.spec.test == "rank") {
+		dot = StringUtil::Replace(dot, "linear-Gaussian dependence", "a Gaussian copula (rank-based tests)");
+	}
 	names = {"dot", "n_nodes", "n_directed", "n_undirected", "n_bidirected"};
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
 	                LogicalType::BIGINT};
@@ -1208,6 +1286,9 @@ unique_ptr<FunctionData> BindDiscoverDot(ClientContext &context, TableFunctionBi
 	}
 	dot += "}\n";
 
+	if (found.spec.test == "rank") {
+		dot = StringUtil::Replace(dot, "linear-Gaussian dependence", "a Gaussian copula (rank-based tests)");
+	}
 	names = {"dot", "n_nodes", "n_directed", "n_undirected"};
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
 	auto bind = make_uniq<ResultBindData>();
@@ -1225,6 +1306,7 @@ void AddDiscoverParameters(TableFunction &fn) {
 	fn.named_parameters["bootstrap"] = LogicalType::BIGINT;
 	fn.named_parameters["seed"] = LogicalType::BIGINT;
 	fn.named_parameters["algorithm"] = LogicalType::VARCHAR;
+	fn.named_parameters["test"] = LogicalType::VARCHAR;
 }
 
 } // namespace

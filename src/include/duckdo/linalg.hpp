@@ -129,6 +129,8 @@ double Variance(const vector<double> &v);
 double StdDev(const vector<double> &v);
 //! Two-sided normal p-value for |z|.
 double NormalTwoSidedP(double z);
+//! Inverse of the standard normal CDF, to double precision.
+double NormalQuantile(double p);
 //! 97.5th percentile of the standard normal, i.e. the 95% CI multiplier.
 static constexpr double Z95 = 1.959963984540054;
 

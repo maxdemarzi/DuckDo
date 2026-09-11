@@ -506,9 +506,22 @@ the b-c edge in opposite directions, and warns that they conflict. FCI returns `
 - **`alpha`** (default 0.01) is the level of each independence test. **`max_conditioning`**
   (default 3) caps the size of the conditioning sets. **`bootstrap`** (default 50) sets the number
   of resamples, and `0` turns them off, with a warning. **`seed`** follows `duckdo_seed`.
-- **Assumptions**, restated in `warnings`: no hidden common cause of any two variables,
-  faithfulness, and linear-Gaussian dependence. Real data usually breaks the first. When it does,
-  the orientations can be wrong even where every edge is right.
+- **`test`** (default `'pearson'`) chooses the independence test. `'rank'` replaces each column
+  by its normal scores, the inverse normal CDF of rank / (n + 1) with ties sharing their average
+  rank, and runs the same Fisher-z tests on those (the nonparanormal of Liu, Lafferty and
+  Wasserman 2009). It then assumes only a Gaussian copula: that *some* monotone transform of each
+  variable makes them jointly Gaussian. Log-scale, skewed and heavy-tailed columns qualify, and it
+  never needs to know which transform. Take a linear-Gaussian chain a -> c <- b, c -> d -> f,
+  observed as `exp(1.5*a)`, `b^3`, `exp(c)`, `d + d^3` and `sinh(2*f)`. Pearson returns six
+  edges, two of them spurious and one reversed; `'rank'` returns the true four. Transform the
+  columns again, monotonically, and `'rank'` returns the same output bit for bit. Where the data
+  really is Gaussian, both find the same graph. Ranks mean little in a column with many ties, so
+  any column with fewer than 10 distinct values is named in `warnings`. Binary and mixed data
+  need a different test, which DuckDo does not have yet. Both algorithms take either test.
+- **Assumptions**, restated in `warnings`: no hidden common cause of any two variables (PC only),
+  faithfulness, and linear-Gaussian dependence, or a Gaussian copula with `test := 'rank'`. Real
+  data usually breaks the first. When it does, the orientations can be wrong even where every edge
+  is right.
 - **The stabilities lean pessimistic.** A resample carries the sample's own error on top of its
   own, so its independence tests reject more often than `alpha`, and resamples join pairs that
   are truly independent. All orientations flow from colliders, so one spurious edge that erases a
