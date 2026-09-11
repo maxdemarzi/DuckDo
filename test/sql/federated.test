@@ -1,6 +1,6 @@
 # name: test/sql/federated.test
 # description: pooling effects estimated at separate sites, without moving rows between them
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

@@ -1,6 +1,6 @@
 # name: test/sql/did_dr.test
 # description: doubly robust difference-in-differences when parallel trends holds only given covariates
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

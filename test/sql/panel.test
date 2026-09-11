@@ -1,6 +1,6 @@
 # name: test/sql/panel.test
 # description: difference-in-differences under staggered adoption
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

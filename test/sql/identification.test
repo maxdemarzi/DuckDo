@@ -1,6 +1,6 @@
 # name: test/sql/identification.test
 # description: estimators for the strategies do_identify recommends - IV and front-door
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

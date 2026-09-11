@@ -380,10 +380,12 @@ unique_ptr<FunctionData> BindUplift(ClientContext &context, TableFunctionBindInp
 
 // --- do_optimal_policy ------------------------------------------------------
 
+//! An aggregate with no default member initialiser, so brace-initialising it
+//! compiles as C++11, which the Linux builds use.
 struct PolicyLeaf {
 	vector<idx_t> rows;
 	string rule;
-	idx_t depth = 0;
+	idx_t depth;
 };
 
 //! One greedy split: bucket each feature into deciles, then read off every cut

@@ -1,6 +1,6 @@
 # name: test/sql/diagnostics.test
 # description: assumptions are queryable, with boolean verdicts
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

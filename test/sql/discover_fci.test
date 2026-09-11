@@ -1,6 +1,6 @@
 # name: test/sql/discover_fci.test
 # description: FCI finds a hidden common cause where PC contradicts itself, and invents none where there is none
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

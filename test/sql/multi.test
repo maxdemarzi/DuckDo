@@ -1,6 +1,6 @@
 # name: test/sql/multi.test
 # description: do_ate_levels - population contrasts for a treatment with more than two levels
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

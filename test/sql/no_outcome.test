@@ -1,6 +1,7 @@
 # name: test/sql/no_outcome.test
 # description: functions called without an outcome give the same answer on every call
-# group: [duckdo]
+# group: [sql]
+
 #
 # Without an outcome, the frame's outcome column is CAST(NULL AS DOUBLE), and it
 # used to be copied from the vector's data slots without checking them - so the

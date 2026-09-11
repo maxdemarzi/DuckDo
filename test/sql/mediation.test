@@ -1,6 +1,6 @@
 # name: test/sql/mediation.test
 # description: natural direct and indirect effects, and the assumptions behind them
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

@@ -1,6 +1,6 @@
 # name: test/sql/cluster.test
 # description: rows that are not independent units - a one-to-many join - get cluster-robust inference
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

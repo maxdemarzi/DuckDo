@@ -1,6 +1,7 @@
 # name: test/sql/gpu.test
 # description: CausalPFN on CUDA agrees with the CPU, repeats exactly, and Do-PFN refuses CUDA
-# group: [duckdo]
+# group: [sql]
+
 #
 # Needs exported models, a build with -DDUCKDO_ORT_FLAVOUR=cuda12, an NVIDIA GPU,
 # and CUDA 12.8 with cuDNN 9 on the library path. Opt in with DUCKDO_CUDA_TESTS:

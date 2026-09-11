@@ -1,6 +1,6 @@
 # name: test/sql/survival.test
 # description: time-to-event outcomes as a difference in restricted mean survival time
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

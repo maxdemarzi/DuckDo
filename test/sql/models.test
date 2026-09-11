@@ -1,6 +1,7 @@
 # name: test/sql/models.test
 # description: the causal foundation model catalog and its guard rails
-# group: [duckdo]
+# group: [sql]
+
 #
 # These assertions hold whether or not the build has ONNX Runtime, and whether
 # or not any model artifacts are on disk. Actual inference is exercised by

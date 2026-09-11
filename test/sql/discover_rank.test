@@ -1,6 +1,6 @@
 # name: test/sql/discover_rank.test
 # description: rank-based tests recover a graph from skewed data that linear correlation misreads
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

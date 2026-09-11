@@ -1,6 +1,6 @@
 # name: test/sql/discover.test
 # description: causal discovery proposes a graph, says how fragile it is, and cannot be registered unreviewed
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

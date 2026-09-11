@@ -1,6 +1,7 @@
 # name: test/sql/cluster_estimators.test
 # description: cluster := restores the unit-level interval in every estimator that reports one
-# group: [duckdo]
+# group: [sql]
+
 #
 # One table, 3,000 independent rows, with a column for every estimator's needs.
 # Joined to three copies of each row it has 9,000 rows but still 3,000 units.

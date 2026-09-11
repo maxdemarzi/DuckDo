@@ -1,6 +1,6 @@
 # name: test/sql/synth.test
 # description: synthetic control, where parallel trends fails but a convex combination of donors does not
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

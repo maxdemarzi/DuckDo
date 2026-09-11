@@ -1,6 +1,6 @@
 # name: test/sql/estimators.test
 # description: estimators recover a known ATE and expose the confounding bias
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

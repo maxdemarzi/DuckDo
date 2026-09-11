@@ -1,6 +1,7 @@
 # name: test/sql/download.test
 # description: do_download copies a model's artifacts through DuckDB's file system, hashing as it goes
-# group: [duckdo]
+# group: [sql]
+
 #
 # Dependency-free: the source is a temporary directory of tiny stand-ins with
 # the real artifact names, written by COPY. do_download copies whatever the

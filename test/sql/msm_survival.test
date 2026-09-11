@@ -1,6 +1,6 @@
 # name: test/sql/msm_survival.test
 # description: survival under a treatment that changes over time, when a confounder changes with it
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

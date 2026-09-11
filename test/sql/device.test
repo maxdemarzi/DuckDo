@@ -1,6 +1,7 @@
 # name: test/sql/device.test
 # description: duckdo_device and duckdo_gpu_precision default to cpu and fp32, and are checked before a model runs
-# group: [duckdo]
+# group: [sql]
+
 #
 # Needs exported models, like cfm.test, but no GPU: whether CUDA itself works is
 # test/sql/gpu.test's business.

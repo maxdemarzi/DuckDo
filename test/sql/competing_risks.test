@@ -1,6 +1,6 @@
 # name: test/sql/competing_risks.test
 # description: time lost to one cause when another cause ends the chance of it
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

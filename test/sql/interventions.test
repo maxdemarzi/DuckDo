@@ -1,6 +1,6 @@
 # name: test/sql/interventions.test
 # description: the do() surface - counterfactuals, interventions, policy value
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

@@ -1,6 +1,7 @@
 # name: test/sql/cfm.test
 # description: end-to-end causal foundation model inference (Do-PFN over ONNX)
-# group: [duckdo]
+# group: [sql]
+
 #
 # Skipped unless DUCKDO_MODEL_DIR points at a directory holding exported graphs:
 #   python scripts/export/export_dopfn.py --repo <Do-PFN checkout> --out build/models

@@ -1,6 +1,6 @@
 # name: test/sql/continuous.test
 # description: continuous treatments - average partial effect and dose response
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

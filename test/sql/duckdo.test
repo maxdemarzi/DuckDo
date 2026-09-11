@@ -1,6 +1,6 @@
 # name: test/sql/duckdo.test
 # description: extension loads and reports actionable errors
-# group: [duckdo]
+# group: [sql]
 
 statement error
 SELECT * FROM do_ate('customers', treatment := 'discount', outcome := 'revenue');

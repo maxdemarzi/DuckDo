@@ -1,6 +1,6 @@
 # name: test/sql/graph.test
 # description: d-separation, identification and covariate grading
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 

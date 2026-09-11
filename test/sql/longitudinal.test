@@ -1,6 +1,6 @@
 # name: test/sql/longitudinal.test
 # description: marginal structural models for treatment that varies over time
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 
