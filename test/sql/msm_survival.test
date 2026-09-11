@@ -1,0 +1,182 @@
+# name: test/sql/msm_survival.test
+# description: survival under a treatment that changes over time, when a confounder changes with it
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.41);
+
+# Ten periods. Each period a confounder l is measured, treatment a follows it
+# and the previous treatment, the event happens with probability
+# sigmoid(-2.6 + 0.8 l - 0.7 a), and a unit may drop out with probability
+# sigmoid(-3.2 + 0.7 l). Then l moves on: 0.7 l - 0.6 a + noise, so treatment
+# lowers the confounder that raises both the event and further treatment - the
+# case no adjustment set handles. Simulating a million units under each regime
+# gives the truths: expected event-free periods, always treated minus never,
+# 0.4393 within 4 periods and 2.2976 within 10; survival through 10 periods
+# 0.8424 always treated and 0.4525 never.
+# A recursive query draws its random numbers in whatever order its threads run,
+# so the panel is built on one thread: the same table every time, and the
+# numbers quoted in FUNCTIONS.md reproduce.
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE months AS
+WITH RECURSIVE sim(id, period, l, a, died, dropped) AS (
+  SELECT id, 1, l, a,
+         (random() < 1/(1+exp(-(-2.6 + 0.8*l - 0.7*a))))::INT,
+         (random() < 1/(1+exp(-(-3.2 + 0.7*l))))::INT
+  FROM (SELECT id, l, (random() < 1/(1+exp(-(-0.3 + 0.6*l))))::INT AS a
+        FROM (SELECT i AS id, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS l FROM range(20000) r(i)))
+  UNION ALL
+  SELECT id, period, l, a,
+         (random() < 1/(1+exp(-(-2.6 + 0.8*l - 0.7*a))))::INT,
+         (random() < 1/(1+exp(-(-3.2 + 0.7*l))))::INT
+  FROM (SELECT id, period, l, (random() < 1/(1+exp(-(-0.3 + 0.6*l + 1.0*a_prev))))::INT AS a
+        FROM (SELECT id, period + 1 AS period, 0.7*l - 0.6*a + 0.5*sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS l,
+                     a AS a_prev
+              FROM sim WHERE died = 0 AND dropped = 0 AND period < 10))
+)
+SELECT id, period, l, a, died FROM sim;
+
+statement ok
+RESET threads;
+
+# Within 10 periods the regimes differ by 2.30 event-free periods.
+query II
+SELECT abs(estimate - 2.2976) < 0.4, ci_low < 2.2976 AND 2.2976 < ci_high
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], horizon := 10, bootstrap_reps := 100);
+----
+true	true
+
+query II
+SELECT abs(survival_always - 0.8424) < 0.06, abs(survival_never - 0.4525) < 0.08
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], horizon := 10, bootstrap_reps := 0);
+----
+true	true
+
+# Within 4 periods, 0.44.
+query II
+SELECT abs(estimate - 0.4393) < 0.12, ci_low < 0.4393 AND 0.4393 < ci_high
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], horizon := 4, bootstrap_reps := 100);
+----
+true	true
+
+# Without the confounder, the weights only undo treatment history, and the
+# units who stayed untreated look far healthier than the regime would make
+# anyone.
+query I
+SELECT estimate < 1.9
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 horizon := 10, bootstrap_reps := 0);
+----
+true
+
+# The default horizon stops where both regimes still have 5% of the units
+# following them, which here is well short of 10: staying on a regime gets
+# rarer every period.
+query II
+SELECT horizon BETWEEN 3 AND 6, len(list_filter(warnings, lambda w: w LIKE 'horizon defaulted to%')) = 1
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], bootstrap_reps := 0);
+----
+true	true
+
+query IIII
+SELECT estimand, estimator, n_units, n_events + n_dropouts <= n_units
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], horizon := 10, bootstrap_reps := 0);
+----
+RMST difference, always vs never treated	iptw-ipcw-regime-kaplan-meier	20000	true
+
+# The weights are heavy here, and the result says what that means.
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE '%near-violation of positivity%')) = 1
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], horizon := 10, bootstrap_reps := 0);
+----
+true
+
+query II
+SELECT std_error IS NULL, len(list_filter(warnings, lambda w: w = 'bootstrap_reps := 0, so no interval is reported')) = 1
+FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                 covariates := ['l'], horizon := 10, bootstrap_reps := 0);
+----
+true	true
+
+# The same query twice gives the same answer, interval included.
+query I
+SELECT count(*) FROM (
+  SELECT * FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                            covariates := ['l'], horizon := 4, bootstrap_reps := 30)
+  EXCEPT
+  SELECT * FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                            covariates := ['l'], horizon := 4, bootstrap_reps := 30));
+----
+0
+
+# --- error paths ----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', covariates := ['l']);
+----
+requires event
+
+statement error
+SELECT * FROM do_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                          covariates := ['l'], horizon := 11);
+----
+horizon := counts periods from the first
+
+# A unit that goes on after its event.
+statement ok
+CREATE TABLE after_event AS
+SELECT * FROM months
+UNION ALL
+(SELECT id, period + 1, l, a, 0 FROM months WHERE died = 1 AND period < 10 ORDER BY id LIMIT 1);
+
+statement error
+SELECT * FROM do_msm_rmst('after_event', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                          covariates := ['l']);
+----
+has rows after its event
+
+# A unit with a period missing.
+statement ok
+CREATE TABLE gap AS
+SELECT * FROM months WHERE NOT (id = (SELECT min(id) FROM months WHERE period = 3) AND period = 2);
+
+statement error
+SELECT * FROM do_msm_rmst('gap', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                          covariates := ['l']);
+----
+has no row for period
+
+statement ok
+CREATE TABLE coded AS SELECT id, period, l, a, died * 2 AS died FROM months;
+
+statement error
+SELECT * FROM do_msm_rmst('coded', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                          covariates := ['l']);
+----
+event must be 0 or 1
+
+statement ok
+CREATE TABLE eventless AS SELECT id, period, l, a, 0 AS died FROM months;
+
+statement error
+SELECT * FROM do_msm_rmst('eventless', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                          covariates := ['l']);
+----
+no unit has an event
+
+query I
+SELECT count(*) FROM duckdo_msm_rmst('months', unit := 'id', period := 'period', treatment := 'a', event := 'died',
+                                     covariates := ['l'], horizon := 4, bootstrap_reps := 0);
+----
+1

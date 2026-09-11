@@ -29,6 +29,14 @@
 // The structural model is then E[Y | cumulative treatment] fitted by weighted
 // least squares, and its coefficient is the effect of one additional treated
 // period.
+//
+// do_msm_rmst takes the same panel with an event in place of an outcome, and
+// compares two regimes - treated in every period, and in none - on expected
+// event-free periods within a horizon. It needs no structural model: each unit
+// counts toward a regime only while its treatment matches it, and its
+// person-periods are weighted by the inverse probability of having stayed on
+// it, and of not having dropped out, given the measured history. A weighted
+// Kaplan-Meier per regime then gives the curve that regime would have produced.
 //===----------------------------------------------------------------------===//
 #include "duckdb/common/string_util.hpp"
 #include "duckdo/estimators.hpp"
@@ -38,6 +46,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numeric>
+#include <random>
 
 namespace duckdb {
 namespace duckdo {
@@ -490,6 +500,365 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	return std::move(bind);
 }
 
+//! A count-valued named parameter, or the fallback.
+idx_t CountParam(const named_parameter_map_t &named, const char *key, idx_t fallback) {
+	auto entry = named.find(key);
+	if (entry == named.end() || entry->second.IsNull()) {
+		return fallback;
+	}
+	const int64_t value = entry->second.GetValue<int64_t>();
+	if (value < 0) {
+		throw BinderException("duckdo: %s := must not be negative; got %lld", key, static_cast<long long>(value));
+	}
+	return static_cast<idx_t>(value);
+}
+
+//! Per-period weighted hazards for the two regimes, from one sample of units.
+struct RegimeHazards {
+	//! [regime][period], regime 0 never treated and 1 always treated.
+	vector<double> hazard[2];
+	//! Unweighted units following the regime and at risk, per period.
+	vector<double> followers[2];
+	//! Whether the regime had anyone at risk in each period.
+	vector<uint8_t> covered[2];
+	double max_weight = 0.0;
+	idx_t dropouts = 0;
+};
+
+//! Clone, censor and weight. Each unit is copied into both regimes and counts
+//! toward one only while its treatment matches it. Every person-period it
+//! contributes is weighted by the inverse probability of the treatment history
+//! that kept it on the regime, and of not having dropped out before it, both from
+//! pooled logistic models of the measured history. `units` may repeat, for the
+//! bootstrap; each repeat is a separate unit.
+RegimeHazards RegimeCurves(const LongPanel &panel, const vector<idx_t> &units, idx_t n_periods) {
+	const idx_t cols = 2 + panel.n_covariates;
+	idx_t n_obs = 0;
+	for (auto u : units) {
+		n_obs += panel.by_unit[u].size();
+	}
+	Matrix treat_design(n_obs, cols), drop_design(n_obs, cols);
+	vector<double> action(n_obs, 0.0), dropped(n_obs, 0.0);
+	vector<idx_t> all_rows(n_obs), drop_rows;
+	std::iota(all_rows.begin(), all_rows.end(), 0);
+	RegimeHazards out;
+	idx_t at = 0;
+	for (auto u : units) {
+		const auto &rows = panel.by_unit[u];
+		double prior = 0.0;
+		for (idx_t k = 0; k < rows.size(); k++) {
+			const auto &row = rows[k];
+			treat_design.At(at, 0) = static_cast<double>(row.period);
+			treat_design.At(at, 1) = prior;
+			drop_design.At(at, 0) = static_cast<double>(row.period);
+			drop_design.At(at, 1) = row.treatment;
+			for (idx_t c = 0; c < panel.n_covariates; c++) {
+				treat_design.At(at, 2 + c) = row.covariates[c];
+				drop_design.At(at, 2 + c) = row.covariates[c];
+			}
+			action[at] = row.treatment;
+			// Dropout follows a period survived without the event, and cannot
+			// follow the last period, where everyone still in is censored by the
+			// end of the study rather than by anything a model should explain.
+			const bool event = row.outcome >= 0.5;
+			if (!event && row.period + 1 < n_periods) {
+				drop_rows.push_back(at);
+				if (k + 1 == rows.size()) {
+					dropped[at] = 1.0;
+					out.dropouts++;
+				}
+			}
+			prior = row.treatment;
+			at++;
+		}
+	}
+	const double lambda = 1e-6 * static_cast<double>(n_obs) + 1e-8;
+	auto treat_model = FitLogistic(treat_design, action, all_rows, {}, lambda, 60);
+	LinearModel drop_model;
+	if (out.dropouts > 0) {
+		drop_model = FitLogistic(drop_design, dropped, drop_rows, {}, lambda, 60);
+	}
+
+	vector<double> risk[2], events[2];
+	for (int r = 0; r < 2; r++) {
+		risk[r].assign(n_periods, 0.0);
+		events[r].assign(n_periods, 0.0);
+		out.followers[r].assign(n_periods, 0.0);
+	}
+	at = 0;
+	for (auto u : units) {
+		const auto &rows = panel.by_unit[u];
+		for (int r = 0; r < 2; r++) {
+			double treat_weight = 1.0, drop_weight = 1.0;
+			for (idx_t k = 0; k < rows.size(); k++) {
+				const auto &row = rows[k];
+				const idx_t i = at + k;
+				if ((row.treatment >= 0.5 ? 1 : 0) != r) {
+					break; // left the regime: censored here, and the weights stand in for it
+				}
+				const double p_treat = treat_model.Predict(treat_design.Row(i), cols);
+				treat_weight /= std::max(r == 1 ? p_treat : 1.0 - p_treat, 1e-6);
+				const double w = treat_weight * drop_weight;
+				risk[r][row.period] += w;
+				out.followers[r][row.period] += 1.0;
+				out.max_weight = std::max(out.max_weight, w);
+				if (row.outcome >= 0.5) {
+					events[r][row.period] += w;
+					break;
+				}
+				if (out.dropouts > 0 && row.period + 1 < n_periods) {
+					const double p_drop = drop_model.Predict(drop_design.Row(i), cols);
+					drop_weight /= std::max(1.0 - p_drop, 1e-6);
+				}
+			}
+		}
+		at += rows.size();
+	}
+	for (int r = 0; r < 2; r++) {
+		out.hazard[r].assign(n_periods, 0.0);
+		out.covered[r].assign(n_periods, 0);
+		for (idx_t t = 0; t < n_periods; t++) {
+			if (risk[r][t] > 0.0) {
+				out.hazard[r][t] = events[r][t] / risk[r][t];
+				out.covered[r][t] = 1;
+			}
+		}
+	}
+	return out;
+}
+
+//! Expected event-free periods among the first `horizon`, and survival through
+//! the last of them, from per-period hazards: sum over t of S(t).
+void RegimeRmst(const vector<double> &hazard, idx_t horizon, double &rmst, double &survival) {
+	survival = 1.0;
+	rmst = 0.0;
+	for (idx_t t = 0; t < horizon; t++) {
+		survival *= 1.0 - hazard[t];
+		rmst += survival;
+	}
+}
+
+unique_ptr<FunctionData> BindMsmRmst(ClientContext &context, TableFunctionBindInput &input,
+                                     vector<LogicalType> &return_types, vector<string> &names) {
+	const char *fn = "do_msm_rmst";
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		throw BinderException("duckdo: do_msm_rmst needs a table name or query as its first argument");
+	}
+	const auto &named = input.named_parameters;
+	const string relation = input.inputs[0].ToString();
+	const string unit_col = RequireParam(named, "unit", fn);
+	const string period_col = RequireParam(named, "period", fn);
+	const string treatment_col = RequireParam(named, "treatment", fn);
+	const string event_col = RequireParam(named, "event", fn);
+	const vector<string> covariates = ListParam(named, "covariates");
+	const idx_t reps = CountParam(named, "bootstrap_reps", GetSettingIdx(context, "duckdo_bootstrap_reps", 200));
+	const uint64_t seed = CountParam(named, "seed", GetSettingIdx(context, "duckdo_seed", 42));
+
+	SetNumericThreads(GetSettingIdx(context, "duckdo_threads", 0));
+	auto panel = LoadLong(context, relation, unit_col, period_col, treatment_col, event_col, covariates, fn);
+	const idx_t n_periods = panel.period_labels.size();
+	const idx_t n_units = panel.units.size();
+
+	// Time is counted from the panel's first period, so every unit has to be
+	// followed from it, one row per period, and stop at its event.
+	idx_t n_events = 0;
+	for (idx_t u = 0; u < n_units; u++) {
+		const auto &rows = panel.by_unit[u];
+		for (idx_t k = 0; k < rows.size(); k++) {
+			const auto &row = rows[k];
+			if (row.period != k) {
+				throw BinderException("duckdo: unit '%s' has no row for period '%s'. do_msm_rmst counts time from the "
+				                      "first period, so every unit needs one row per period from the first until its "
+				                      "event or its last observation",
+				                      panel.units[u], panel.period_labels[k]);
+			}
+			if (!row.outcome_observed || (row.outcome != 0.0 && row.outcome != 1.0)) {
+				throw BinderException("duckdo: event must be 0 or 1 in every row; unit '%s' has %s at period '%s'",
+				                      panel.units[u],
+				                      row.outcome_observed ? StringUtil::Format("%g", row.outcome) : string("NULL"),
+				                      panel.period_labels[row.period]);
+			}
+			if (row.outcome == 1.0) {
+				n_events++;
+				if (k + 1 != rows.size()) {
+					throw BinderException("duckdo: unit '%s' has rows after its event at period '%s'; a unit leaves "
+					                      "the risk set when the event happens",
+					                      panel.units[u], panel.period_labels[row.period]);
+				}
+			}
+		}
+	}
+	if (n_events == 0) {
+		throw BinderException(
+		    "duckdo: no unit has an event, so every curve stays at 1 and there is nothing to compare");
+	}
+
+	// Units in label order, so the result and every bootstrap draw depend on
+	// the data rather than on the order the rows were read in.
+	vector<idx_t> ordered(n_units);
+	std::iota(ordered.begin(), ordered.end(), 0);
+	std::sort(ordered.begin(), ordered.end(), [&](idx_t a, idx_t b) { return panel.units[a] < panel.units[b]; });
+
+	auto point = RegimeCurves(panel, ordered, n_periods);
+
+	// The horizon defaults to the last period in which both regimes still had a
+	// real number of units following them and at risk. Following a regime is
+	// rarer every period, and past that point the curves rest on a handful.
+	const idx_t floor_units = std::max<idx_t>(10, n_units / 20);
+	idx_t supported = 0;
+	while (supported < n_periods && point.followers[0][supported] >= static_cast<double>(floor_units) &&
+	       point.followers[1][supported] >= static_cast<double>(floor_units)) {
+		supported++;
+	}
+	vector<string> warnings;
+	idx_t horizon = supported;
+	auto horizon_entry = named.find("horizon");
+	const bool horizon_given = horizon_entry != named.end() && !horizon_entry->second.IsNull();
+	if (horizon_given) {
+		const int64_t h = horizon_entry->second.GetValue<int64_t>();
+		if (h < 1 || h > static_cast<int64_t>(n_periods)) {
+			throw BinderException("duckdo: horizon := counts periods from the first, so it must be between 1 and %llu; "
+			                      "got %lld",
+			                      static_cast<unsigned long long>(n_periods), static_cast<long long>(h));
+		}
+		horizon = static_cast<idx_t>(h);
+		for (idx_t t = 0; t < horizon; t++) {
+			if (!point.covered[0][t] || !point.covered[1][t]) {
+				throw BinderException("duckdo: by period '%s' no unit is still following the %s regime, so its curve "
+				                      "stops there; choose a horizon before it",
+				                      panel.period_labels[t], point.covered[1][t] ? "never-treated" : "always-treated");
+			}
+		}
+		if (horizon > supported) {
+			warnings.push_back(StringUtil::Format(
+			    "horizon := %llu runs past period %llu, the last in which both regimes still had %llu units following "
+			    "them, so the far end of each curve rests on very few people",
+			    static_cast<unsigned long long>(horizon), static_cast<unsigned long long>(supported),
+			    static_cast<unsigned long long>(floor_units)));
+		}
+	} else if (horizon == 0) {
+		throw BinderException("duckdo: fewer than %llu units follow each regime even in the first period, so neither "
+		                      "curve can be estimated. Treated in every period and treated in none both need units who "
+		                      "actually did that",
+		                      static_cast<unsigned long long>(floor_units));
+	}
+
+	double rmst_always = 0.0, rmst_never = 0.0, survival_always = 1.0, survival_never = 1.0;
+	RegimeRmst(point.hazard[1], horizon, rmst_always, survival_always);
+	RegimeRmst(point.hazard[0], horizon, rmst_never, survival_never);
+	const double estimate = rmst_always - rmst_never;
+
+	// Resample whole units and redo everything, both weight models included, so
+	// the interval accounts for the weights being estimated. Per-replicate
+	// seeding keeps the draw independent of which thread runs it.
+	vector<double> per_rep(reps, 0.0);
+	vector<uint8_t> rep_usable(reps, 0);
+	ParallelJobs(reps, [&](idx_t rep) {
+		std::mt19937_64 rng(seed ^ 0xC10E5EEDULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+		std::uniform_int_distribution<idx_t> pick(0, n_units - 1);
+		vector<idx_t> draw(n_units);
+		for (auto &u : draw) {
+			u = ordered[pick(rng)];
+		}
+		auto curves = RegimeCurves(panel, draw, n_periods);
+		for (idx_t t = 0; t < horizon; t++) {
+			if (!curves.covered[0][t] || !curves.covered[1][t]) {
+				return;
+			}
+		}
+		double a = 0.0, b = 0.0, sa = 0.0, sb = 0.0;
+		RegimeRmst(curves.hazard[1], horizon, a, sa);
+		RegimeRmst(curves.hazard[0], horizon, b, sb);
+		per_rep[rep] = a - b;
+		rep_usable[rep] = 1;
+	});
+	vector<double> draws;
+	for (idx_t rep = 0; rep < reps; rep++) {
+		if (rep_usable[rep]) {
+			draws.push_back(per_rep[rep]);
+		}
+	}
+	double se = 0.0;
+	if (draws.size() >= 20) {
+		double variance = 0.0;
+		for (auto d : draws) {
+			variance += (d - estimate) * (d - estimate);
+		}
+		se = std::sqrt(variance / static_cast<double>(draws.size() - 1));
+	} else if (reps == 0) {
+		warnings.push_back("bootstrap_reps := 0, so no interval is reported");
+	} else {
+		warnings.push_back("fewer than 20 bootstrap draws were usable, so no interval is reported");
+	}
+
+	if (covariates.empty()) {
+		warnings.push_back("no covariates := given, so the weights condition only on treatment history. That is the "
+		                   "right model only if nothing time-varying drives treatment or dropout - otherwise this is "
+		                   "an unadjusted comparison of the units who happened to stay on each regime");
+	}
+	if (!horizon_given) {
+		warnings.push_back(StringUtil::Format(
+		    "horizon defaulted to %llu periods, the last in which both regimes still had at least %llu units "
+		    "following them and at risk. The horizon is part of the estimand - a different one is a different "
+		    "quantity",
+		    static_cast<unsigned long long>(horizon), static_cast<unsigned long long>(floor_units)));
+	}
+	if (point.max_weight > 20.0) {
+		warnings.push_back(StringUtil::Format(
+		    "the largest weight on a person-period is %.1f: a few units who stayed on a regime against the odds "
+		    "carry much of its curve. This is what a near-violation of positivity looks like",
+		    point.max_weight));
+	}
+	warnings.push_back("two regimes are compared, treated in every period and treated in none. A unit counts toward "
+	                   "a regime only while its treatment matches it, and the weights stand in for the units who left");
+	warnings.push_back("the weights assume no unmeasured confounder of treatment and the event at any period, and that "
+	                   "dropout depends only on the measured history - on period, current treatment and the "
+	                   "covariates, as the dropout model sees it");
+	warnings.push_back("this is a difference in expected event-free periods, not a hazard ratio: a hazard ratio "
+	                   "compares units still at risk, and treatment changes who is still at risk");
+
+	vector<Value> warning_values;
+	for (auto &w : warnings) {
+		warning_values.push_back(Value(w));
+	}
+	names = {"estimand",    "estimator",        "estimate",        "std_error",      "ci_low",  "ci_high",   "horizon",
+	         "rmst_always", "rmst_never",       "survival_always", "survival_never", "n_units", "n_periods", "n_events",
+	         "n_dropouts",  "followers_always", "followers_never", "max_weight",     "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::BIGINT,
+	                LogicalType::DOUBLE,
+	                LogicalType::LIST(LogicalType::VARCHAR)};
+	auto bind = make_uniq<ResultBindData>();
+	bind->rows.push_back(
+	    {Value("RMST difference, always vs never treated"), Value("iptw-ipcw-regime-kaplan-meier"),
+	     Value::DOUBLE(estimate), se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
+	     se > 0.0 ? Value::DOUBLE(estimate - Z95 * se) : Value(LogicalType::DOUBLE),
+	     se > 0.0 ? Value::DOUBLE(estimate + Z95 * se) : Value(LogicalType::DOUBLE),
+	     Value::BIGINT(static_cast<int64_t>(horizon)), Value::DOUBLE(rmst_always), Value::DOUBLE(rmst_never),
+	     Value::DOUBLE(survival_always), Value::DOUBLE(survival_never), Value::BIGINT(static_cast<int64_t>(n_units)),
+	     Value::BIGINT(static_cast<int64_t>(n_periods)), Value::BIGINT(static_cast<int64_t>(n_events)),
+	     Value::BIGINT(static_cast<int64_t>(point.dropouts)),
+	     Value::BIGINT(static_cast<int64_t>(point.followers[1][horizon - 1])),
+	     Value::BIGINT(static_cast<int64_t>(point.followers[0][horizon - 1])), Value::DOUBLE(point.max_weight),
+	     Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
+	return std::move(bind);
+}
+
 } // namespace
 
 void RegisterLongitudinalFunctions(ExtensionLoader &loader) {
@@ -502,6 +871,17 @@ void RegisterLongitudinalFunctions(ExtensionLoader &loader) {
 	fn.named_parameters["baseline"] = LogicalType::LIST(LogicalType::VARCHAR);
 	fn.named_parameters["truncate"] = LogicalType::DOUBLE;
 	RegisterUnderBothNames(loader, fn, "msm");
+
+	TableFunction regimes("", {LogicalType::VARCHAR}, EmitRows, BindMsmRmst, InitGlobal);
+	regimes.named_parameters["unit"] = LogicalType::VARCHAR;
+	regimes.named_parameters["period"] = LogicalType::VARCHAR;
+	regimes.named_parameters["treatment"] = LogicalType::VARCHAR;
+	regimes.named_parameters["event"] = LogicalType::VARCHAR;
+	regimes.named_parameters["covariates"] = LogicalType::LIST(LogicalType::VARCHAR);
+	regimes.named_parameters["horizon"] = LogicalType::BIGINT;
+	regimes.named_parameters["bootstrap_reps"] = LogicalType::BIGINT;
+	regimes.named_parameters["seed"] = LogicalType::BIGINT;
+	RegisterUnderBothNames(loader, regimes, "msm_rmst");
 }
 
 } // namespace duckdo

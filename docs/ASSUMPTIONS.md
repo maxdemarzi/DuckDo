@@ -133,6 +133,11 @@ confounders that the treatment itself affects — which no covariate adjustment 
 Check `mean_weight`: it should sit near 1, and a mean far from 1 means the treatment
 model is misspecified.
 
+`do_msm_rmst` needs the same, and one thing more: dropout that depends only on the
+measured history, which its dropout model conditions on. It also needs units who
+actually stayed on each regime. Check `max_weight` and the followers counts: a handful
+of units carrying a regime's curve is what a positivity problem looks like there.
+
 ### `do_rmst` and `do_rmtl` — independent censoring
 
 Subjects who leave the study are not leaving *because* of where their outcome was

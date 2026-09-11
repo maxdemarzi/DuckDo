@@ -752,6 +752,58 @@ correct handling of measured confounders that the treatment itself affects — w
 covariate adjustment can do. The structural model is linear in cumulative treated periods, so it
 assumes every period is worth the same and that only the total matters, not when it happened.
 
+### `do_msm_rmst`
+
+Survival when the treatment changes over follow-up and a confounder changes with it. It reads
+the panel `do_msm` reads, with `event` in place of `outcome`: one row per unit per period, from
+the first period until the unit's event or its last observation. Named parameters: `unit`,
+`period`, `treatment`, `event` (all required), `covariates`, `horizon` (in periods, counted from
+the first), `bootstrap_reps` and `seed`.
+
+```sql
+SELECT estimate, ci_low, ci_high, horizon, rmst_always, rmst_never
+FROM do_msm_rmst('patient_months', unit := 'patient_id', period := 'month',
+                 treatment := 'on_drug', event := 'died', covariates := ['creatinine']);
+-- 0.456 | 0.410 | 0.502 | 4 | 3.689 | 3.233
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, horizon, rmst_always,
+rmst_never, survival_always, survival_never, n_units, n_periods, n_events, n_dropouts,
+followers_always, followers_never, max_weight, warnings`. The estimate compares two regimes,
+treated in every period and treated in none, on **expected event-free periods within `horizon`**.
+`survival_*` is each regime's survival through the last of those periods.
+
+It needs no structural model. Each unit is copied into both regimes and counts toward one only
+while its treatment matches it: clone, censor, weight. Every person-period it contributes is
+weighted by the inverse probability of the treatment history that kept it on the regime, and of
+not having dropped out before then. Both come from pooled logistic models of the measured
+history, with the period as a linear term. A weighted Kaplan–Meier curve per regime then gives the
+survival that regime would have produced.
+
+On a ten-period world where a confounder raises both the event and further treatment, and is
+lowered by earlier treatment, the truths come from simulating a million units under each regime:
+
+| horizon | `do_msm_rmst` returns | the truth |
+|---|---|---|
+| 4 (the default here) | 0.456, interval 0.410 to 0.502 | 0.439 |
+| 10 | 2.106, interval 1.836 to 2.375 | 2.298 |
+| 10, without `covariates` | 1.267 | 2.298 |
+
+Comparing the units who happened to stay on each regime, without weights, gives about 1.4. On
+this world the dropout model changes little (in simulation, 2.35 without it against 2.31 with it),
+though dropout depends on the confounder. On a million units per sample the estimator lands
+within about 1% of the truth, and the true propensities give the same answer as the fitted ones.
+
+**Staying on a regime gets rarer every period**, and the weights say so. `max_weight` here is
+about 3,800, on a person-period of someone who stayed untreated when the model expected
+treatment, and the result warns about it. The default horizon is the last period in which both
+regimes still had 5% of the units following them. Here that is 4 of 10.
+
+The interval resamples whole units and refits both weight models, so it accounts for the weights
+being estimated. `do_msm`'s interval does not. The assumptions are those of any inverse-probability
+method: no unmeasured confounder of treatment and the event at any period, and dropout that
+depends only on the measured history.
+
 ### `do_rmst`
 
 Time-to-event outcomes. Named parameters: `duration` (observed follow-up time) and `event`

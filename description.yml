@@ -152,6 +152,7 @@ docs:
     SELECT * FROM do_synth(...);          -- synthetic control, placebo p-value
     SELECT * FROM do_discover_dot(...);   -- a proposed graph, refused until reviewed
     SELECT * FROM do_msm(...);            -- time-varying treatment, stabilised IPTW
+    SELECT * FROM do_msm_rmst(...);       -- survival under always vs never treated
     SELECT * FROM do_rmst(...);           -- time-to-event, without a hazard ratio
     SELECT * FROM do_rmtl(...);           -- competing risks: time lost to one cause
     ```
