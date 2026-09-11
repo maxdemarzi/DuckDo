@@ -705,8 +705,8 @@ mediation, so it is in the output rather than in a footnote.
 
 Treatment that varies over time, when a confounder varies with it — and is itself affected by it.
 Named parameters: `unit`, `period`, `treatment`, `outcome` (all required), `covariates` (the
-time-varying confounders), `baseline` (a subset of `covariates` that is time-invariant), and
-`truncate`.
+time-varying confounders), `baseline` (a subset of `covariates` that is time-invariant),
+`truncate`, and `model`.
 
 ```sql
 SELECT estimate, ci_low, ci_high, mean_weight, max_weight, effective_n
@@ -751,6 +751,16 @@ A marginal structural model buys **nothing** against unmeasured confounding. Wha
 correct handling of measured confounders that the treatment itself affects — which no amount of
 covariate adjustment can do. The structural model is linear in cumulative treated periods, so it
 assumes every period is worth the same and that only the total matters, not when it happened.
+
+**`model := 'by_period'`** drops that assumption. It fits one effect for each period in the same
+weighted pseudo-population, and returns a row for each, plus a row for always treated against
+never: their sum, with its variance from the fit's whole covariance. On the DGP above both periods
+are worth 2.0, and it returns 2.073 [1.904, 2.243] and 2.193 [1.993, 2.392], and 4.266
+[3.927, 4.605] against 4.0. Make the second period worth 1.0 instead and it returns 2.073 and
+1.193, and 3.266 against 3.0. The cumulative model, asked the same question, answers 1.655
+[1.483, 1.826] per treated period, an average of the two whose interval covers neither. It still
+assumes no interaction: treatment in one period does not change what treatment in another does.
+It needs every unit observed once in every period.
 
 ### `do_msm_rmst`
 

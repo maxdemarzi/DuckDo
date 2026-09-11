@@ -142,6 +142,80 @@ FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outc
 ----
 true
 
+# --- when treatment happened -----------------------------------------------------
+#
+# model := 'by_period' gives each period its own effect in the same
+# pseudo-population. Here each period's total effect is 2.0 (A1's 3.5, less the
+# 1.5 it cancels through L2), so both come out near 2.0, and always treated
+# against never near 4.0.
+query III
+SELECT estimand,
+       abs(estimate - CASE WHEN estimand LIKE 'always%' THEN 4.0 ELSE 2.0 END) < 0.35,
+       ci_low < CASE WHEN estimand LIKE 'always%' THEN 4.0 ELSE 2.0 END
+         AND CASE WHEN estimand LIKE 'always%' THEN 4.0 ELSE 2.0 END < ci_high
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'by_period')
+ORDER BY estimand;
+----
+always vs never treated	true	true
+effect of treatment in period 1	true	true
+effect of treatment in period 2	true	true
+
+# Make the second period worth 1.0 instead. By period, the effects are 2.0 and
+# 1.0 and their sum 3.0. The cumulative model fits one number per treated period,
+# and its interval covers neither.
+statement ok
+CREATE TABLE timing AS
+SELECT id, 1 AS period, l1 AS l, a1 AS a, NULL::DOUBLE AS y FROM wide
+UNION ALL
+SELECT id, 2 AS period, l2 AS l, a2 AS a, y - a2 AS y FROM wide;
+
+query III
+SELECT estimand,
+       abs(estimate - CASE estimand WHEN 'effect of treatment in period 1' THEN 2.0
+                                    WHEN 'effect of treatment in period 2' THEN 1.0 ELSE 3.0 END) < 0.35,
+       ci_low < CASE estimand WHEN 'effect of treatment in period 1' THEN 2.0
+                              WHEN 'effect of treatment in period 2' THEN 1.0 ELSE 3.0 END
+         AND CASE estimand WHEN 'effect of treatment in period 1' THEN 2.0
+                           WHEN 'effect of treatment in period 2' THEN 1.0 ELSE 3.0 END < ci_high
+FROM do_msm('timing', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'by_period')
+ORDER BY estimand;
+----
+always vs never treated	true	true
+effect of treatment in period 1	true	true
+effect of treatment in period 2	true	true
+
+query I
+SELECT NOT (ci_low < 2.0 AND 2.0 < ci_high) AND NOT (ci_low < 1.0 AND 1.0 < ci_high)
+FROM do_msm('timing', unit := 'id', period := 'period', treatment := 'a', outcome := 'y', covariates := ['l']);
+----
+true
+
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE '%gives each period its own effect%')) = 1
+FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+            covariates := ['l'], model := 'by_period')
+LIMIT 1;
+----
+true
+
+statement error
+SELECT * FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l'], model := 'quadratic');
+----
+model must be 'cumulative' or 'by_period'
+
+# A unit seen in only one of the periods has no treatment to give the other.
+statement ok
+CREATE TABLE unbalanced AS SELECT * FROM longdata WHERE NOT (period = 1 AND id < 5);
+
+statement error
+SELECT * FROM do_msm('unbalanced', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
+                     covariates := ['l'], model := 'by_period');
+----
+needs every unit observed once in every period
+
 # --- error paths ----------------------------------------------------------------
 
 statement error

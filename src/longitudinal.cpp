@@ -235,6 +235,21 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 		}
 	}
 
+	// The structural model: one effect per additional treated period, or one
+	// effect for each period, so that when treatment happened can matter.
+	string model = "cumulative";
+	auto model_entry = input.named_parameters.find("model");
+	if (model_entry != input.named_parameters.end() && !model_entry->second.IsNull()) {
+		model = StringUtil::Lower(model_entry->second.ToString());
+	}
+	if (model != "cumulative" && model != "by_period") {
+		throw BinderException("duckdo: model must be 'cumulative' or 'by_period', not '%s'. 'cumulative' fits one "
+		                      "effect per treated period; 'by_period' fits one for each period, so that when "
+		                      "treatment happened can matter",
+		                      model);
+	}
+	const bool by_period = model == "by_period";
+
 	SetNumericThreads(GetSettingIdx(context, "duckdo_threads", 0));
 	auto panel = LoadLong(context, relation, unit_col, period_col, treatment_col, outcome_col, covariates, "do_msm");
 
@@ -398,7 +413,7 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 		cum_min = std::min(cum_min, cumulative[u]);
 		cum_max = std::max(cum_max, cumulative[u]);
 	}
-	if (!(cum_max - cum_min > 0.5)) {
+	if (!by_period && !(cum_max - cum_min > 0.5)) {
 		throw BinderException("duckdo: every unit received the same total amount of treatment (%g periods), so no "
 		                      "dose-response is estimable",
 		                      cum_min);
@@ -422,6 +437,68 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	double se = 0.0;
 	if (fit.dim == 2 && fit.cov.size() == 4 && fit.cov[3] > 0.0) {
 		se = std::sqrt(fit.cov[3]);
+	}
+
+	// With model := 'by_period': E[Y] = b0 + sum over t of b_t * A_t in the same
+	// pseudo-population, so each period gets its own effect, and their sum is
+	// always treated against never, with its variance from the whole covariance.
+	vector<string> period_estimands;
+	vector<double> period_estimates, period_ses;
+	if (by_period) {
+		const idx_t n_periods = panel.period_labels.size();
+		Matrix period_design(n_units, n_periods);
+		idx_t incomplete = 0;
+		for (auto u : unit_rows) {
+			const auto &rows = panel.by_unit[u];
+			bool complete = rows.size() == n_periods;
+			for (idx_t k = 0; k < rows.size() && complete; k++) {
+				complete = rows[k].period == k;
+			}
+			if (!complete) {
+				incomplete++;
+				continue;
+			}
+			for (auto &row : rows) {
+				period_design.At(u, row.period) = row.treatment;
+			}
+		}
+		if (incomplete > 0) {
+			throw BinderException(
+			    "duckdo: model := 'by_period' needs every unit observed once in every period, since a "
+			    "period a unit was not seen in has no treatment to give it; %llu units with an "
+			    "outcome are not",
+			    static_cast<unsigned long long>(incomplete));
+		}
+		for (idx_t t = 0; t < n_periods; t++) {
+			double lo = period_design.At(unit_rows[0], t), hi = lo;
+			for (auto u : unit_rows) {
+				lo = std::min(lo, period_design.At(u, t));
+				hi = std::max(hi, period_design.At(u, t));
+			}
+			if (!(hi - lo > 0.5)) {
+				throw BinderException("duckdo: every unit had the same treatment in period '%s', so that period's "
+				                      "effect is not estimable",
+				                      panel.period_labels[t]);
+			}
+		}
+		auto period_fit = FitRidgeWeightedWithSandwich(period_design, final_outcome, unit_rows, msm_weights, 1e-8);
+		const idx_t dim = n_periods + 1;
+		const bool have_cov = period_fit.cov.size() == dim * dim;
+		double total = 0.0, total_var = 0.0;
+		for (idx_t t = 0; t < n_periods; t++) {
+			const double b = period_fit.model.beta.size() > t + 1 ? period_fit.model.beta[t + 1] : 0.0;
+			const double v = have_cov ? period_fit.cov[(t + 1) * dim + (t + 1)] : 0.0;
+			period_estimands.push_back("effect of treatment in period " + panel.period_labels[t]);
+			period_estimates.push_back(b);
+			period_ses.push_back(v > 0.0 ? std::sqrt(v) : 0.0);
+			total += b;
+			for (idx_t r = 0; r < n_periods; r++) {
+				total_var += have_cov ? period_fit.cov[(t + 1) * dim + (r + 1)] : 0.0;
+			}
+		}
+		period_estimands.push_back("always vs never treated");
+		period_estimates.push_back(total);
+		period_ses.push_back(total_var > 0.0 ? std::sqrt(total_var) : 0.0);
 	}
 
 	// --- 4. weight diagnostics -------------------------------------------------
@@ -471,8 +548,13 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	                   "no unmeasured confounder of treatment and outcome at any period. It buys nothing against "
 	                   "unmeasured confounding - what it buys is correct handling of measured confounders that the "
 	                   "treatment itself affects, which no covariate adjustment can do");
-	warnings.push_back("the structural model is linear in cumulative treated periods, so it assumes each additional "
-	                   "period is worth the same and that only the total matters, not when it happened");
+	if (by_period) {
+		warnings.push_back("the structural model gives each period its own effect and adds them, so it assumes "
+		                   "treatment in one period does not change the effect of treatment in another");
+	} else {
+		warnings.push_back("the structural model is linear in cumulative treated periods, so it assumes each "
+		                   "additional period is worth the same and that only the total matters, not when it happened");
+	}
 	warnings.push_back("the interval treats the weights as known rather than estimated, which is conservative for "
 	                   "stabilised weights - a unit-level bootstrap would be tighter and slower");
 
@@ -489,6 +571,20 @@ unique_ptr<FunctionData> BindMsm(ClientContext &context, TableFunctionBindInput 
 	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::LIST(LogicalType::VARCHAR)};
 
 	auto bind = make_uniq<ResultBindData>();
+	if (by_period) {
+		for (idx_t k = 0; k < period_estimates.size(); k++) {
+			const double b = period_estimates[k], s = period_ses[k];
+			bind->rows.push_back({Value(period_estimands[k]), Value("msm-iptw"), Value::DOUBLE(b),
+			                      s > 0.0 ? Value::DOUBLE(s) : Value(LogicalType::DOUBLE),
+			                      s > 0.0 ? Value::DOUBLE(b - Z95 * s) : Value(LogicalType::DOUBLE),
+			                      s > 0.0 ? Value::DOUBLE(b + Z95 * s) : Value(LogicalType::DOUBLE),
+			                      Value::BIGINT(static_cast<int64_t>(unit_rows.size())),
+			                      Value::BIGINT(static_cast<int64_t>(panel.period_labels.size())),
+			                      Value::DOUBLE(mean_w), Value::DOUBLE(max_w), Value::DOUBLE(effective_n),
+			                      Value::LIST(LogicalType::VARCHAR, warning_values)});
+		}
+		return std::move(bind);
+	}
 	bind->rows.push_back({Value("effect per treated period"), Value("msm-iptw"), Value::DOUBLE(estimate),
 	                      se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
 	                      se > 0.0 ? Value::DOUBLE(estimate - Z95 * se) : Value(LogicalType::DOUBLE),
@@ -870,6 +966,7 @@ void RegisterLongitudinalFunctions(ExtensionLoader &loader) {
 	fn.named_parameters["covariates"] = LogicalType::LIST(LogicalType::VARCHAR);
 	fn.named_parameters["baseline"] = LogicalType::LIST(LogicalType::VARCHAR);
 	fn.named_parameters["truncate"] = LogicalType::DOUBLE;
+	fn.named_parameters["model"] = LogicalType::VARCHAR;
 	RegisterUnderBothNames(loader, fn, "msm");
 
 	TableFunction regimes("", {LogicalType::VARCHAR}, EmitRows, BindMsmRmst, InitGlobal);

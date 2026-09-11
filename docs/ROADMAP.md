@@ -2,11 +2,11 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase through 9 is implemented, built and tested.** 116 assertions in the
-> dependency-free build and 135 with the foundation-model path enabled, against DuckDB v1.5.4, plus
-> an EconML/DoWhy cross-check on IHDP and PyTorch parity gates on the exported ONNX graphs.
-> **CausalPFN and Do-PFN both run end to end inside DuckDB.** Phase 10 remains future work; see
-> section 9 for what is still open.
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 668 assertions
+> in 26 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
+> at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
+> gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
+> Section 9 lists what each Phase 10 item still leaves open.
 
 ---
 
@@ -843,8 +843,7 @@ Roughly in order of value per unit of effort:
    check on the treatment model, and `effective_n` shows what the weights cost. `truncate` is
    available and **off by default**, because on that same data it nearly doubles effective *n* and
    halves the interval while moving the estimate off the truth — every quality signal improving as
-   the answer gets worse. Causal longitudinal PFNs as a model backend, and history-dependent
-   structural models beyond "cumulative periods treated", are still open.
+   the answer gets worse. A structural model beyond "cumulative periods treated" is **DONE**: `model := 'by_period'` fits one effect per period, and always against never as their sum. On a world where the first period is worth 2.0 and the second 1.0, it returns 2.073 and 1.193, and 3.266 against 3.0. The cumulative model's 1.655 per treated period has an interval that covers neither period's effect. The default output is byte-identical to before on four fingerprinted calls. Still open: causal longitudinal PFNs as a model backend, and structural models with interactions between periods.
 4. ~~**Survival outcomes** — time-to-event treatment effects.~~ **DONE**: `do_rmst` returns the
    difference in restricted mean survival time, from inverse-probability-weighted Kaplan-Meier
    curves. On an exponential DGP with a closed-form truth of 0.9239 it returns 0.904 with an
