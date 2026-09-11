@@ -376,21 +376,55 @@ should hover near zero before treatment and open afterwards.
 
 ### `do_balance`
 
+Whether weighting actually made the arms comparable. Takes `treatment` and `covariates`, and no
+outcome: balance is a property of the treatment model alone.
+
+```sql
+SELECT * FROM do_balance('customers', treatment := 'discount',
+                         covariates := ['age', 'income', 'tenure']);
+```
+
 Per encoded feature: `covariate, feature, smd_raw, smd_weighted, variance_ratio,
-balanced`. `balanced` is `|smd_weighted| < 0.1`.
+balanced`. `smd_raw` is the standardised mean difference between the arms as the rows stand;
+`smd_weighted` is the same after inverse-probability weighting, and it is the one that matters,
+because the weighted population is the one the estimate describes. `balanced` is
+`|smd_weighted| < 0.1`, the usual rule of thumb. A feature that starts unbalanced and stays
+unbalanced is one the propensity model could not fix: the arms barely overlap on it, and
+reweighting cannot invent rows that are not there.
 
 ### `do_overlap`
 
+Where the two arms share support, which is what positivity means in practice. Takes `treatment`
+and `covariates`, and no outcome.
+
+```sql
+SELECT * FROM do_overlap('customers', treatment := 'discount', covariates := ['age', 'income']);
+```
+
 Ten propensity buckets: `bucket, ps_low, ps_high, n_treated, n_control,
-off_support`. `off_support` marks a bucket containing only one arm — there is no
-counterfactual evidence there.
+off_support`. `off_support` marks a bucket holding only one arm — there is no counterfactual
+evidence there, so whatever the estimator reports for those rows comes from the model's shape
+rather than from a comparison. A few off-support rows are normal. A bucket full of them means the
+question is answerable only for part of your population, and `trim :=` decides what becomes of the
+rest.
 
 ### `do_diagnose`
+
+Every check at once, as rows, so a dbt test or a CI query can assert on them. Takes the same
+arguments as `do_ate`. `outcome` is optional, and the checks that need one are skipped without it.
+
+```sql
+SELECT check_name, status, severity, detail
+FROM do_diagnose('customers', treatment := 'discount', outcome := 'revenue',
+                 covariates := ['age', 'income', 'tenure']);
+```
 
 The whole battery: `check_name, status, detail, severity`. Checks are
 `sample_size`, `treatment_prevalence`, `positivity`, `balance`,
 `outcome_variation`, `missing_data`, `dimensionality`, plus one `encoding` row
-per warning. `status` is `pass` / `warn` / `fail`.
+per warning. `status` is `pass` / `warn` / `fail`, and `detail` carries the number behind the
+verdict and the setting that governs it. A `fail` is not a refusal to estimate; it is the reason
+to distrust the estimate you will get.
 
 ### `do_refute`
 
@@ -459,6 +493,11 @@ front of that table.
 
 Comments (`//`, `#` and `/* ... */`) are skipped. An undirected edge `a -- b` is an
 error, not a silently dropped edge: DuckDo graphs are directed, so pick a direction.
+
+Each returns one row. `do_graph_create`: `name, n_nodes, n_edges, n_latent` — worth reading back,
+since a typo in a node name makes a new node rather than an error. `do_graph_drop`:
+`name, dropped`, where `dropped` is false when no graph of that name was registered. `do_graphs`:
+one row per registered graph, `name, n_nodes, n_edges, nodes`, with `nodes` a `VARCHAR[]`.
 
 ### `do_discover` / `do_discover_dot`
 
@@ -591,11 +630,20 @@ edge differently:
 
 ### `do_identify`
 
-Named parameters only: `graph`, `treatment`, `outcome`.
+What the graph says you may estimate, and with which columns. Named parameters only: `graph`,
+`treatment`, `outcome`. It reads the registered graph and no data.
+
+```sql
+SELECT strategy, identifiable, adjustment_set, note
+FROM do_identify(graph := 'sales_dag', treatment := 'discount', outcome := 'revenue');
+```
 
 Returns one row per strategy — `backdoor`, `frontdoor`, `iv` — with `strategy,
-identifiable, adjustment_set, note`. When the backdoor criterion fails, the note
-names the unobserved common cause responsible.
+identifiable, adjustment_set, note`. When the backdoor criterion fails, the note names the
+unobserved common cause responsible, which is the part worth reading: it says which variable you
+would have to measure for the ordinary estimators to be legitimate here. `adjustment_set` is what
+to pass as `covariates :=`; for the other two strategies it names the mediator or the instrument
+to hand to `do_frontdoor` or `do_iv`.
 
 ### `do_validate`
 
@@ -1013,8 +1061,20 @@ without reading the source. `n`, `n_features`, `n_treated`, `n_rows_with_missing
 
 ### `do_counterfactual`
 
+Both arms for every row: what the model predicts with the treatment off and on. Takes the same
+arguments as `do_ate`, plus `id :=` to carry your own key into the output.
+
+```sql
+SELECT * FROM do_counterfactual('customers', treatment := 'discount', outcome := 'revenue',
+                                covariates := ['age', 'tenure'], id := 'customer_id');
+```
+
 Per row: `row_id, id, treatment, observed, y0, y1, effect, effect_low,
-effect_high`.
+effect_high`. `observed` is the outcome the row actually has, while `y0` and `y1` are the
+predictions under each arm — so one of them is a counterfactual and the other a fitted value.
+`effect` is `y1 - y0`, carrying the same pointwise interval `do_cate` reports. The average of
+`effect` is the ATE; a single row's effect is the model's structure applied to that row, and is
+only as good as that model.
 
 ### `do_predict`
 
@@ -1049,9 +1109,21 @@ is worse than treating everyone.
 
 ### `do_uplift`
 
+Whether targeting by estimated effect beats treating at random, as a curve you can plot. Takes the
+same arguments as `do_ate`.
+
+```sql
+SELECT * FROM do_uplift('customers', treatment := 'discount', outcome := 'revenue',
+                        covariates := ['age', 'tenure']);
+```
+
 Twenty rows tracing the Qini curve: `bucket, fraction_targeted, n_targeted,
-cumulative_gain, random_gain, qini`. Rows are ranked by estimated effect,
-best first.
+cumulative_gain, random_gain, qini`. Rows are ranked by estimated effect, best first, so
+`fraction_targeted` runs from 5% to 100%. `cumulative_gain` is the effect accumulated by treating
+that share in that order, `random_gain` the straight line from treating the same number at random,
+and `qini` the gap between them. A curve that hugs the line says the ranking carries no
+information, which is worth knowing before building a targeting rule on it. `do_optimal_policy`
+turns a ranking that does carry information into a rule you can deploy.
 
 ### `do_optimal_policy`
 
@@ -1105,7 +1177,7 @@ fits; CausalPFN returns 2.984 on the same data.
 
 ### `do_list_models()` / `do_models()`
 
-`model, setting, license, commercial, attribution_required, max_features, context_ladder,
+`model, setting, license, commercial, attribution_required, max_covariates, context_ladder,
 available, detail`. `detail` says why a model is unavailable and what to do about it.
 
 | model | setting | licence | covariates | context |

@@ -27,6 +27,7 @@ python scripts/crosscheck_econml.py    # grades the estimators against EconML an
 python scripts/coverage_check.py       # measures do_cate's empirical interval coverage
 python scripts/benchmark.py            # seconds and peak memory, with a gate on both
 python scripts/check_docs.py           # every SQL block in the docs still runs
+python scripts/check_functions.py      # the function reference matches the extension
 ```
 
 `check_docs.py` executes every block in the tutorial and the worked examples, in order,
