@@ -133,12 +133,17 @@ confounders that the treatment itself affects — which no covariate adjustment 
 Check `mean_weight`: it should sit near 1, and a mean far from 1 means the treatment
 model is misspecified.
 
-### `do_rmst` — independent censoring
+### `do_rmst` and `do_rmtl` — independent censoring
 
 Subjects who leave the study are not leaving *because* of where their outcome was
 heading. Nothing in the data can check it, and it fails exactly when patients drop out
 because they are getting worse. The horizon is part of the estimand: a different
 horizon is a different quantity, not a different view of the same one.
+
+`do_rmtl` adds one thing that is not an assumption but is easy to get wrong: an event
+from another cause is not censoring. A subject who died of something else can no longer
+die of this, and treating them as censored estimates a world where the other causes had
+been abolished.
 
 ### `do_did` — parallel trends
 

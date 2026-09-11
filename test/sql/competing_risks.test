@@ -1,0 +1,147 @@
+# name: test/sql/competing_risks.test
+# description: time lost to one cause when another cause ends the chance of it
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.37);
+
+# Two causes with constant cause-specific hazards, lam1 = 0.2 exp(-0.5 trt +
+# 0.7 x) and lam2 = 0.1 exp(0.6 trt + 0.5 x), and independent censoring. x is a
+# coin that drives both treatment and the hazards, so the unadjusted contrast is
+# confounded. With constant hazards the cumulative incidence of cause 1 is
+# (lam1 / lam)(1 - exp(-lam t)), lam = lam1 + lam2, which gives closed forms at
+# tau = 5, averaged over x:
+#   the time lost to cause 1, treated minus control      -0.7672
+#   the same, unadjusted (what confounding produces)     -0.5139
+#   the same if cause 2 were abolished                   -0.6618
+#   the cumulative incidence of cause 1 at 5             -0.2274
+#   the all-cause restricted mean survival time          +0.0198
+# Treatment barely changes how long people stay event-free. It moves them from
+# cause 1 to cause 2.
+statement ok
+CREATE TABLE cr AS
+WITH u AS (
+  SELECT i, (random() < 0.5)::INT AS x, random() AS ua, random() AS u1, random() AS u2, random() AS uc
+  FROM range(20000) r(i)),
+ a AS (SELECT *, (ua < 0.3 + 0.4*x)::INT AS trt FROM u),
+ h AS (SELECT *, 0.20*exp(-0.5*trt + 0.7*x) AS lam1, 0.10*exp(0.6*trt + 0.5*x) AS lam2 FROM a),
+ t AS (SELECT *, -ln(u1+1e-12)/lam1 AS t1, -ln(u2+1e-12)/lam2 AS t2, -ln(uc+1e-12)/0.05 AS tc FROM h)
+SELECT i AS id, x, trt, least(t1, t2, tc) AS followup,
+       CASE WHEN tc < least(t1, t2) THEN 0 WHEN t1 < t2 THEN 1 ELSE 2 END AS status
+FROM t;
+
+query I
+SELECT abs(estimate - (-0.7672)) < 0.08
+FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+query I
+SELECT ci_low < -0.7672 AND -0.7672 < ci_high
+FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+query I
+SELECT abs((incidence_treated - incidence_control) - (-0.2274)) < 0.03
+FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+# Without adjustment it lands on the confounded value instead.
+query I
+SELECT abs(estimate - (-0.5139)) < 0.08
+FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+             covariates := [], horizon := 5.0);
+----
+true
+
+# Censoring the cause-2 events answers a different question: a world without
+# cause 2. do_rmst on cause 1 alone estimates that world's survival, whose time
+# lost is the horizon minus it, so its difference is minus do_rmst's.
+statement ok
+CREATE TABLE cr_cause1 AS SELECT id, x, trt, followup, (status = 1)::INT AS cause1 FROM cr;
+
+query I
+SELECT abs(-estimate - (-0.6618)) < 0.08
+FROM do_rmst('cr_cause1', treatment := 'trt', duration := 'followup', event := 'cause1',
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+query IIII
+SELECT estimand, estimator, cause, n_events + n_competing + round(censored_fraction * n)::BIGINT = n
+FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+             covariates := ['x'], horizon := 5.0);
+----
+RMTL difference	iptw-aalen-johansen	1	true
+
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE '%censoring them instead would estimate a world%')) = 1
+FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+             covariates := ['x'], horizon := 5.0);
+----
+true
+
+# do_rmst on the same codes counts every cause as the event: time free of all
+# of them, which treatment barely moves. It says so, and where to go instead.
+query II
+SELECT abs(estimate - 0.0198) < 0.08,
+       len(list_filter(warnings, lambda w: w LIKE 'event has codes above 1%do_rmtl%')) = 1
+FROM do_rmst('cr', treatment := 'trt', duration := 'followup', event := 'status',
+             covariates := ['x'], horizon := 5.0);
+----
+true	true
+
+# The causes add up. tau - RMST is the sum of every cause's time lost, on the
+# same weights and the same curve, so do_rmst's difference is exactly minus the
+# sum of do_rmtl's for causes 1 and 2: cause 1's fall is almost all taken up by
+# cause 2's rise.
+query I
+SELECT abs((SELECT estimate FROM do_rmst('cr', treatment := 'trt', duration := 'followup', event := 'status',
+                                         covariates := ['x'], horizon := 5.0))
+         + (SELECT estimate FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status',
+                                         cause := 1, covariates := ['x'], horizon := 5.0))
+         + (SELECT estimate FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status',
+                                         cause := 2, covariates := ['x'], horizon := 5.0))) < 1e-9;
+----
+true
+
+# --- error paths ----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', covariates := ['x']);
+----
+requires cause
+
+statement error
+SELECT * FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 0,
+                      covariates := ['x']);
+----
+cause := must be a positive event code
+
+statement error
+SELECT * FROM do_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 3,
+                      covariates := ['x']);
+----
+has no events of cause 3
+
+statement ok
+CREATE TABLE fractional AS SELECT id, x, trt, followup, status / 2 AS status FROM cr;
+
+statement error
+SELECT * FROM do_rmtl('fractional', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+                      covariates := ['x']);
+----
+event codes must be non-negative integers
+
+query I
+SELECT count(*) FROM duckdo_rmtl('cr', treatment := 'trt', duration := 'followup', event := 'status', cause := 1,
+                                 covariates := ['x'], horizon := 5.0);
+----
+1

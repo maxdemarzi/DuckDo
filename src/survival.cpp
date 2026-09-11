@@ -21,6 +21,16 @@
 //
 // Confounding is handled by inverse-probability weighting the two Kaplan-Meier
 // curves rather than by modelling the hazard, which keeps the estimand marginal.
+//
+// With competing risks - death from one cause ends the chance of dying from
+// another - do_rmtl reports the restricted mean time lost to one cause:
+//
+//   RMTL_k(tau) = integral from 0 to tau of F_k(t) dt
+//
+// where F_k is the cumulative incidence of cause k, estimated by a weighted
+// Aalen-Johansen curve. The tempting shortcut, treating the other causes as
+// censoring and taking 1 - Kaplan-Meier, estimates the incidence in a world where
+// those causes had been abolished, which is a different and larger number.
 //===----------------------------------------------------------------------===//
 #include "duckdb/common/string_util.hpp"
 #include "duckdo/estimators.hpp"
@@ -67,6 +77,8 @@ struct Subject {
 	double duration = 0.0;
 	double weight = 1.0;
 	bool event = false;
+	//! The event code: 0 censored, otherwise which cause. Read by do_rmtl only.
+	int64_t cause = 0;
 };
 
 //! Area under the weighted Kaplan-Meier curve up to `horizon`.
@@ -126,17 +138,101 @@ double WeightedRmst(vector<Subject> subjects, double horizon) {
 	return area;
 }
 
-unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput &input,
-                                  vector<LogicalType> &return_types, vector<string> &names) {
+//! Area under the weighted Aalen-Johansen cumulative incidence of `cause` up to
+//! `horizon`: the restricted mean time lost to that cause.
+//!
+//! At each event time the incidence rises by the share of those still event-free
+//! who had this cause, S(t-) * d_cause / at_risk, and every cause lowers S. A
+//! subject who had another cause first is not censored: they can no longer have
+//! this one. Treating them as censored - 1 - Kaplan-Meier on this cause alone -
+//! would estimate the incidence in a world where the other causes had been
+//! abolished.
+double WeightedRmtl(vector<Subject> subjects, double horizon, int64_t cause, double &incidence_out) {
+	std::sort(subjects.begin(), subjects.end(),
+	          [](const Subject &a, const Subject &b) { return a.duration < b.duration; });
+	incidence_out = 0.0;
+	double at_risk = 0.0;
+	for (auto &s : subjects) {
+		at_risk += s.weight;
+	}
+	if (!(at_risk > 0.0)) {
+		return 0.0;
+	}
+	double survival = 1.0;
+	double incidence = 0.0;
+	double area = 0.0;
+	double previous_time = 0.0;
+	idx_t i = 0;
+	while (i < subjects.size()) {
+		const double t = subjects[i].duration;
+		if (t > horizon) {
+			break;
+		}
+		double events_here = 0.0;
+		double cause_here = 0.0;
+		double leaving = 0.0;
+		idx_t j = i;
+		while (j < subjects.size() && subjects[j].duration == t) {
+			leaving += subjects[j].weight;
+			if (subjects[j].event) {
+				events_here += subjects[j].weight;
+				if (subjects[j].cause == cause) {
+					cause_here += subjects[j].weight;
+				}
+			}
+			j++;
+		}
+		if (events_here > 0.0) {
+			area += incidence * (t - previous_time);
+			incidence += survival * cause_here / at_risk;
+			survival *= 1.0 - events_here / at_risk;
+			previous_time = t;
+		}
+		at_risk -= leaving;
+		i = j;
+		if (!(at_risk > 1e-12)) {
+			break;
+		}
+	}
+	// The incidence is flat from the last event to the horizon.
+	if (horizon > previous_time) {
+		area += incidence * (horizon - previous_time);
+	}
+	incidence_out = incidence;
+	return area;
+}
+
+//! do_rmst, and with `lost` do_rmtl: one bind, since the horizon, the weights and
+//! the bootstrap are the same and only the curve and the output differ.
+unique_ptr<FunctionData> BindSurvival(ClientContext &context, TableFunctionBindInput &input,
+                                      vector<LogicalType> &return_types, vector<string> &names, bool lost) {
+	const char *fn = lost ? "do_rmtl" : "do_rmst";
 	auto named = input.named_parameters;
 	auto duration_entry = named.find("duration");
 	if (duration_entry == named.end() || duration_entry->second.IsNull()) {
-		throw BinderException("duckdo: do_rmst requires duration := '<column>', the observed follow-up time");
+		throw BinderException("duckdo: %s requires duration := '<column>', the observed follow-up time", fn);
 	}
 	auto event_entry = named.find("event");
 	if (event_entry == named.end() || event_entry->second.IsNull()) {
+		if (lost) {
+			throw BinderException("duckdo: do_rmtl requires event := '<column>', 0 where the subject was censored and "
+			                      "the cause's code where an event was observed");
+		}
 		throw BinderException("duckdo: do_rmst requires event := '<column>', 1 where the event was observed and 0 "
 		                      "where the subject was censored");
+	}
+	int64_t cause = 0;
+	if (lost) {
+		auto cause_entry = named.find("cause");
+		if (cause_entry == named.end() || cause_entry->second.IsNull()) {
+			throw BinderException("duckdo: do_rmtl requires cause := <code>, the event code whose time lost to report; "
+			                      "every other nonzero code is a competing risk");
+		}
+		cause = cause_entry->second.GetValue<int64_t>();
+		if (cause < 1) {
+			throw BinderException("duckdo: cause := must be a positive event code, since 0 means censored; got %lld",
+			                      static_cast<long long>(cause));
+		}
 	}
 	// The frame already knows how to load an outcome and one auxiliary numeric
 	// column, and it excludes both from the default covariate list. Duration is
@@ -154,6 +250,8 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	double max_duration = 0.0;
 	double arm_max[2] = {0.0, 0.0};
 	idx_t events[2] = {0, 0};
+	idx_t cause_events[2] = {0, 0};
+	bool codes_above_one = false;
 	idx_t arm_n[2] = {0, 0};
 	vector<double> arm_times[2];
 	for (idx_t i = 0; i < frame.n; i++) {
@@ -169,8 +267,26 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 		if (frame.aux[i] >= 0.5) {
 			events[arm]++;
 		}
+		const double code = frame.aux[i];
+		codes_above_one = codes_above_one || code >= 1.5;
+		if (lost) {
+			if (!(code >= 0.0) || std::fabs(code - std::round(code)) > 1e-9) {
+				throw BinderException("duckdo: event codes must be non-negative integers, 0 for censored and one code "
+				                      "per cause; found %g",
+				                      code);
+			}
+			if (std::llround(code) == cause) {
+				cause_events[arm]++;
+			}
+		}
 	}
-	if (events[0] == 0 || events[1] == 0) {
+	if (lost && (cause_events[0] == 0 || cause_events[1] == 0)) {
+		throw BinderException("duckdo: arm '%s' has no events of cause %lld, so its cumulative incidence never rises "
+		                      "and no time lost is comparable",
+		                      cause_events[0] == 0 ? frame.control_label : frame.treated_label,
+		                      static_cast<long long>(cause));
+	}
+	if (!lost && (events[0] == 0 || events[1] == 0)) {
 		throw BinderException("duckdo: arm '%s' has no observed events, so its survival curve never falls and no "
 		                      "restricted mean is comparable",
 		                      events[0] == 0 ? frame.control_label : frame.treated_label);
@@ -244,7 +360,7 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	};
 
 	auto rmst_from = [&](const vector<idx_t> &rows, const vector<double> &weights, double h, double &treated,
-	                     double &control) {
+	                     double &control, double &incidence_treated, double &incidence_control) {
 		vector<Subject> arm1, arm0;
 		arm1.reserve(rows.size());
 		arm0.reserve(rows.size());
@@ -253,6 +369,7 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 			Subject s;
 			s.duration = frame.y[i];
 			s.event = frame.aux[i] >= 0.5;
+			s.cause = std::llround(frame.aux[i]);
 			s.weight = weights[k];
 			if (frame.t[i] >= 0.5) {
 				arm1.push_back(s);
@@ -260,15 +377,20 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 				arm0.push_back(s);
 			}
 		}
-		treated = WeightedRmst(std::move(arm1), h);
-		control = WeightedRmst(std::move(arm0), h);
+		if (lost) {
+			treated = WeightedRmtl(std::move(arm1), h, cause, incidence_treated);
+			control = WeightedRmtl(std::move(arm0), h, cause, incidence_control);
+		} else {
+			treated = WeightedRmst(std::move(arm1), h);
+			control = WeightedRmst(std::move(arm0), h);
+		}
 	};
 
 	vector<double> weights;
 	double trimmed = 0.0;
 	build_weights(all_rows, weights, trimmed);
-	double rmst_treated = 0.0, rmst_control = 0.0;
-	rmst_from(all_rows, weights, horizon, rmst_treated, rmst_control);
+	double rmst_treated = 0.0, rmst_control = 0.0, incidence_treated = 0.0, incidence_control = 0.0;
+	rmst_from(all_rows, weights, horizon, rmst_treated, rmst_control, incidence_treated, incidence_control);
 	const double estimate = rmst_treated - rmst_control;
 
 	// The weighted Kaplan-Meier estimator has a closed-form variance only under
@@ -303,8 +425,8 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 		vector<double> boot_weights;
 		double boot_trimmed = 0.0;
 		build_weights(resample, boot_weights, boot_trimmed);
-		double t1 = 0.0, t0 = 0.0;
-		rmst_from(resample, boot_weights, horizon, t1, t0);
+		double t1 = 0.0, t0 = 0.0, i1 = 0.0, i0 = 0.0;
+		rmst_from(resample, boot_weights, horizon, t1, t0, i1, i0);
 		per_rep[rep] = t1 - t0;
 		rep_usable[rep] = 1;
 	});
@@ -332,8 +454,10 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 		                   ", the last time both arms still had at least 5% of their subjects at risk. The last "
 		                   "observation in the shorter arm is " +
 		                   StringUtil::Format("%g", naive_horizon) +
-		                   ", but the curve out there rests on a handful of people. RMST is part of the estimand, "
-		                   "not a display detail - a different horizon is a different quantity");
+		                   ", but the curve out there rests on a handful of people. " +
+		                   string(lost ? "The time lost" : "RMST") +
+		                   " is part of the estimand, not a display detail - a different horizon is a different "
+		                   "quantity");
 	}
 	if (censored_fraction > 0.5) {
 		warnings.push_back(StringUtil::Format("%.0f%%", 100.0 * censored_fraction) +
@@ -349,14 +473,70 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	warnings.push_back("censoring is assumed independent of the event time given the covariates. Nothing in the "
 	                   "data can check that, and it fails exactly when subjects leave because they are getting "
 	                   "worse");
-	warnings.push_back("this is a difference in restricted mean survival time, not a hazard ratio, and that is "
-	                   "deliberate: a hazard ratio compares subjects still at risk, treatment changes who is still "
-	                   "at risk, and so the comparison stops being causal after the first events even under "
-	                   "randomisation");
+	if (lost) {
+		warnings.push_back(StringUtil::Format(
+		    "this is the restricted mean time lost to cause %lld: how much of the first %g units a subject spends, on "
+		    "average, after having had it. Subjects who had another cause first are not censored - they can no longer "
+		    "have this one - and censoring them instead would estimate a world where the other causes had been "
+		    "abolished",
+		    static_cast<long long>(cause), horizon));
+		warnings.push_back("a treatment can cut the time lost to one cause by leaving people exposed to another; "
+		                   "read it beside the other causes' time lost, or beside do_rmst for all of them together");
+		warnings.push_back("this is a difference in time lost, not a cause-specific or subdistribution hazard ratio, "
+		                   "for the reason do_rmst reports no hazard ratio: those compare subjects still at risk, and "
+		                   "treatment changes who is");
+	} else {
+		if (codes_above_one) {
+			warnings.push_back("event has codes above 1, and every nonzero code counts as the event, so this is time "
+			                   "free of all of them. For the time lost to one cause, with the others as competing "
+			                   "risks, use do_rmtl(..., cause := k)");
+		}
+		warnings.push_back("this is a difference in restricted mean survival time, not a hazard ratio, and that is "
+		                   "deliberate: a hazard ratio compares subjects still at risk, treatment changes who is still "
+		                   "at risk, and so the comparison stops being causal after the first events even under "
+		                   "randomisation");
+	}
 
 	vector<Value> warning_values;
 	for (auto &w : warnings) {
 		warning_values.push_back(Value(w));
+	}
+
+	if (lost) {
+		const idx_t lost_events = cause_events[0] + cause_events[1];
+		names = {"estimand",          "estimator",         "estimate", "std_error",    "ci_low",
+		         "ci_high",           "horizon",           "cause",    "rmtl_treated", "rmtl_control",
+		         "incidence_treated", "incidence_control", "n",        "n_events",     "n_competing",
+		         "censored_fraction", "warnings"};
+		return_types = {LogicalType::VARCHAR,
+		                LogicalType::VARCHAR,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::BIGINT,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::DOUBLE,
+		                LogicalType::BIGINT,
+		                LogicalType::BIGINT,
+		                LogicalType::BIGINT,
+		                LogicalType::DOUBLE,
+		                LogicalType::LIST(LogicalType::VARCHAR)};
+		auto bind = make_uniq<ResultBindData>();
+		bind->rows.push_back(
+		    {Value("RMTL difference"), Value("iptw-aalen-johansen"), Value::DOUBLE(estimate),
+		     se > 0.0 ? Value::DOUBLE(se) : Value(LogicalType::DOUBLE),
+		     se > 0.0 ? Value::DOUBLE(estimate - Z95 * se) : Value(LogicalType::DOUBLE),
+		     se > 0.0 ? Value::DOUBLE(estimate + Z95 * se) : Value(LogicalType::DOUBLE), Value::DOUBLE(horizon),
+		     Value::BIGINT(cause), Value::DOUBLE(rmst_treated), Value::DOUBLE(rmst_control),
+		     Value::DOUBLE(incidence_treated), Value::DOUBLE(incidence_control),
+		     Value::BIGINT(static_cast<int64_t>(frame.n)), Value::BIGINT(static_cast<int64_t>(lost_events)),
+		     Value::BIGINT(static_cast<int64_t>(total_events - lost_events)), Value::DOUBLE(censored_fraction),
+		     Value::LIST(LogicalType::VARCHAR, std::move(warning_values))});
+		return std::move(bind);
 	}
 
 	names = {"estimand", "estimator",         "estimate",     "std_error",    "ci_low",
@@ -388,6 +568,16 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	return std::move(bind);
 }
 
+unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput &input,
+                                  vector<LogicalType> &return_types, vector<string> &names) {
+	return BindSurvival(context, input, return_types, names, false);
+}
+
+unique_ptr<FunctionData> BindRmtl(ClientContext &context, TableFunctionBindInput &input,
+                                  vector<LogicalType> &return_types, vector<string> &names) {
+	return BindSurvival(context, input, return_types, names, true);
+}
+
 } // namespace
 
 void RegisterSurvivalFunctions(ExtensionLoader &loader) {
@@ -398,6 +588,15 @@ void RegisterSurvivalFunctions(ExtensionLoader &loader) {
 	fn.named_parameters["event"] = LogicalType::VARCHAR;
 	fn.named_parameters["horizon"] = LogicalType::DOUBLE;
 	RegisterUnderBothNames(loader, fn, "rmst");
+
+	TableFunction lost("", {LogicalType::VARCHAR}, EmitRows, BindRmtl, InitGlobal);
+	AddCommonNamedParameters(lost);
+	lost.named_parameters["cluster"] = LogicalType::VARCHAR;
+	lost.named_parameters["duration"] = LogicalType::VARCHAR;
+	lost.named_parameters["event"] = LogicalType::VARCHAR;
+	lost.named_parameters["horizon"] = LogicalType::DOUBLE;
+	lost.named_parameters["cause"] = LogicalType::BIGINT;
+	RegisterUnderBothNames(loader, lost, "rmtl");
 }
 
 } // namespace duckdo

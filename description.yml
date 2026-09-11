@@ -153,6 +153,7 @@ docs:
     SELECT * FROM do_discover_dot(...);   -- a proposed graph, refused until reviewed
     SELECT * FROM do_msm(...);            -- time-varying treatment, stabilised IPTW
     SELECT * FROM do_rmst(...);           -- time-to-event, without a hazard ratio
+    SELECT * FROM do_rmtl(...);           -- competing risks: time lost to one cause
     ```
 
     Two-way fixed effects is deliberately absent: it misweights under staggered
@@ -161,7 +162,9 @@ docs:
     measured gives 3.47 against a truth of 2.0 and the marginal structural model
     gives 2.13. `do_rmst` returns a difference in restricted mean survival time
     rather than a hazard ratio, which is not a causal quantity because the risk
-    sets stop being comparable the moment the treatment works.
+    sets stop being comparable the moment the treatment works. With competing
+    risks, `do_rmtl` returns the time lost to one cause, from a weighted
+    Aalen-Johansen curve, and does not treat the other causes as censoring.
 
     ### Interventions and policies
 

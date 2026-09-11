@@ -132,7 +132,7 @@ through whichever variance method it uses:
 |---|---|
 | influence function, summed within clusters | `do_ate`, `do_att`, `do_atc`, `do_ate_by`, `do_ate_levels`, `do_ape`, `do_policy_value`, `do_optimal_policy` |
 | cluster-robust (CR1) sandwich | `do_cate`, `do_dose_response`, `do_iv` (both stages), `do_predict`, `do_counterfactual` |
-| bootstrap of whole clusters | the bootstrap estimators behind `do_ate`, `do_frontdoor`, `do_mediate`, `do_rmst` |
+| bootstrap of whole clusters | the bootstrap estimators behind `do_ate`, `do_frontdoor`, `do_mediate`, `do_rmst`, `do_rmtl` |
 | resampling whole clusters | `do_refute`'s placebo, subset and bootstrap refuters |
 | through the clustered estimate | `do_sensitivity`, and `do_refute`'s tolerance |
 | folds and counts only, no interval reported | `do_uplift`, `do_balance`, `do_overlap`, `do_diagnose` |
@@ -790,6 +790,53 @@ and warns that it is extrapolating flat.
 
 Censoring is assumed independent of the event time given the covariates. Nothing in the data can
 check that, and it fails exactly when subjects leave because they are getting worse.
+
+### `do_rmtl`
+
+Competing risks: an event from one cause ends the chance of an event from another. The same
+parameters as `do_rmst`, plus `cause`. `event` holds a code per subject: 0 where the subject was
+censored, and the cause's code where an event was observed.
+
+```sql
+SELECT estimate, ci_low, ci_high, rmtl_treated, rmtl_control
+FROM do_rmtl('patients', treatment := 'drug', duration := 'years_followed', event := 'status',
+             cause := 1, covariates := ['age', 'stage'], horizon := 5.0);
+-- -0.769 | -0.825 | -0.712 | 1.230 | 1.999
+```
+
+Returns `estimand, estimator, estimate, std_error, ci_low, ci_high, horizon, cause, rmtl_treated,
+rmtl_control, incidence_treated, incidence_control, n, n_events, n_competing, censored_fraction,
+warnings`. The estimate is the difference in **restricted mean time lost** to `cause` within
+`horizon`: the area under that cause's cumulative incidence curve. A negative estimate means
+treated subjects spend less of the horizon having had it. `incidence_treated` and
+`incidence_control` are each arm's cumulative incidence at the horizon.
+
+**An event from another cause is not censoring.** A subject who died of something else can no
+longer die of this, and the curve, a weighted Aalen–Johansen estimate, counts them that way.
+Treating them as censored and taking one minus Kaplan–Meier is the common mistake. It estimates
+the incidence in a world where the other causes had been abolished, a different and larger
+number.
+
+The test world has two causes with constant cause-specific hazards, and a confounder driving both
+treatment and the hazards, so every truth is closed-form. At a horizon of 5:
+
+| | `do_rmtl` returns | the truth |
+|---|---|---|
+| time lost to cause 1, adjusted | −0.769, interval −0.825 to −0.712 | −0.767 |
+| the same, unadjusted | −0.521 | −0.514, the confounded value |
+| cause 2's events censored instead | −0.665 | −0.662, a world without cause 2 |
+
+**Read one cause beside the others.** In that world treatment barely changes how long people
+stay event-free: `do_rmst` returns −0.018. It moves them from cause 1 to cause 2, whose time lost
+rises by 0.787. The numbers agree exactly, because the horizon minus RMST is the sum of every
+cause's time lost. A treatment can cut the time lost to one cause just by leaving people exposed
+to another, and the warnings say so.
+
+The horizon rule, the weighting, the bootstrap and `cluster` work as in `do_rmst`, and so does
+the refusal to report a hazard ratio, cause-specific or subdistribution. Event codes must be
+non-negative integers, and both arms need at least one event of `cause`. On the same data,
+`do_rmst` counts every nonzero code as the event, and warns that it is doing so when it sees codes
+above 1.
 
 ### `do_frame_summary`
 
