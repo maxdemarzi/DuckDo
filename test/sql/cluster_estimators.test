@@ -205,15 +205,22 @@ SELECT count(*) FROM (
 ----
 5
 
-# On a real effect, the four refuters that should pass do.
-query I
-SELECT bool_and(passed) FROM (
-  SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'placebo_treatment', cluster := 'i')
-  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause', cluster := 'i')
-  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'subset', cluster := 'i')
-  UNION ALL SELECT * FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'bootstrap', cluster := 'i'));
+# On a real effect, the refuters behave. Two are stable across seeds and must
+# pass on their own rule. The placebo and bootstrap refuters compare the
+# estimate with one random redraw, and at their tolerance they fail by chance
+# for some seeds: over 20 seeds, the placebo failed 4 times and the bootstrap
+# once. Which redraw a seed produces also differs between standard libraries,
+# so a fixed seed that passes on Windows can fail on Linux. For those two the
+# test asserts what holds for every redraw: the placebo estimate collapses
+# toward zero (from 2.06), and the bootstrap stays within three tolerances.
+query IIII
+SELECT
+  (SELECT passed FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'random_common_cause', cluster := 'i')),
+  (SELECT passed FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'subset', cluster := 'i')),
+  (SELECT abs(refuted_estimate) < 0.5 FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'placebo_treatment', cluster := 'i')),
+  (SELECT abs(difference) < 3 * tolerance FROM do_refute('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], method := 'bootstrap', cluster := 'i'));
 ----
-true
+true	true	true	true
 
 # The placebo permutes treatment across clusters, and says so.
 query I

@@ -19,7 +19,23 @@ unique_ptr<FunctionData> ResultBindData::Copy() const {
 
 bool ResultBindData::Equals(const FunctionData &other) const {
 	auto &rhs = other.Cast<ResultBindData>();
-	return rows == rhs.rows;
+	if (rows.size() != rhs.rows.size()) {
+		return false;
+	}
+	// Value's == throws on NULL, and results carry NULLs (an id column with no
+	// id :=, an interval with no standard error). NotDistinctFrom treats two
+	// NULLs as equal, which is what comparing two results means.
+	for (idx_t r = 0; r < rows.size(); r++) {
+		if (rows[r].size() != rhs.rows[r].size()) {
+			return false;
+		}
+		for (idx_t c = 0; c < rows[r].size(); c++) {
+			if (!Value::NotDistinctFrom(rows[r][c], rhs.rows[r][c])) {
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 namespace {

@@ -38,10 +38,12 @@ CASES = [
 
 GATE_SECONDS = 30.0
 # The encoded matrix for 1M x 50 is 400 MB and the encoder needs about twice that
-# while it is being built (see Phase 8 of the roadmap). This gate sits above the
-# measured 897 MB with room for noise, and low enough that reintroducing a stray
-# full copy of the frame would trip it.
-GATE_PEAK_MB = 1200.0
+# while it is being built (see Phase 8 of the roadmap). The same case peaks at
+# 897 MB on Windows and 1386 MB on the Linux CI runner, where glibc keeps more
+# memory per thread and the peak is sampled from /proc rather than read from the
+# process. Each gate sits above its own platform's measurement with room for
+# noise, and low enough that a stray full copy of the frame (400 MB) trips it.
+GATE_PEAK_MB = 1700.0 if sys.platform.startswith("linux") else 1200.0
 
 
 def peak_rss_mb(process):

@@ -916,6 +916,15 @@ void DSeparatedFunction(DataChunk &args, ExpressionState &, Vector &result) {
 		}
 		out[i] = DSeparated(dag, {x}, {y}, z);
 	}
+	// DuckDB folds a call whose arguments are all constants at plan time, and
+	// expects a constant result back; debug builds assert on it.
+	bool all_constant = true;
+	for (auto &column : args.data) {
+		all_constant = all_constant && column.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	}
+	if (all_constant) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
 }
 
 } // namespace
