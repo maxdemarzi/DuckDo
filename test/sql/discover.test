@@ -34,9 +34,14 @@ FROM do_discover('causal_world') WHERE in_graph;
 ----
 a->c b->c c->d d->f g--h
 
-# Every true edge survives resampling, and so does every orientation.
+# Every true edge survives resampling, and so does every orientation. The
+# stabilities come from 50 resamples, and which rows a seed draws differs
+# between standard libraries. Over 20 seeds, the weakest edge's orientation
+# stability ranged from 0.68 to 0.98, and 7 of the 20 fell below 0.8. A bound
+# of 0.8 passed on Windows and failed on macOS, so the bound is 0.6, which every
+# seed clears.
 query II
-SELECT bool_and(stability >= 0.9), bool_and(orientation_stability >= 0.8)
+SELECT bool_and(stability >= 0.9), bool_and(orientation_stability >= 0.6)
 FROM do_discover('causal_world') WHERE in_graph;
 ----
 true	true
