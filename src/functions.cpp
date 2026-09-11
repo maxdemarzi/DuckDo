@@ -459,6 +459,7 @@ void RegisterEstimationFunctions(ExtensionLoader &loader) {
 
 	TableFunction cate("", {LogicalType::VARCHAR}, EmitRows, BindCate, InitGlobal);
 	AddCommonNamedParameters(cate);
+	cate.named_parameters["cluster"] = LogicalType::VARCHAR;
 	RegisterUnderBothNames(loader, cate, "cate");
 
 	TableFunction by("", {LogicalType::VARCHAR}, EmitRows, BindAteBy, InitGlobal);

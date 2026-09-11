@@ -99,7 +99,7 @@ FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observ
 true
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%horizon defaulted to%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%horizon defaulted to%')) = 1
 FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
              covariates := ['x'], exclude := ['id']);
 ----
@@ -107,7 +107,7 @@ true
 
 # A horizon past the end of the data is allowed but says what it is doing.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%extrapolated flat past that point%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%extrapolated flat past that point%')) = 1
 FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
              covariates := ['x'], horizon := 500.0);
 ----
@@ -116,14 +116,14 @@ true
 # --- what it refuses to report --------------------------------------------------
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%not a hazard ratio, and that is deliberate%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%not a hazard ratio, and that is deliberate%')) = 1
 FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
              covariates := ['x'], horizon := 5.0);
 ----
 true
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%censoring is assumed independent%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%censoring is assumed independent%')) = 1
 FROM do_rmst('obs', treatment := 'trt', duration := 'followup', event := 'observed',
              covariates := ['x'], horizon := 5.0);
 ----

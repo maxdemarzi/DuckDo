@@ -210,8 +210,6 @@ vector<double> AipwPseudoOutcome(const CausalFrame &frame, const NuisanceFit &fi
 
 // --- individual estimators --------------------------------------------------
 
-namespace {
-
 //! Cluster-robust standard error of a mean over `rows`, from each row's
 //! centred contribution. Rows of one cluster are not independent, so their
 //! deviations are summed within the cluster before squaring, with the usual
@@ -234,6 +232,8 @@ double ClusterSe(const CausalFrame &frame, const vector<idx_t> &rows, const vect
 	}
 	return std::sqrt(clusters / (clusters - 1.0) * acc) / static_cast<double>(rows.size());
 }
+
+namespace {
 
 //! Mean and influence-function standard error over `rows` of a per-row score
 //! whose mean is the target parameter.
@@ -508,7 +508,7 @@ CateResult EstimateCate(const CausalFrame &frame, const CausalSpec &spec) {
 	// sandwich, each +/- about 0.015 over 40 replicates. The gradient is the
 	// tell: a constant-variance assumption fails exactly where the variance
 	// stops being constant.
-	auto model = FitRidgeWithSandwich(frame.X, psi, fit.rows, lambda);
+	auto model = FitRidgeWithSandwich(frame.X, psi, fit.rows, lambda, frame.has_cluster ? &frame.cluster : nullptr);
 	for (idx_t i = 0; i < frame.n; i++) {
 		const double *x = frame.X.Row(i);
 		const double point = model.model.Eta(x, frame.X.cols);

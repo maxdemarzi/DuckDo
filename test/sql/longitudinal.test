@@ -111,7 +111,7 @@ FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outc
 false
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%trades variance for bias%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%trades variance for bias%')) = 1
 FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
             covariates := ['l'], truncate := 0.01);
 ----
@@ -120,7 +120,7 @@ true
 # Without truncation the result points at it rather than staying silent about a
 # heavy tail.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%truncate := 0.01 would clamp%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%truncate := 0.01 would clamp%')) = 1
 FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
             covariates := ['l']);
 ----
@@ -129,7 +129,7 @@ true
 # --- the assumption it does not buy --------------------------------------------
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%buys nothing against unmeasured confounding%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%buys nothing against unmeasured confounding%')) = 1
 FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y',
             covariates := ['l']);
 ----
@@ -137,7 +137,7 @@ true
 
 # Omitting covariates entirely is legal but says what it really is.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%unadjusted estimate wearing a marginal structural model%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%unadjusted estimate wearing a marginal structural model%')) = 1
 FROM do_msm('longdata', unit := 'id', period := 'period', treatment := 'a', outcome := 'y');
 ----
 true

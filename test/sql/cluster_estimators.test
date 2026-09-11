@@ -1,0 +1,176 @@
+# name: test/sql/cluster_estimators.test
+# description: cluster := restores the unit-level interval in every estimator that reports one
+# group: [duckdo]
+#
+# One table, 3,000 independent rows, with a column for every estimator's needs.
+# Joined to three copies of each row it has 9,000 rows but still 3,000 units.
+# Unclustered, every interval narrows by about sqrt(3); clustered on the row id,
+# every one comes back to what the 3,000 rows give. Bootstrap-based estimators
+# (front-door, mediation, RMST) get a wider band for resampling noise.
+
+require duckdo
+
+statement ok
+SELECT setseed(0.73);
+
+statement ok
+CREATE TABLE w0 AS SELECT i,
+  sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x1, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS x2,
+  sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1, sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+  sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS uc,
+  random() AS r1, random() AS r2, random() AS r3, random() AS r4, random() AS r5, random() AS r6
+FROM range(3000) t(i);
+
+statement ok
+CREATE TABLE w1 AS SELECT *, (r1 < 1/(1+exp(-0.8*x1)))::INT AS t, (r2 < 0.5)::INT AS z, 1.0 + 0.6*x1 + e2 AS dose,
+  CASE WHEN r5 < 0.33 THEN 'A' WHEN r5 < 0.66 THEN 'B' ELSE 'C' END AS arm FROM w0;
+
+statement ok
+CREATE TABLE w AS SELECT i, x1, x2, t, z, dose, arm,
+  2.0*t + x1 + e1 AS y,
+  ((0.3 + 0.8*z + 0.5*uc) > r3*1.8)::INT AS d,
+  1.5*((0.3 + 0.8*z + 0.5*uc) > r3*1.8)::INT + uc + x1 + e2 AS y_iv,
+  (r4 < 1/(1+exp(-(1.2*t - 0.6))))::INT AS m,
+  1.8*(r4 < 1/(1+exp(-(1.2*t - 0.6))))::INT + 0.5*e1 AS y_fd,
+  0.9*t + 0.5*x1 + e2 AS med,
+  1.0*t + 1.2*(0.9*t + 0.5*x1 + e2) + x1 + e1 AS y_med,
+  1.5*dose + x1 + e1 AS y_dose,
+  CASE arm WHEN 'A' THEN 0.0 WHEN 'B' THEN 1.5 ELSE -1.0 END + x1 + e1 AS y_arm,
+  least(-ln(r3 + 1e-12) / (0.3*exp(0.5*x1 - 0.5*t)), -ln(r6 + 1e-12) / 0.1) AS followup,
+  (-ln(r3 + 1e-12) / (0.3*exp(0.5*x1 - 0.5*t)) <= -ln(r6 + 1e-12) / 0.1)::INT AS observed
+FROM w1;
+
+statement ok
+CREATE TABLE wj AS SELECT w.* FROM w, range(3) r(k);
+
+# --- closed-form intervals: sandwich and influence function ---------------------
+#
+# Each query: clustered over the rows' own interval (should be about 1), and
+# clustered over unclustered on the join (should be about sqrt(3) = 1.73).
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT std_error FROM do_iv('w', treatment := 'd', outcome := 'y_iv', instrument := 'z', covariates := ['x1'])) AS b,
+  (SELECT std_error FROM do_iv('wj', treatment := 'd', outcome := 'y_iv', instrument := 'z', covariates := ['x1'])) AS j,
+  (SELECT std_error FROM do_iv('wj', treatment := 'd', outcome := 'y_iv', instrument := 'z', covariates := ['x1'], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT avg(std_error) FROM do_ate_levels('w', treatment := 'arm', outcome := 'y_arm', covariates := ['x1'])) AS b,
+  (SELECT avg(std_error) FROM do_ate_levels('wj', treatment := 'arm', outcome := 'y_arm', covariates := ['x1'])) AS j,
+  (SELECT avg(std_error) FROM do_ate_levels('wj', treatment := 'arm', outcome := 'y_arm', covariates := ['x1'], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT std_error FROM do_ape('w', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'])) AS b,
+  (SELECT std_error FROM do_ape('wj', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'])) AS j,
+  (SELECT std_error FROM do_ape('wj', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT avg(mu_high - mu_low) FROM do_dose_response('w', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'], grid := 7)) AS b,
+  (SELECT avg(mu_high - mu_low) FROM do_dose_response('wj', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'], grid := 7)) AS j,
+  (SELECT avg(mu_high - mu_low) FROM do_dose_response('wj', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'], grid := 7, cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT avg(cate_high - cate_low) FROM do_cate('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'])) AS b,
+  (SELECT avg(cate_high - cate_low) FROM do_cate('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'])) AS j,
+  (SELECT avg(cate_high - cate_low) FROM do_cate('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT avg(predicted_high - predicted_low) FROM do_predict('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], intervention := {'t': 1})) AS b,
+  (SELECT avg(predicted_high - predicted_low) FROM do_predict('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], intervention := {'t': 1})) AS j,
+  (SELECT avg(predicted_high - predicted_low) FROM do_predict('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], intervention := {'t': 1}, cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT avg(effect_high - effect_low) FROM do_counterfactual('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'])) AS b,
+  (SELECT avg(effect_high - effect_low) FROM do_counterfactual('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'])) AS j,
+  (SELECT avg(effect_high - effect_low) FROM do_counterfactual('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT std_error FROM do_policy_value('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], threshold := 0.0)) AS b,
+  (SELECT std_error FROM do_policy_value('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], threshold := 0.0)) AS j,
+  (SELECT std_error FROM do_policy_value('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], threshold := 0.0, cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.9 AND 1.12, c / j > 1.5 FROM (SELECT
+  (SELECT avg(std_error) FROM do_optimal_policy('w', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], depth := 2)) AS b,
+  (SELECT avg(std_error) FROM do_optimal_policy('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], depth := 2)) AS j,
+  (SELECT avg(std_error) FROM do_optimal_policy('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], depth := 2, cluster := 'i')) AS c);
+----
+true	true
+
+# --- bootstrap intervals: whole clusters are resampled -------------------------
+
+query II
+SELECT c / b BETWEEN 0.85 AND 1.2, c / j > 1.4 FROM (SELECT
+  (SELECT std_error FROM do_frontdoor('w', treatment := 't', outcome := 'y_fd', mediator := 'm', covariates := [])) AS b,
+  (SELECT std_error FROM do_frontdoor('wj', treatment := 't', outcome := 'y_fd', mediator := 'm', covariates := [])) AS j,
+  (SELECT std_error FROM do_frontdoor('wj', treatment := 't', outcome := 'y_fd', mediator := 'm', covariates := [], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.85 AND 1.2, c / j > 1.4 FROM (SELECT
+  (SELECT avg(std_error) FROM do_mediate('w', treatment := 't', outcome := 'y_med', mediator := 'med', covariates := ['x1'])) AS b,
+  (SELECT avg(std_error) FROM do_mediate('wj', treatment := 't', outcome := 'y_med', mediator := 'med', covariates := ['x1'])) AS j,
+  (SELECT avg(std_error) FROM do_mediate('wj', treatment := 't', outcome := 'y_med', mediator := 'med', covariates := ['x1'], cluster := 'i')) AS c);
+----
+true	true
+
+query II
+SELECT c / b BETWEEN 0.85 AND 1.2, c / j > 1.4 FROM (SELECT
+  (SELECT std_error FROM do_rmst('w', treatment := 't', duration := 'followup', event := 'observed', covariates := ['x1'], horizon := 5.0)) AS b,
+  (SELECT std_error FROM do_rmst('wj', treatment := 't', duration := 'followup', event := 'observed', covariates := ['x1'], horizon := 5.0)) AS j,
+  (SELECT std_error FROM do_rmst('wj', treatment := 't', duration := 'followup', event := 'observed', covariates := ['x1'], horizon := 5.0, cluster := 'i')) AS c);
+----
+true	true
+
+# --- the rest of the contract ---------------------------------------------------
+
+# do_uplift reports no standard errors; clustering reaches it through the folds.
+query I
+SELECT count(*) FROM do_uplift('wj', treatment := 't', outcome := 'y', covariates := ['x1', 'x2'], cluster := 'i');
+----
+20
+
+# The result says it was clustered, and on what.
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE 'rows are clustered on ''i'' (3000 clusters)%'))
+FROM do_ape('wj', treatment := 'dose', outcome := 'y_dose', covariates := ['x1'], cluster := 'i');
+----
+1
+
+# do_iv has no variance_method column, so it says so in its warnings instead.
+query I
+SELECT len(list_filter(warnings, lambda w: w LIKE 'rows are clustered on ''i'' (3000 clusters)%'))
+FROM do_iv('wj', treatment := 'd', outcome := 'y_iv', instrument := 'z', covariates := ['x1'], cluster := 'i');
+----
+1
+
+# The diagnostics still refuse: their resampling refuters and balance statistics
+# draw rows, and would report an unclustered answer under a clustered name.
+statement error
+SELECT * FROM do_balance('wj', treatment := 't', covariates := ['x1'], cluster := 'i');
+----
+cluster

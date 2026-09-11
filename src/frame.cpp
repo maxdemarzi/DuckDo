@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -51,6 +53,11 @@ static void FinishUnits(CausalFrame &frame) {
 			frame.cluster[r] = index.emplace(frame.cluster_labels[r], next).first->second;
 		}
 		frame.n_clusters = index.size();
+		frame.cluster_members.assign(frame.n_clusters, {});
+		for (idx_t rank = 0; rank < frame.n; rank++) {
+			const idx_t r = frame.canonical[rank];
+			frame.cluster_members[frame.cluster[r]].push_back(r);
+		}
 		vector<string>().swap(frame.cluster_labels);
 		if (frame.n_clusters < 10) {
 			throw BinderException("duckdo: cluster column '%s' has only %llu distinct values. Cluster-robust "
@@ -58,6 +65,10 @@ static void FinishUnits(CausalFrame &frame) {
 			                      "past about 50",
 			                      frame.cluster_name, static_cast<unsigned long long>(frame.n_clusters));
 		}
+		frame.warnings.push_back(StringUtil::Format(
+		    "rows are clustered on '%s' (%llu clusters): folds, standard errors and resamples treat each cluster "
+		    "as one unit",
+		    frame.cluster_name, static_cast<unsigned long long>(frame.n_clusters)));
 		if (frame.n_clusters < 50) {
 			frame.warnings.push_back(StringUtil::Format(
 			    "only %llu clusters; cluster-robust standard errors understate uncertainty below about 50",
@@ -146,6 +157,36 @@ static void SortCanonical(CausalFrame &frame) {
 	for (idx_t i = 0; i < n; i++) {
 		frame.canonical[i] = keyed[i].second;
 	}
+}
+
+vector<idx_t> ResampleClusters(const CausalFrame &frame, std::mt19937_64 &rng) {
+	vector<idx_t> rows;
+	if (frame.n_clusters == 0) {
+		return rows;
+	}
+	rows.reserve(frame.n);
+	std::uniform_int_distribution<idx_t> pick(0, frame.n_clusters - 1);
+	for (idx_t g = 0; g < frame.n_clusters; g++) {
+		const auto &members = frame.cluster_members[pick(rng)];
+		rows.insert(rows.end(), members.begin(), members.end());
+	}
+	return rows;
+}
+
+vector<idx_t> AssignFoldsByCluster(const CausalFrame &frame, idx_t folds, int64_t seed) {
+	vector<idx_t> order(frame.n_clusters);
+	std::iota(order.begin(), order.end(), 0);
+	std::mt19937_64 rng(static_cast<uint64_t>(seed));
+	std::shuffle(order.begin(), order.end(), rng);
+	vector<idx_t> fold_of(frame.n_clusters, 0);
+	for (idx_t k = 0; k < order.size(); k++) {
+		fold_of[order[k]] = k % folds;
+	}
+	vector<idx_t> assignment(frame.n, 0);
+	for (idx_t i = 0; i < frame.n; i++) {
+		assignment[i] = fold_of[frame.cluster[i]];
+	}
+	return assignment;
 }
 
 vector<idx_t> CausalFrame::AllRows() const {

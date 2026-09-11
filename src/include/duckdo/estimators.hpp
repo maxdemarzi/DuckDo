@@ -52,6 +52,12 @@ NuisanceFit FitNuisance(const CausalFrame &frame, const CausalSpec &spec, int64_
 vector<double> FitPropensity(const CausalFrame &frame, idx_t folds, int64_t seed);
 
 //! The ridge penalty every outcome fit uses, proportional to n.
+//! Cluster-robust standard error of a mean over `rows`, from each row's centred
+//! contribution: contributions are summed within each cluster before squaring,
+//! with a G / (G - 1) correction. With every row its own cluster this is the
+//! ordinary influence-function standard error.
+double ClusterSe(const CausalFrame &frame, const vector<idx_t> &rows, const vector<double> &centred);
+
 double RidgeLambda(const CausalFrame &frame);
 
 //! Fit an outcome model on `train` and write its prediction for every row in

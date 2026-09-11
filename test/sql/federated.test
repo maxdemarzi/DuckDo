@@ -31,7 +31,7 @@ true	true	true	true	true
 # Sites that agree are not called disagreeing.
 query III
 SELECT abs(q_p_value - 0.938630544688968) < 1e-12, i_squared,
-       len(list_filter(warnings, w -> w LIKE '%disagree%'))
+       len(list_filter(warnings, lambda w: w LIKE '%disagree%'))
 FROM do_ate_pool('(SELECT * FROM (VALUES (2.00, 0.1, 1000), (2.03, 0.1, 1000), (1.98, 0.1, 1000)) v(estimate, std_error, n))');
 ----
 true	0.0	0
@@ -84,7 +84,7 @@ true	true
 
 # Three different effects are called what they are.
 query II
-SELECT n_sites, len(list_filter(warnings, w -> w LIKE 'the sites disagree%'))
+SELECT n_sites, len(list_filter(warnings, lambda w: w LIKE 'the sites disagree%'))
 FROM do_ate_pool('(SELECT * FROM do_ate_by(''sites'', treatment := ''t'', outcome := ''y'', covariates := [''x''], by := [''site'']))');
 ----
 3	1
@@ -112,7 +112,7 @@ mixes estimands
 
 # A group do_ate_by could not estimate reports NULLs; it is left out, and said so.
 query II
-SELECT n_sites, len(list_filter(warnings, w -> w LIKE '%NULL estimate%'))
+SELECT n_sites, len(list_filter(warnings, lambda w: w LIKE '%NULL estimate%'))
 FROM do_ate_pool('(SELECT * FROM (VALUES (1.0, 0.1, 100), (2.0, 0.2, 300), (NULL, NULL, 50)) v(estimate, std_error, n))');
 ----
 2	1

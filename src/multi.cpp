@@ -129,7 +129,9 @@ unique_ptr<FunctionData> BindAteLevels(ClientContext &context, TableFunctionBind
 	}
 
 	const idx_t folds = std::min<idx_t>(std::max<idx_t>(spec.folds, 2), std::max<idx_t>(2, frame.n / 4));
-	const auto assignment = AssignFoldsByLevel(frame, folds, spec.seed);
+	// With clusters, a unit's rows share a fold, whatever their levels.
+	const auto assignment =
+	    frame.has_cluster ? AssignFoldsByCluster(frame, folds, spec.seed) : AssignFoldsByLevel(frame, folds, spec.seed);
 	const double lambda = RidgeLambda(frame);
 
 	vector<vector<double>> indicator(levels, vector<double>(frame.n, 0.0));
@@ -240,6 +242,13 @@ unique_ptr<FunctionData> BindAteLevels(ClientContext &context, TableFunctionBind
 		EffectResult result;
 		result.estimate = mean;
 		result.std_error = std::sqrt(variance / n);
+		if (frame.has_cluster) {
+			vector<double> centred(frame.n, 0.0);
+			for (idx_t i = 0; i < frame.n; i++) {
+				centred[i] = psi[k][i] - psi[ref][i] - mean;
+			}
+			result.std_error = ClusterSe(frame, frame.AllRows(), centred);
+		}
 		result.Finalize();
 		const double naive =
 		    level_sum[k] / static_cast<double>(level_count[k]) - level_sum[ref] / static_cast<double>(level_count[ref]);
@@ -258,6 +267,7 @@ unique_ptr<FunctionData> BindAteLevels(ClientContext &context, TableFunctionBind
 void RegisterMultiLevelFunctions(ExtensionLoader &loader) {
 	TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, BindAteLevels, InitGlobal);
 	AddCommonNamedParameters(fn);
+	fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 	fn.named_parameters["reference"] = LogicalType::VARCHAR;
 	RegisterUnderBothNames(loader, fn, "ate_levels");
 }

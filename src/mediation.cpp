@@ -230,9 +230,15 @@ unique_ptr<FunctionData> BindMediate(ClientContext &context, TableFunctionBindIn
 	ParallelJobs(reps, [&](idx_t rep) {
 		std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x0DEC0DEDULL ^ (rep * 0x9E3779B97F4A7C15ULL));
 		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
-		vector<idx_t> resample(frame.n);
-		for (idx_t k = 0; k < frame.n; k++) {
-			resample[k] = frame.Draw(pick(rng));
+		vector<idx_t> resample;
+		if (frame.has_cluster) {
+			// Whole clusters: rows of one unit are not independent draws.
+			resample = ResampleClusters(frame, rng);
+		} else {
+			resample.resize(frame.n);
+			for (idx_t k = 0; k < frame.n; k++) {
+				resample[k] = frame.Draw(pick(rng));
+			}
 		}
 		results[rep] = Decompose(design, frame.aux, frame.y, resample, x_mean, lambda);
 	});
@@ -340,6 +346,7 @@ unique_ptr<FunctionData> BindMediate(ClientContext &context, TableFunctionBindIn
 void RegisterMediationFunctions(ExtensionLoader &loader) {
 	TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, BindMediate, InitGlobal);
 	AddCommonNamedParameters(fn);
+	fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 	fn.named_parameters["mediator"] = LogicalType::VARCHAR;
 	RegisterUnderBothNames(loader, fn, "mediate");
 }

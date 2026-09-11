@@ -85,7 +85,12 @@ RidgeFit FitRidgeWithCovariance(const Matrix &X, const vector<double> &y, const 
 //! A^-1 B A^-1 with HC1 correction. Use this whenever the residual variance
 //! varies across rows - which it does badly for a doubly-robust pseudo-outcome,
 //! whose variance scales with 1/e(x) and 1/(1-e(x)).
-RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda);
+//! With `cluster` set - a cluster id per row of X - the meat sums each
+//! cluster's score before the outer product, and the correction is CR1,
+//! G/(G-1) * (n-1)/(n-p), in place of HC1. Rows of one unit are then not
+//! counted as independent evidence.
+RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda,
+                              const vector<idx_t> *cluster = nullptr);
 
 //! The sandwich fit with per-row case weights - the estimating equation is
 //! sum_i w_i x_i (y_i - x_i'b) = 0, so the bread is sum w x x' and the meat is
@@ -93,7 +98,8 @@ RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const ve
 //! inverse-probability weights change both halves, and using the unweighted
 //! sandwich on weighted data understates the variance.
 RidgeFit FitRidgeWeightedWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,
-                                      const vector<double> &weights, double lambda);
+                                      const vector<double> &weights, double lambda,
+                                      const vector<idx_t> *cluster = nullptr);
 
 //! Logistic regression by iteratively reweighted least squares, with the same
 //! ridge and intercept conventions as FitRidge.

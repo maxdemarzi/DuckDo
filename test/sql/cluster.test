@@ -71,8 +71,8 @@ true	true
 # told, so it is named - and not on a table where ids are unique.
 query II
 SELECT
-  (SELECT len(list_filter(warnings, w -> w LIKE 'id := repeats%')) FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], id := 'unit_id')),
-  (SELECT len(list_filter(warnings, w -> w LIKE 'id := repeats%')) FROM do_ate('outcomes', treatment := 't', outcome := 'y', covariates := ['x'], id := 'unit_id'));
+  (SELECT len(list_filter(warnings, lambda w: w LIKE 'id := repeats%')) FROM do_ate('joined', treatment := 't', outcome := 'y', covariates := ['x'], id := 'unit_id')),
+  (SELECT len(list_filter(warnings, lambda w: w LIKE 'id := repeats%')) FROM do_ate('outcomes', treatment := 't', outcome := 'y', covariates := ['x'], id := 'unit_id'));
 ----
 1	0
 
@@ -105,7 +105,8 @@ nope
 
 # Only functions that honour cluster := accept it. Anywhere else it would be
 # ignored, and an interval that looks clustered and is not is worse than none.
+# do_refute's resampling refuters draw rows, not clusters, so it still refuses.
 statement error
-SELECT * FROM do_cate('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id');
+SELECT * FROM do_refute('joined', treatment := 't', outcome := 'y', covariates := ['x'], cluster := 'unit_id');
 ----
 cluster

@@ -900,7 +900,9 @@ Roughly in order of value per unit of effort:
 
    The chi-square tail is a hand-written regularised incomplete gamma, checked against scipy to 1e-12 in both branches (series and continued fraction). The pooled estimates and standard errors are checked against scipy to the same tolerance.
 
-   Still open: clustering in the remaining functions (`do_cate`, the IV, mediation and survival estimators), and a secure-aggregation protocol. `do_ate_pool` trusts the rows it is given.
+   Clustering now reaches every estimator that reports an interval, through three shared pieces: the influence-function sum, a cluster-robust (CR1) sandwich in `linalg`, and a resampler that draws whole clusters. Every unclustered result is bit-identical to before, checked by fingerprinting the full output of 14 functions. On 3,000 rows joined to three copies each, every clustered interval comes back to the rows' own: 1.00 for the closed-form ones, 0.99 for `do_predict`, and 1.00 to 1.05 for the bootstraps. Unclustered they sit at 0.56 to 0.60, around 1/sqrt(3). `test/sql/cluster_estimators.test` holds each one to that.
+
+   Still open: a secure-aggregation protocol, since `do_ate_pool` trusts the rows it is given; and clustering in the diagnostics, whose resampling refuters draw rows and so still refuse `cluster :=`.
 
 ---
 

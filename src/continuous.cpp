@@ -99,6 +99,10 @@ ContinuousNuisance FitContinuousNuisance(const CausalFrame &frame, const CausalS
 	for (idx_t i = 0; i < frame.n; i++) {
 		assignment[order[i]] = i % folds;
 	}
+	if (frame.has_cluster) {
+		// A unit's rows share a fold, or the nuisance models see the rows they score.
+		assignment = AssignFoldsByCluster(frame, folds, spec.seed);
+	}
 
 	for (idx_t k = 0; k < folds; k++) {
 		vector<idx_t> train, test;
@@ -156,6 +160,17 @@ unique_ptr<FunctionData> BindApe(ClientContext &context, TableFunctionBindInput 
 	const double n = static_cast<double>(frame.n);
 	const double bread = den / n;
 	result.std_error = std::sqrt(meat / n) / (std::fabs(bread) * std::sqrt(n));
+	if (frame.has_cluster) {
+		vector<double> scores(frame.n, 0.0);
+		for (idx_t i = 0; i < frame.n; i++) {
+			const double dose_residual = frame.t[i] - fit.dose_hat[i];
+			scores[i] = dose_residual * ((frame.y[i] - fit.outcome_hat[i]) - result.estimate * dose_residual);
+		}
+		result.std_error = ClusterSe(frame, frame.AllRows(), scores) / std::fabs(bread);
+		result.variance_method =
+		    StringUtil::Format("influence function, clustered on '%s' (%llu clusters)", frame.cluster_name,
+		                       static_cast<unsigned long long>(frame.n_clusters));
+	}
 	result.n = frame.n;
 	result.Finalize();
 
@@ -227,7 +242,8 @@ unique_ptr<FunctionData> BindDoseResponse(ClientContext &context, TableFunctionB
 	}
 	// Sandwich, because the residual variance of an outcome model is rarely
 	// constant across the dose range.
-	auto model = FitRidgeWithSandwich(design, frame.y, all, RidgeLambdaFor(frame));
+	auto model =
+	    FitRidgeWithSandwich(design, frame.y, all, RidgeLambdaFor(frame), frame.has_cluster ? &frame.cluster : nullptr);
 
 	names = {"grid_point", "dose", "mu", "mu_low", "mu_high", "n_within_decile"};
 	return_types = {LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE,
@@ -304,6 +320,7 @@ void RegisterContinuousFunctions(ExtensionLoader &loader) {
 	for (auto &entry : entries) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);
+		fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 		fn.named_parameters["grid"] = LogicalType::BIGINT;
 		RegisterUnderBothNames(loader, fn, entry.name);
 	}

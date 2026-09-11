@@ -205,8 +205,15 @@ unique_ptr<FunctionData> BindPredict(ClientContext &context, TableFunctionBindIn
 		logistic1 = FitLogistic(frame.X, frame.y, rows1, {}, std::max(lambda, 1.0), 30);
 		logistic0 = FitLogistic(frame.X, frame.y, rows0, {}, std::max(lambda, 1.0), 30);
 	} else {
-		ridge1 = FitRidgeWithCovariance(frame.X, frame.y, rows1, lambda);
-		ridge0 = FitRidgeWithCovariance(frame.X, frame.y, rows0, lambda);
+		if (frame.has_cluster) {
+			// The classical covariance assumes independent rows; with clusters the
+			// prediction interval comes from the cluster-robust sandwich instead.
+			ridge1 = FitRidgeWithSandwich(frame.X, frame.y, rows1, lambda, &frame.cluster);
+			ridge0 = FitRidgeWithSandwich(frame.X, frame.y, rows0, lambda, &frame.cluster);
+		} else {
+			ridge1 = FitRidgeWithCovariance(frame.X, frame.y, rows1, lambda);
+			ridge0 = FitRidgeWithCovariance(frame.X, frame.y, rows0, lambda);
+		}
 	}
 
 	// Now set the world to the counterfactual one.
@@ -298,7 +305,14 @@ unique_ptr<FunctionData> BindPolicyValue(ClientContext &context, TableFunctionBi
 		const double contribution = (policy[i] ? psi[i] : 0.0) - value;
 		variance += contribution * contribution;
 	}
-	const double se = std::sqrt(variance / (n * (n - 1.0)));
+	double se = std::sqrt(variance / (n * (n - 1.0)));
+	if (frame.has_cluster) {
+		vector<double> centred(frame.n, 0.0);
+		for (idx_t i = 0; i < frame.n; i++) {
+			centred[i] = (policy[i] ? psi[i] : 0.0) - value;
+		}
+		se = ClusterSe(frame, frame.AllRows(), centred);
+	}
 
 	names = {"policy", "n_targeted", "share_targeted",  "policy_value",     "std_error",
 	         "ci_low", "ci_high",    "value_treat_all", "value_treat_none", "lift_over_treat_all"};
@@ -514,7 +528,14 @@ unique_ptr<FunctionData> BindOptimalPolicy(ClientContext &context, TableFunction
 			const double d = psi[r] - mean;
 			variance += d * d;
 		}
-		const double se = count > 1.0 ? std::sqrt(variance / (count * (count - 1.0))) : 0.0;
+		double se = count > 1.0 ? std::sqrt(variance / (count * (count - 1.0))) : 0.0;
+		if (frame.has_cluster) {
+			vector<double> centred(frame.n, 0.0);
+			for (auto r : leaf.rows) {
+				centred[r] = psi[r] - mean;
+			}
+			se = ClusterSe(frame, leaf.rows, centred);
+		}
 		const bool treat = net_sum > 0.0;
 		bind->rows.push_back({Value::BIGINT(static_cast<int64_t>(l)), Value(leaf.rule),
 		                      Value::BIGINT(static_cast<int64_t>(leaf.rows.size())), Value::DOUBLE(mean),
@@ -539,6 +560,7 @@ void RegisterInterventionFunctions(ExtensionLoader &loader) {
 	for (auto &entry : entries) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);
+		fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 		fn.named_parameters["intervention"] = LogicalType::ANY;
 		fn.named_parameters["policy"] = LogicalType::VARCHAR;
 		fn.named_parameters["threshold"] = LogicalType::DOUBLE;

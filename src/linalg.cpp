@@ -403,12 +403,13 @@ static bool InvertSpd(const vector<double> &matrix, idx_t p, vector<double> &inv
 	return true;
 }
 
-RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda) {
-	return FitRidgeWeightedWithSandwich(X, y, rows, {}, lambda);
+RidgeFit FitRidgeWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows, double lambda,
+                              const vector<idx_t> *cluster) {
+	return FitRidgeWeightedWithSandwich(X, y, rows, {}, lambda, cluster);
 }
 
 RidgeFit FitRidgeWeightedWithSandwich(const Matrix &X, const vector<double> &y, const vector<idx_t> &rows,
-                                      const vector<double> &weights, double lambda) {
+                                      const vector<double> &weights, double lambda, const vector<idx_t> *cluster) {
 	RidgeFit out;
 	const idx_t p = X.cols + 1;
 	out.dim = p;
@@ -432,7 +433,49 @@ RidgeFit FitRidgeWeightedWithSandwich(const Matrix &X, const vector<double> &y, 
 	}
 
 	// V = A^-1 B A^-1, with the HC1 small-sample correction.
-	const double hc1 = static_cast<double>(rows.size()) / static_cast<double>(rows.size() - p);
+	double correction = static_cast<double>(rows.size()) / static_cast<double>(rows.size() - p);
+	if (cluster) {
+		// Clustered: B is the sum over clusters of (sum of w e x)(sum of w e x)',
+		// and the correction is CR1. Without this, k rows of one unit count as k
+		// independent observations and the interval narrows by about sqrt(k).
+		idx_t max_id = 0;
+		for (auto r : rows) {
+			max_id = std::max(max_id, (*cluster)[r]);
+		}
+		vector<double> sums((max_id + 1) * p, 0.0);
+		vector<uint8_t> seen(max_id + 1, 0);
+		for (idx_t idx = 0; idx < rows.size(); idx++) {
+			const idx_t r = rows[idx];
+			const idx_t g = (*cluster)[r];
+			const double s = (weights.empty() ? 1.0 : weights[idx]) * residuals[idx];
+			double *acc = &sums[g * p];
+			acc[0] += s;
+			const double *src = X.Row(r);
+			for (idx_t j = 0; j < X.cols; j++) {
+				acc[j + 1] += s * src[j];
+			}
+			seen[g] = 1;
+		}
+		std::fill(meat.begin(), meat.end(), 0.0);
+		double groups = 0.0;
+		for (idx_t g = 0; g <= max_id; g++) {
+			if (!seen[g]) {
+				continue;
+			}
+			groups += 1.0;
+			const double *acc = &sums[g * p];
+			for (idx_t a = 0; a < p; a++) {
+				for (idx_t b = 0; b < p; b++) {
+					meat[a * p + b] += acc[a] * acc[b];
+				}
+			}
+		}
+		if (groups < 2.0) {
+			return out;
+		}
+		correction =
+		    groups / (groups - 1.0) * static_cast<double>(rows.size() - 1) / static_cast<double>(rows.size() - p);
+	}
 	vector<double> temp(p * p, 0.0);
 	for (idx_t a = 0; a < p; a++) {
 		for (idx_t b = 0; b < p; b++) {
@@ -449,7 +492,7 @@ RidgeFit FitRidgeWeightedWithSandwich(const Matrix &X, const vector<double> &y, 
 			for (idx_t k = 0; k < p; k++) {
 				acc += temp[a * p + k] * inverse[k * p + b];
 			}
-			out.cov[a * p + b] = hc1 * acc;
+			out.cov[a * p + b] = correction * acc;
 		}
 	}
 	return out;

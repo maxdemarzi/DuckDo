@@ -98,7 +98,8 @@ unique_ptr<FunctionData> BindIv(ClientContext &context, TableFunctionBindInput &
 	// First stage: T ~ X + Z. Its explanatory power in Z is the whole question,
 	// because a weak instrument makes the second stage worse than useless.
 	Matrix first_stage_design = WithColumns(frame.X, {frame.aux});
-	auto first_stage = FitRidgeWithSandwich(first_stage_design, frame.t, rows, lambda);
+	auto first_stage =
+	    FitRidgeWithSandwich(first_stage_design, frame.t, rows, lambda, frame.has_cluster ? &frame.cluster : nullptr);
 	vector<double> t_hat(frame.n, 0.0);
 	for (idx_t i = 0; i < frame.n; i++) {
 		t_hat[i] = first_stage.model.Eta(first_stage_design.Row(i), first_stage_design.cols);
@@ -133,6 +134,8 @@ unique_ptr<FunctionData> BindIv(ClientContext &context, TableFunctionBindInput &
 		const idx_t p = meat_fit.dim;
 		vector<double> gram(p * p, 0.0), meat(p * p, 0.0);
 		vector<double> row(p);
+		// With clusters, each cluster's score u*x is summed before the outer product.
+		vector<double> cluster_sums(frame.has_cluster ? frame.n_clusters * p : 0, 0.0);
 		for (idx_t i = 0; i < frame.n; i++) {
 			row[0] = 1.0;
 			const double *src = second_stage_design.Row(i);
@@ -140,6 +143,12 @@ unique_ptr<FunctionData> BindIv(ClientContext &context, TableFunctionBindInput &
 				row[j + 1] = src[j];
 			}
 			const double u2 = residual[i] * residual[i];
+			if (frame.has_cluster) {
+				double *acc = &cluster_sums[frame.cluster[i] * p];
+				for (idx_t a = 0; a < p; a++) {
+					acc[a] += residual[i] * row[a];
+				}
+			}
 			for (idx_t a = 0; a < p; a++) {
 				for (idx_t b = 0; b < p; b++) {
 					gram[a * p + b] += row[a] * row[b];
@@ -149,6 +158,24 @@ unique_ptr<FunctionData> BindIv(ClientContext &context, TableFunctionBindInput &
 		}
 		for (idx_t j = 1; j < p; j++) {
 			gram[j * p + j] += lambda;
+		}
+		if (frame.has_cluster) {
+			// CR1: G/(G-1) * (n-1)/(n-p), as in the clustered sandwich everywhere else.
+			std::fill(meat.begin(), meat.end(), 0.0);
+			for (idx_t g = 0; g < frame.n_clusters; g++) {
+				const double *acc = &cluster_sums[g * p];
+				for (idx_t a = 0; a < p; a++) {
+					for (idx_t b = 0; b < p; b++) {
+						meat[a * p + b] += acc[a] * acc[b];
+					}
+				}
+			}
+			const double groups = static_cast<double>(frame.n_clusters);
+			const double rows_n = static_cast<double>(frame.n);
+			const double scale = groups / (groups - 1.0) * (rows_n - 1.0) / (rows_n - static_cast<double>(p));
+			for (auto &value : meat) {
+				value *= scale;
+			}
 		}
 		vector<double> inverse(p * p, 0.0);
 		bool ok = true;
@@ -188,6 +215,10 @@ unique_ptr<FunctionData> BindIv(ClientContext &context, TableFunctionBindInput &
 	result.estimand = Estimand::ATE;
 	result.estimator = "2sls";
 	result.variance_method = "sandwich on the structural residual";
+	if (frame.has_cluster) {
+		result.variance_method += StringUtil::Format(", clustered on '%s' (%llu clusters)", frame.cluster_name,
+		                                             static_cast<unsigned long long>(frame.n_clusters));
+	}
 	result.estimate = estimate;
 	result.std_error = se;
 	result.n = frame.n;
@@ -317,8 +348,7 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 		idx_t bn1 = 0, bn0 = 0;
 		double by[2][2] = {{0.0, 0.0}, {0.0, 0.0}};
 		idx_t bc[2][2] = {{0, 0}, {0, 0}};
-		for (idx_t k = 0; k < frame.n; k++) {
-			const idx_t i = frame.Draw(pick(rng));
+		auto take = [&](idx_t i) {
 			const int arm = frame.t[i] == 1.0 ? 1 : 0;
 			const int med = frame.aux[i] >= 0.5 ? 1 : 0;
 			if (arm == 1) {
@@ -330,6 +360,19 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 			}
 			by[arm][med] += frame.y[i];
 			bc[arm][med]++;
+		};
+		// Clustered data resamples whole clusters; otherwise rows, exactly as before.
+		idx_t drawn = frame.n;
+		if (frame.has_cluster) {
+			const auto rows = ResampleClusters(frame, rng);
+			for (auto i : rows) {
+				take(i);
+			}
+			drawn = rows.size();
+		} else {
+			for (idx_t k = 0; k < frame.n; k++) {
+				take(frame.Draw(pick(rng)));
+			}
 		}
 		if (bn1 == 0 || bn0 == 0 || bc[0][0] == 0 || bc[0][1] == 0 || bc[1][0] == 0 || bc[1][1] == 0) {
 			return;
@@ -337,7 +380,7 @@ unique_ptr<FunctionData> BindFrontdoor(ClientContext &context, TableFunctionBind
 		const double ba = bm1 / static_cast<double>(bn1) - bm0 / static_cast<double>(bn0);
 		double bb = 0.0;
 		for (int arm = 0; arm < 2; arm++) {
-			const double share = static_cast<double>(arm == 1 ? bn1 : bn0) / static_cast<double>(frame.n);
+			const double share = static_cast<double>(arm == 1 ? bn1 : bn0) / static_cast<double>(drawn);
 			bb += share * (by[arm][1] / static_cast<double>(bc[arm][1]) - by[arm][0] / static_cast<double>(bc[arm][0]));
 		}
 		per_rep[rep] = ba * bb;
@@ -402,6 +445,7 @@ void RegisterIdentificationFunctions(ExtensionLoader &loader) {
 	for (auto &entry : entries) {
 		TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, entry.bind, InitGlobal);
 		AddCommonNamedParameters(fn);
+		fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 		fn.named_parameters["instrument"] = LogicalType::VARCHAR;
 		fn.named_parameters["mediator"] = LogicalType::VARCHAR;
 		RegisterUnderBothNames(loader, fn, entry.name);

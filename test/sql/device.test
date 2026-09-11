@@ -73,7 +73,7 @@ statement ok
 RESET duckdo_gpu_precision;
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%CUDA%'))
+SELECT len(list_filter(warnings, lambda w: w LIKE '%CUDA%'))
 FROM do_ate('dev', treatment := 't', outcome := 'y', model := 'causalpfn');
 ----
 0

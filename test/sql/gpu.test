@@ -54,7 +54,7 @@ true
 
 # The result says where it ran.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE 'causalpfn ran on CUDA at fp32 precision%'))
+SELECT len(list_filter(warnings, lambda w: w LIKE 'causalpfn ran on CUDA at fp32 precision%'))
 FROM do_ate('d', treatment := 't', outcome := 'y', model := 'causalpfn');
 ----
 1

@@ -13,6 +13,7 @@
 #include "duckdb.hpp"
 #include "duckdo/linalg.hpp"
 
+#include <random>
 #include <string>
 
 namespace duckdb {
@@ -135,6 +136,8 @@ struct CausalFrame {
 	idx_t n_clusters = 0;
 	bool has_cluster = false;
 	string cluster_name;
+	//! Rows of each cluster, in canonical order, for resampling whole clusters.
+	vector<vector<idx_t>> cluster_members;
 	//! Values of the `policy :=` boolean column, when one was given.
 	vector<uint8_t> policy;
 	bool has_policy = false;
@@ -189,6 +192,19 @@ struct CausalFrame {
 //! mean summed in storage order, and a hash turns that mean's last-bit drift
 //! under reordering into a different sort key, where a comparison does not.
 void BuildCanonicalOrder(CausalFrame &frame);
+
+//! A bootstrap resample of whole clusters: as many clusters as the frame has,
+//! drawn with replacement, each contributing all of its rows. Rows of one unit
+//! are not independent draws, so resampling them one at a time would give the
+//! same too-narrow interval clustering exists to correct. Only for a frame with
+//! cluster := - an unclustered caller keeps its own row draws, so its results
+//! do not move.
+vector<idx_t> ResampleClusters(const CausalFrame &frame, std::mt19937_64 &rng);
+
+//! Fold ids by cluster: every row of a cluster in one fold, clusters shuffled
+//! and dealt round-robin. For estimators whose own folds are not stratified by
+//! a binary arm - a continuous dose, several levels.
+vector<idx_t> AssignFoldsByCluster(const CausalFrame &frame, idx_t folds, int64_t seed);
 
 //! Materialise a causal frame from the source relation. Runs the schema probe,
 //! the level probes and the projection query, then encodes.

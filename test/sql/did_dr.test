@@ -49,7 +49,7 @@ SELECT estimator FROM do_did('trend_panel', unit := 'unit', period := 'period', 
 callaway-santanna, doubly robust
 
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%conditional on the covariates%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%conditional on the covariates%')) = 1
 FROM do_did('trend_panel', unit := 'unit', period := 'period', treatment := 'treated', outcome := 'y',
             covariates := ['x']);
 ----

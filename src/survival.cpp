@@ -283,9 +283,15 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 	ParallelJobs(reps, [&](idx_t rep) {
 		std::mt19937_64 rng(static_cast<uint64_t>(spec.seed) ^ 0x5A1E5A1EULL ^ (rep * 0x9E3779B97F4A7C15ULL));
 		std::uniform_int_distribution<idx_t> pick(0, frame.n - 1);
-		vector<idx_t> resample(frame.n);
-		for (idx_t k = 0; k < frame.n; k++) {
-			resample[k] = pick(rng);
+		vector<idx_t> resample;
+		if (frame.has_cluster) {
+			// Whole clusters: rows of one unit are not independent draws.
+			resample = ResampleClusters(frame, rng);
+		} else {
+			resample.resize(frame.n);
+			for (idx_t k = 0; k < frame.n; k++) {
+				resample[k] = pick(rng);
+			}
 		}
 		idx_t seen[2] = {0, 0};
 		for (auto i : resample) {
@@ -387,6 +393,7 @@ unique_ptr<FunctionData> BindRmst(ClientContext &context, TableFunctionBindInput
 void RegisterSurvivalFunctions(ExtensionLoader &loader) {
 	TableFunction fn("", {LogicalType::VARCHAR}, EmitRows, BindRmst, InitGlobal);
 	AddCommonNamedParameters(fn);
+	fn.named_parameters["cluster"] = LogicalType::VARCHAR;
 	fn.named_parameters["duration"] = LogicalType::VARCHAR;
 	fn.named_parameters["event"] = LogicalType::VARCHAR;
 	fn.named_parameters["horizon"] = LogicalType::DOUBLE;

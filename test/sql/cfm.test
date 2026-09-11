@@ -61,7 +61,7 @@ do_pfn	effect dispersion (no model uncertainty)
 
 # That Do-PFN's upstream grants no licence travels with the result.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE 'do_pfn''s upstream repository states no licence%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE 'do_pfn''s upstream repository states no licence%')) = 1
 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
             exclude := ['customer_id'], model := 'do_pfn');
 ----
@@ -120,7 +120,7 @@ causalpfn	effect dispersion (no model uncertainty)
 
 # CausalPFN's licence puts no obligation on a result, so no licence warning is attached.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%licen%')) = 0
+SELECT len(list_filter(warnings, lambda w: w LIKE '%licen%')) = 0
 FROM do_ate('customers', treatment := 'discount', outcome := 'revenue',
             exclude := ['customer_id'], model := 'causalpfn');
 ----
@@ -248,7 +248,7 @@ true
 # otherwise. A correctly specified AIPW restricted to the same five covariates
 # returns 4.07 against a truth of 3.0, so most of the damage is the budget.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%confounding bias, not sampling variance%')) = 1
+SELECT len(list_filter(warnings, lambda w: w LIKE '%confounding bias, not sampling variance%')) = 1
 FROM do_ate('wide12', treatment:='trt', outcome:='rev', exclude:=['cid'], model:='do_pfn', ensemble:=4);
 ----
 true
@@ -269,7 +269,7 @@ true
 # Where the budget does not bind, subset ensembling is a no-op: every draw gets
 # every covariate, so no such warning appears.
 query I
-SELECT len(list_filter(warnings, w -> w LIKE '%different subset weighted by%')) = 0
+SELECT len(list_filter(warnings, lambda w: w LIKE '%different subset weighted by%')) = 0
 FROM do_ate('wide12', treatment:='trt', outcome:='rev', exclude:=['cid'], model:='causalpfn', ensemble:=3);
 ----
 true
