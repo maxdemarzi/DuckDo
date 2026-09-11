@@ -2,7 +2,7 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase is implemented, built and tested, Phase 10 included.** 688 assertions
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 695 assertions
 > in 26 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
 > at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
 > gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
@@ -894,7 +894,7 @@ Roughly in order of value per unit of effort:
 
    Tests for binary and mixed data are **DONE**, as `test := 'mixed'`: the latent Gaussian copula for mixed data (Fan, Liu, Ning and Zou 2017), with latent correlations from Kendall's tau. The obvious version, Fisher's z on those correlations, is wrong: in simulation a nominal 1% test rejected true independences between binary columns 9-29% of the time. So each partial correlation gets its own variance from every row's influence on the correlations under it, and a Wald test, which held 0-2% at 1% across the same cases. The C++ estimator matches an independent Python version to 1e-14 on the correlations and 3e-11 on every p-value. On a chain observed partly as yes/no columns, Pearson returns nine edges, five spurious at stability 1.0; the mixed test returns the true four. Pearson and rank output is byte-identical to before.
 
-   Still open: ordinal columns with 3 to 9 levels, which the mixed test reads as continuous and names in `warnings`.
+   Ordinal columns are **DONE**. A column with 3 to 9 levels is read as a latent Gaussian variable cut at thresholds, with two-step polychoric and polyserial correlations and their influence functions, including the part the estimated thresholds contribute. Reading such a column as continuous, as the mixed test did before, rejected a true independence given an ordinal variable 94–98% of the time at a nominal 1%. Read as ordinal, every case held 0.5–1.0% at 1% over 600 draws. The C++ matches an independent Python version to 3e-8 on every latent correlation. Output with no ordinal column is byte-identical to before.
 7. **Federated / multi-table estimation** — effects across joins without materializing the join. **DONE**, in two parts: correct inference across one-to-many joins, and pooling across sites that cannot share rows.
 
    Taken literally, "without materializing the join" is not a goal DuckDo should have. Cross-fitted nuisance models need row-level data, so the frame is materialised by design, and a join is already a valid first argument. What actually went wrong across joins was correctness. A one-to-many join, such as customers joined to their orders, turns one unit into several rows, and every estimator treated them as independent. On 4,000 units joined to three orders each, the estimate was unchanged, but the standard error fell from 0.0352 to 0.0203: an interval 42% too narrow, with no warning. `id :=` did not help, because it was never checked for repeats.

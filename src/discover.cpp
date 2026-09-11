@@ -496,12 +496,230 @@ double BivariateCdfDh(double h, double k, double r) {
 	return NormalDensity(h) * NormalCdf((k - r * h) / std::sqrt(1.0 - r * r));
 }
 
+//! The outermost thresholds of an ordinal column sit at +-kOrdinalBound rather
+//! than at infinity; the normal CDF there is 0 or 1 to within 1e-19.
+const double kOrdinalBound = 9.0;
+
+//! Normal scores of a column, Phi^-1(rank / (n + 1)), with tied values sharing
+//! their average rank.
+void ColumnNormalScores(const vector<double> &column, vector<double> &score) {
+	const idx_t n = column.size();
+	vector<idx_t> order(n);
+	std::iota(order.begin(), order.end(), 0);
+	std::stable_sort(order.begin(), order.end(), [&](idx_t a, idx_t b) { return column[a] < column[b]; });
+	score.assign(n, 0.0);
+	for (idx_t start = 0; start < n;) {
+		idx_t end = start + 1;
+		while (end < n && column[order[end]] == column[order[start]]) {
+			end++;
+		}
+		const double value = NormalQuantile(0.5 * static_cast<double>(start + end + 1) / static_cast<double>(n + 1));
+		for (idx_t k = start; k < end; k++) {
+			score[order[k]] = value;
+		}
+		start = end;
+	}
+}
+
+//! An ordinal column's thresholds - Phi^-1 of its cumulative proportions, padded
+//! with -kOrdinalBound and kOrdinalBound - and each inner threshold's row
+//! influence, (1[code <= j] - F_j) / phi(threshold j).
+void OrdinalThresholds(const vector<idx_t> &code, idx_t levels, vector<double> &cut,
+                       vector<vector<double>> &influence) {
+	const idx_t n = code.size();
+	vector<double> count(levels, 0.0);
+	for (auto c : code) {
+		count[c] += 1.0;
+	}
+	cut.assign(levels + 1, 0.0);
+	cut[0] = -kOrdinalBound;
+	cut[levels] = kOrdinalBound;
+	influence.assign(levels - 1, vector<double>(n, 0.0));
+	double cumulative = 0.0;
+	for (idx_t j = 0; j + 1 < levels; j++) {
+		cumulative += count[j];
+		const double share = cumulative / static_cast<double>(n);
+		cut[j + 1] = NormalQuantile(share);
+		const double density = NormalDensity(cut[j + 1]);
+		for (idx_t k = 0; k < n; k++) {
+			influence[j][k] = ((code[k] <= j ? 1.0 : 0.0) - share) / density;
+		}
+	}
+}
+
+//! The r in [-0.999, 0.999] that maximises a unimodal function, by
+//! golden-section search.
+template <class F>
+double MaximiseCorrelation(F &&f) {
+	const double ratio = 0.6180339887498949;
+	double lo = -0.999, hi = 0.999;
+	double x1 = hi - ratio * (hi - lo), x2 = lo + ratio * (hi - lo);
+	double f1 = f(x1), f2 = f(x2);
+	for (int it = 0; it < 120; it++) {
+		if (f1 < f2) {
+			lo = x1;
+			x1 = x2;
+			f1 = f2;
+			x2 = lo + ratio * (hi - lo);
+			f2 = f(x2);
+		} else {
+			hi = x2;
+			x2 = x1;
+			f2 = f1;
+			x1 = hi - ratio * (hi - lo);
+			f1 = f(x1);
+		}
+	}
+	return 0.5 * (lo + hi);
+}
+
+//! Polychoric correlation of two ordinal columns - a binary column is an
+//! ordinal one with two levels - in two steps: thresholds from each column's
+//! proportions, then the r that maximises the likelihood of the contingency
+//! table, whose cells are rectangles of a bivariate normal. psi receives each
+//! row's influence on r: its score, plus its share in every threshold, over
+//! the slope of the mean score in r.
+double Polychoric(const vector<idx_t> &x, idx_t mx, const vector<idx_t> &y, idx_t my, vector<float> &psi) {
+	const idx_t n = x.size();
+	vector<double> cx, cy;
+	vector<vector<double>> ix, iy;
+	OrdinalThresholds(x, mx, cx, ix);
+	OrdinalThresholds(y, my, cy, iy);
+	vector<double> counts(mx * my, 0.0);
+	for (idx_t k = 0; k < n; k++) {
+		counts[x[k] * my + y[k]] += 1.0;
+	}
+	vector<double> grid((mx + 1) * (my + 1)), density((mx + 1) * (my + 1)), cell(mx * my), slope(mx * my);
+	// Each cell's probability, and its derivative in r: the bivariate density at
+	// its inner corners, since only those move.
+	auto fill = [&](double r, const vector<double> &ax, const vector<double> &ay) {
+		for (idx_t i = 0; i <= mx; i++) {
+			for (idx_t j = 0; j <= my; j++) {
+				grid[i * (my + 1) + j] = BivariateNormalCdf(ax[i], ay[j], r);
+				density[i * (my + 1) + j] =
+				    (i == 0 || i == mx || j == 0 || j == my) ? 0.0 : BivariateNormalDensity(ax[i], ay[j], r);
+			}
+		}
+		for (idx_t a = 0; a < mx; a++) {
+			for (idx_t b = 0; b < my; b++) {
+				const idx_t hh = (a + 1) * (my + 1) + b + 1, lh = a * (my + 1) + b + 1, hl = (a + 1) * (my + 1) + b,
+				            ll = a * (my + 1) + b;
+				cell[a * my + b] = std::max(grid[hh] - grid[lh] - grid[hl] + grid[ll], 1e-300);
+				slope[a * my + b] = density[hh] - density[lh] - density[hl] + density[ll];
+			}
+		}
+	};
+	auto loglik = [&](double r) {
+		fill(r, cx, cy);
+		double sum = 0.0;
+		for (idx_t c = 0; c < mx * my; c++) {
+			sum += counts[c] * std::log(cell[c]);
+		}
+		return sum;
+	};
+	const double r = MaximiseCorrelation(loglik);
+	auto mean_score = [&](double rr, const vector<double> &ax, const vector<double> &ay) {
+		fill(rr, ax, ay);
+		double sum = 0.0;
+		for (idx_t c = 0; c < mx * my; c++) {
+			sum += counts[c] * slope[c] / cell[c];
+		}
+		return sum / static_cast<double>(n);
+	};
+	const double e = 1e-5;
+	const double dr = (mean_score(r + e, cx, cy) - mean_score(r - e, cx, cy)) / (2.0 * e);
+	vector<double> total(n);
+	fill(r, cx, cy);
+	for (idx_t k = 0; k < n; k++) {
+		total[k] = slope[x[k] * my + y[k]] / cell[x[k] * my + y[k]];
+	}
+	for (idx_t j = 0; j + 1 < mx; j++) {
+		auto up = cx, down = cx;
+		up[j + 1] += e;
+		down[j + 1] -= e;
+		const double g = (mean_score(r, up, cy) - mean_score(r, down, cy)) / (2.0 * e);
+		for (idx_t k = 0; k < n; k++) {
+			total[k] += g * ix[j][k];
+		}
+	}
+	for (idx_t j = 0; j + 1 < my; j++) {
+		auto up = cy, down = cy;
+		up[j + 1] += e;
+		down[j + 1] -= e;
+		const double g = (mean_score(r, cx, up) - mean_score(r, cx, down)) / (2.0 * e);
+		for (idx_t k = 0; k < n; k++) {
+			total[k] += g * iy[j][k];
+		}
+	}
+	psi.assign(n, 0.0f);
+	for (idx_t k = 0; k < n; k++) {
+		psi[k] = static_cast<float>(-total[k] / dr);
+	}
+	return r;
+}
+
+//! Polyserial correlation of an ordinal column with a continuous one, in two
+//! steps: thresholds from the ordinal column's proportions, then the r that
+//! maximises the likelihood of each row's level given the continuous column's
+//! normal score u. The influence treats the normal scores as known.
+double Polyserial(const vector<idx_t> &x, idx_t mx, const vector<double> &u, vector<float> &psi) {
+	const idx_t n = x.size();
+	vector<double> cx;
+	vector<vector<double>> ix;
+	OrdinalThresholds(x, mx, cx, ix);
+	auto row_log = [&](double r, const vector<double> &cut, idx_t k) {
+		const double s = std::sqrt(1.0 - r * r);
+		return std::log(
+		    std::max(NormalCdf((cut[x[k] + 1] - r * u[k]) / s) - NormalCdf((cut[x[k]] - r * u[k]) / s), 1e-300));
+	};
+	auto loglik = [&](double r) {
+		double sum = 0.0;
+		for (idx_t k = 0; k < n; k++) {
+			sum += row_log(r, cx, k);
+		}
+		return sum;
+	};
+	const double r = MaximiseCorrelation(loglik);
+	const double e = 1e-5;
+	auto row_score = [&](double rr, const vector<double> &cut, idx_t k) {
+		return (row_log(rr + e, cut, k) - row_log(rr - e, cut, k)) / (2.0 * e);
+	};
+	auto mean_score = [&](double rr, const vector<double> &cut) {
+		double sum = 0.0;
+		for (idx_t k = 0; k < n; k++) {
+			sum += row_score(rr, cut, k);
+		}
+		return sum / static_cast<double>(n);
+	};
+	const double dr = (mean_score(r + e, cx) - mean_score(r - e, cx)) / (2.0 * e);
+	vector<double> total(n);
+	for (idx_t k = 0; k < n; k++) {
+		total[k] = row_score(r, cx, k);
+	}
+	for (idx_t j = 0; j + 1 < mx; j++) {
+		auto up = cx, down = cx;
+		up[j + 1] += e;
+		down[j + 1] -= e;
+		const double g = (mean_score(r, up) - mean_score(r, down)) / (2.0 * e);
+		for (idx_t k = 0; k < n; k++) {
+			total[k] += g * ix[j][k];
+		}
+	}
+	psi.assign(n, 0.0f);
+	for (idx_t k = 0; k < n; k++) {
+		psi[k] = static_cast<float>(-total[k] / dr);
+	}
+	return r;
+}
+
 //! Latent correlations for test := 'mixed' (Fan, Liu, Ning and Zou 2017). Each
 //! pair's Kendall's tau is mapped through the bridge for the pair's kinds:
 //! sin(pi tau / 2) for two continuous columns, and an inverted bivariate-normal
 //! expression when either is binary, with a binary column's threshold estimated
 //! from its mean. Each row's influence on each estimate - its U-statistic share
 //! of tau, plus its share of each threshold - is kept for the test's variance.
+//! A pair with an ordinal column - 3 to 9 values - takes a polychoric estimate,
+//! or a polyserial one against a continuous column, with its own influence.
 void MixedLatent(const NumericTable &t, const vector<idx_t> &rows, const vector<uint8_t> &binary, CiTest &test,
                  bool *repaired) {
 	const idx_t p = t.p, n = rows.size();
@@ -529,11 +747,37 @@ void MixedLatent(const NumericTable &t, const vector<idx_t> &rows, const vector<
 	}
 	const double kPi = 3.14159265358979323846, kRoot2 = std::sqrt(2.0);
 	vector<double> h;
+	// Normal scores of the continuous columns, for polyserial pairs; built on first use.
+	vector<vector<double>> scores(p);
+	auto scores_of = [&](idx_t j) -> const vector<double> & {
+		if (scores[j].empty()) {
+			vector<double> column(n);
+			for (idx_t k = 0; k < n; k++) {
+				column[k] = t.data[rows[k] * p + j];
+			}
+			ColumnNormalScores(column, scores[j]);
+		}
+		return scores[j];
+	};
 	for (idx_t a = 0; a < p; a++) {
 		for (idx_t b = a + 1; b < p; b++) {
 			auto &psi = test.psi[a * p + b];
 			psi.assign(n, 0.0f);
 			if (degenerate[a] || degenerate[b]) {
+				continue;
+			}
+			// A pair with an ordinal column takes a polychoric estimate, or a
+			// polyserial one against a continuous column.
+			if (binary[a] == 2 || binary[b] == 2) {
+				double r;
+				if (binary[a] != 0 && binary[b] != 0) {
+					r = Polychoric(rank[a], levels[a], rank[b], levels[b], psi);
+				} else if (binary[a] == 2) {
+					r = Polyserial(rank[a], levels[a], scores_of(b), psi);
+				} else {
+					r = Polyserial(rank[b], levels[b], scores_of(a), psi);
+				}
+				test.C[a * p + b] = test.C[b * p + a] = r;
 				continue;
 			}
 			KendallKernel(rank[a], levels[a], rank[b], levels[b], h);
@@ -1294,7 +1538,7 @@ void ReadForward(const Pag &g, idx_t &i, idx_t &j) {
 
 struct Discovery {
 	DiscoverSpec spec;
-	//! test := 'mixed': which columns are two-valued, and whether the full-data
+	//! test := 'mixed': which columns are two-valued (1) or ordinal, with 3 to 9 values (2), and whether the full-data
 	//! latent correlations needed repair to be positive definite.
 	vector<uint8_t> binary;
 	bool repaired = false;
@@ -1325,9 +1569,9 @@ CiTest MakeTest(const Discovery &out, const vector<idx_t> &rows, bool *repaired 
 	return test;
 }
 
-//! For test := 'mixed': mark the two-valued columns, refuse a sample too large to
-//! keep every row's influence on every correlation, and return the columns too
-//! coarse to read as continuous.
+//! For test := 'mixed': mark the two-valued columns binary (1) and those with 3
+//! to 9 values ordinal (2), and refuse a sample too large to keep every row's
+//! influence on every correlation. Nothing is left too coarse to read.
 vector<string> ClassifyMixed(Discovery &out, const char *fn) {
 	const auto &t = out.table;
 	const idx_t pairs = t.p * (t.p - 1) / 2;
@@ -1351,7 +1595,7 @@ vector<string> ClassifyMixed(Discovery &out, const char *fn) {
 		if (seen.size() == 2) {
 			out.binary[j] = 1;
 		} else if (seen.size() < 10) {
-			coarse.push_back(t.names[j]);
+			out.binary[j] = 2;
 		}
 	}
 	return coarse;
@@ -1438,7 +1682,7 @@ void NoteTest(Discovery &out, const vector<string> &coarse) {
 		for (auto &name : coarse) {
 			out.warnings.push_back(StringUtil::Format(
 			    "column '%s' has fewer than 10 distinct values; rank-based tests assume continuous variables, and "
-			    "ties this heavy weaken them. test := 'mixed' reads a two-valued column as binary",
+			    "ties this heavy weaken them. test := 'mixed' reads a column with 2 to 9 values as binary or ordinal",
 			    name));
 		}
 		return;
@@ -1455,18 +1699,24 @@ void NoteTest(Discovery &out, const vector<string> &coarse) {
 	}
 	string names;
 	for (idx_t j = 0; j < out.table.p; j++) {
-		if (out.binary[j]) {
+		if (out.binary[j] == 1) {
 			names += (names.empty() ? "" : ", ") + out.table.names[j];
 		}
 	}
 	if (!names.empty()) {
 		out.warnings.push_back("read as binary, each the threshold of a latent Gaussian variable: " + names);
 	}
-	for (auto &name : coarse) {
-		out.warnings.push_back(StringUtil::Format(
-		    "column '%s' has 3 to 9 distinct values; the mixed test reads it as continuous, and ties this heavy pull "
-		    "its latent correlations toward zero",
-		    name));
+	string ordinal;
+	for (idx_t j = 0; j < out.table.p; j++) {
+		if (out.binary[j] == 2) {
+			ordinal += (ordinal.empty() ? "" : ", ") + out.table.names[j];
+		}
+	}
+	if (!ordinal.empty()) {
+		out.warnings.push_back(
+		    "read as ordinal, each a latent Gaussian variable cut at thresholds, with polychoric and "
+		    "polyserial correlations: " +
+		    ordinal);
 	}
 	if (out.repaired) {
 		out.warnings.push_back("the latent correlations were not positive definite together, so their eigenvalues "

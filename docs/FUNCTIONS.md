@@ -536,8 +536,16 @@ the b-c edge in opposite directions, and warns that they conflict. FCI returns `
   a -> c <- b, c -> d -> f with a, c and f observed only as yes/no, b cubed and d on a log scale.
   Pearson returns nine edges, five of them spurious and every one of those at stability 1.0,
   because conditioning on a yes/no c is not conditioning on the c the others respond to. `'rank'`
-  returns six. `'mixed'` returns the true four. `warnings` names the columns read as binary, and
-  any with 3 to 9 distinct values, which are read as continuous: ordinal data is not modelled. The
+  returns six. `'mixed'` returns the true four. A column with 3 to 9 distinct values is read as
+  **ordinal**: a latent Gaussian variable cut at thresholds, with a polychoric correlation against
+  another discrete column and a polyserial one against a continuous column, each with its own row
+  influences for the Wald test. Reading such a column as continuous is what failed before. When two
+  variables were independent given an ordinal one, the test rejected that 94–98% of the time at a
+  nominal 1% in simulation, because a coarse reading of the middle variable cannot screen off its
+  neighbours. Read as ordinal, the same tests rejected 0.5–1.0% at 1% and 3.5–5.5% at 5%, over 600
+  draws of each case. On the same chain with c cut into 4 levels and d into 5, the mixed test now
+  returns the true four edges, where reading them as continuous added a->d, b->d and c->f.
+  `warnings` names the columns read as binary and as ordinal. The
   row influences cost memory, one number per pair of columns per row, so more than 2^24 of them is
   refused with a suggestion to test a sample. Both algorithms take every test.
 - **Assumptions**, restated in `warnings`: no hidden common cause of any two variables (PC only),

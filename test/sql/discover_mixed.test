@@ -1,6 +1,6 @@
 # name: test/sql/discover_mixed.test
 # description: the mixed-data test reads two-valued columns as thresholds of latent Gaussian variables
-# group: [duckdo]
+# group: [sql]
 
 require duckdo
 
@@ -59,6 +59,60 @@ SELECT count(*) FROM (
   EXCEPT SELECT * FROM do_discover('mixed_world', test := 'mixed'));
 ----
 0
+
+# --- ordinal columns -------------------------------------------------------------
+#
+# The same world observed differently: c cut into 4 levels, d into 5, b a
+# yes/no threshold, a as measured and f on a log scale. A column with 3 to 9
+# values is read as ordinal - a latent Gaussian variable cut at thresholds -
+# with polychoric correlations against other discrete columns and polyserial
+# ones against continuous columns. Read as continuous instead, c and d cannot
+# screen off their neighbours, and the graph gains a->d, b->d and c->f.
+statement ok
+SELECT setseed(0.67);
+
+statement ok
+CREATE TABLE ordinal_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS b,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, (b > 0.3)::INT AS b,
+       CASE WHEN c < -1.0 THEN 0 WHEN c < 0.2 THEN 1 WHEN c < 1.2 THEN 2 ELSE 3 END AS c,
+       CASE WHEN d < -1.5 THEN 1 WHEN d < -0.4 THEN 2 WHEN d < 0.5 THEN 3 WHEN d < 1.5 THEN 4 ELSE 5 END AS d,
+       exp(0.8*d + 0.6*e3) AS f
+FROM s2;
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('ordinal_world', test := 'mixed') WHERE in_graph;
+----
+a->c b->c c->d d->f
+
+# Pearson and rank-based tests read c and d as continuous, and do not.
+query II
+SELECT (SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+        FROM do_discover('ordinal_world') WHERE in_graph) <> 'a->c b->c c->d d->f',
+       (SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+        FROM do_discover('ordinal_world', test := 'rank') WHERE in_graph) <> 'a->c b->c c->d d->f';
+----
+true	true
+
+query I
+SELECT count(*) FILTER (WHERE edge = '<->') FROM do_discover('ordinal_world', algorithm := 'fci', test := 'mixed') WHERE in_graph;
+----
+0
+
+query I
+SELECT len(list_filter((SELECT warnings FROM do_discover('ordinal_world', test := 'mixed') LIMIT 1),
+                       lambda w: w = 'read as ordinal, each a latent Gaussian variable cut at thresholds, with polychoric and polyserial correlations: c, d'));
+----
+1
 
 # Keeping every row's influence on every correlation costs memory, so a very
 # large input is refused with a way forward.
