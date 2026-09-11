@@ -886,7 +886,9 @@ Roughly in order of value per unit of effort:
 
    Comments are now skipped, and an undirected edge is an error that names both ends. That same error is how the proposal's unoriented edges are made impossible to skip.
 
-   Still open: tests for non-Gaussian or mixed data, and FCI for hidden confounders. FCI is the honest answer to the assumption real data breaks most often.
+   FCI is **DONE**, as `algorithm := 'fci'`. It starts from PC's skeleton and separating sets, runs the possible-d-sep stage to remove edges a hidden common cause can fake, and orients with rules R1-R4 and R8, assuming no selection bias. Take a -> b <- u -> c <- d, with u unmeasured. PC's two colliders claim the b-c edge in opposite directions, and it warns of the conflict. FCI returns a o-> b <-> c <-o d, naming the hidden cause. On a world with no hidden cause it invents none. In the proposal, `<->` becomes a latent node with an arrow into each end, which `do_graph_create` and `do_identify` already understand, so hidden confounding found by discovery reaches identification.
+
+   Still open: tests for non-Gaussian or mixed data, and FCI's rules R9 and R10. Without them, some edges stay o-> where a complete FCI would write -->.
 7. **Federated / multi-table estimation** — effects across joins without materializing the join. **DONE**, in two parts: correct inference across one-to-many joins, and pooling across sites that cannot share rows.
 
    Taken literally, "without materializing the join" is not a goal DuckDo should have. Cross-fitted nuisance models need row-level data, so the frame is materialised by design, and a join is already a valid first argument. What actually went wrong across joins was correctness. A one-to-many join, such as customers joined to their orders, turns one unit into several rows, and every estimator treated them as independent. On 4,000 units joined to three orders each, the estimate was unchanged, but the standard error fell from 0.0352 to 0.0203: an interval 42% too narrow, with no warning. `id :=` did not help, because it was never checked for repeats.

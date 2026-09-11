@@ -117,10 +117,12 @@ vector<string> Tokenize(const string &text) {
 				}
 			}
 			const string left = tokens.empty() ? string("?") : tokens.back();
-			throw BinderException("duckdo: '%s -- %s' is an undirected edge. DuckDo graphs are directed: write "
-			                      "'%s -> %s' or '%s -> %s'. A graph proposed by do_discover leaves these for you "
-			                      "because the data could not orient them",
-			                      left, right, left, right, right, left);
+			throw BinderException(
+			    "duckdo: '%s -- %s' is an undirected edge. DuckDo graphs are directed: write "
+			    "'%s -> %s' or '%s -> %s', or give them a hidden common cause: a node marked [latent] with "
+			    "an arrow into each. A graph proposed by do_discover leaves these for you "
+			    "because the data could not settle them",
+			    left, right, left, right, right, left);
 		} else if (c == '{' || c == '}' || c == ';' || c == ',' || c == '[' || c == ']' || c == '=') {
 			tokens.push_back(string(1, c));
 			i++;

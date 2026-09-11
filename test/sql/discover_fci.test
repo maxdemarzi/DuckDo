@@ -1,0 +1,110 @@
+# name: test/sql/discover_fci.test
+# description: FCI finds a hidden common cause where PC contradicts itself, and invents none where there is none
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.29);
+
+# The textbook case. a -> b <- u -> c <- d, with u unmeasured: it is not in the
+# table. b and c share a hidden cause, and neither causes the other.
+statement ok
+CREATE TABLE hidden AS
+WITH n AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS u,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS d,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2
+  FROM range(5000) t(i))
+SELECT a, 0.8*a + 0.8*u + 0.6*e1 AS b, 0.8*u + 0.8*d + 0.6*e2 AS c, d FROM n;
+
+# PC assumes no hidden causes, finds a collider at b and another at c, and the
+# two claim the b-c edge in opposite directions. It says so.
+query I
+SELECT len(list_filter((SELECT warnings FROM do_discover('hidden') LIMIT 1), lambda w: w LIKE '%v-structures conflicted%'));
+----
+1
+
+# FCI names the hidden cause: b <-> c, and marks the rest as far as the data goes.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('hidden', algorithm := 'fci') WHERE in_graph;
+----
+ao->b b<->c do->c
+
+# Where there is no hidden cause it invents none. The collider a *-> c <-* b is
+# carried down the chain as c --> d --> f, and g o-o h stays undecided.
+statement ok
+SELECT setseed(0.77);
+
+statement ok
+CREATE TABLE causal_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS b,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS g,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e4
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, b, c, d, 0.8*d + 0.6*e3 AS f, g, 0.9*g + 0.6*e4 AS h FROM s2;
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', algorithm := 'fci') WHERE in_graph;
+----
+ao->c bo->c c-->d d-->f go-oh
+
+# --- the proposal and the review gate -------------------------------------------
+
+# b <-> c becomes a latent node with an arrow into each; the two o-> edges are
+# written --, which do_graph_create refuses until someone settles them.
+query IIII
+SELECT n_directed, n_undirected, n_bidirected, dot LIKE '%"hidden(b, c)" [latent]%'
+FROM do_discover_dot('hidden', algorithm := 'fci');
+----
+0	2	1	true
+
+statement ok
+SET VARIABLE fci_proposal = (SELECT dot FROM do_discover_dot('hidden', algorithm := 'fci'));
+
+statement error
+SELECT * FROM do_graph_create('fci_found', getvariable('fci_proposal'));
+----
+review marker
+
+# With the marker gone, each -- is refused, and the refusal names the options
+# FCI's circles leave open, a hidden common cause among them.
+statement error
+SELECT * FROM do_graph_create('fci_found', replace(getvariable('fci_proposal'), 'do_discover: unreviewed', ''));
+----
+hidden common cause
+
+# Settled - a -> b and d -> c - it registers, the hidden cause of b and c with it.
+query II
+SELECT n_nodes, n_edges FROM do_graph_create('fci_found',
+    replace(replace(replace(getvariable('fci_proposal'), 'do_discover: unreviewed', ''),
+            '"a" -- "b"', '"a" -> "b"'), '"d" -- "c"', '"d" -> "c"'));
+----
+5	4
+
+# --- the rest of the contract ---------------------------------------------------
+
+statement error
+SELECT * FROM do_discover('hidden', algorithm := 'ges');
+----
+algorithm must be 'pc' or 'fci'
+
+# The same data twice gives the same FCI graph and stabilities.
+query I
+SELECT (SELECT string_agg(source || edge || target || stability::VARCHAR || orientation_stability::VARCHAR, ' ' ORDER BY source, target)
+        FROM do_discover('hidden', algorithm := 'fci')) =
+       (SELECT string_agg(source || edge || target || stability::VARCHAR || orientation_stability::VARCHAR, ' ' ORDER BY source, target)
+        FROM do_discover('hidden', algorithm := 'fci'));
+----
+true

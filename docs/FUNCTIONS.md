@@ -477,6 +477,28 @@ can supply: `x -> y` and `y -> x` fit a two-variable world equally well. The "st
 the skeleton independent of column order. The bootstrap draws rows in content order, so it does not
 depend on row order either.
 
+**`algorithm := 'fci'`** drops the assumption PC leans on most: that nothing unmeasured causes two
+of the measured variables. FCI (Spirtes, Glymour and Scheines; Zhang 2008) returns a partial
+ancestral graph, where each end of an edge is an arrowhead, a tail, or a circle meaning the data did
+not decide. `edge` then reads:
+
+- `-->`: a cause;
+- `<->`: neither causes the other, and something hidden causes both;
+- `o->`: the target does not cause the source; the source causes the target, a hidden cause links
+  them, or both;
+- `o-o`: undecided.
+
+It starts from PC's skeleton, removes the edges a hidden common cause can fake with a
+possible-d-sep search, and orients with rules R1-R4 and R8, assuming no selection bias. R9 and R10
+are not implemented, so some edges a complete FCI would write `-->` stay `o->`: they go to review
+instead of past it. `orientation_stability` is the share of resamples that give the pair the same
+two marks.
+
+Take a -> b <- u -> c <- d, with u unmeasured. PC finds a collider at b and another at c, claiming
+the b-c edge in opposite directions, and warns that they conflict. FCI returns `a o-> b`,
+`b <-> c` and `d o-> c`, naming the hidden cause. On a world with no hidden cause, it invents no
+`<->`.
+
 - **Columns.** The default is every numeric or boolean column. Use `columns := [...]` to choose, or
   `exclude := [...]` to leave some out. At most 30 variables are allowed, because the number of
   tests, and the chance that one of them errs, grows combinatorially. Rows with a NULL in a
@@ -504,6 +526,17 @@ edge's bootstrap stability as a comment, and **`do_graph_create` refuses it twic
 That makes the review step required rather than suggested. A graph registered with
 `do_graph_create` is what `do_identify` and `do_validate` treat as true, so an edge that was never
 reviewed would become a wrong adjustment set.
+
+With `algorithm := 'fci'`, `do_discover_dot` also returns `n_bidirected`, and writes each kind of
+edge differently:
+
+- `-->` becomes `->`.
+- `<->` becomes a node marked `[latent]` with an arrow into each end. `do_graph_create` and
+  `do_identify` already treat that as a hidden common cause, so confounding found by discovery
+  reaches identification.
+- Every edge with a circle is written `--`, with a comment naming the readings its marks allow.
+  `do_graph_create` refuses it until a person settles it: a direction, a hidden common cause, or
+  both.
 
 ### `do_identify`
 

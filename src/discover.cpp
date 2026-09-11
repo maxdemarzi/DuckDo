@@ -70,6 +70,8 @@ struct DiscoverSpec {
 	idx_t max_conditioning = 3;
 	idx_t bootstrap = 50;
 	int64_t seed = 42;
+	//! "pc" assumes no hidden common causes; "fci" allows them.
+	string algorithm = "pc";
 };
 
 vector<string> ListParameter(const named_parameter_map_t &named, const char *key) {
@@ -122,6 +124,15 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 	entry = named.find("seed");
 	if (entry != named.end() && !entry->second.IsNull()) {
 		spec.seed = entry->second.GetValue<int64_t>();
+	}
+	entry = named.find("algorithm");
+	if (entry != named.end() && !entry->second.IsNull()) {
+		spec.algorithm = StringUtil::Lower(entry->second.ToString());
+	}
+	if (spec.algorithm != "pc" && spec.algorithm != "fci") {
+		throw BinderException("duckdo: algorithm must be 'pc' or 'fci', not '%s'. 'fci' allows hidden common causes; "
+		                      "'pc' assumes there are none",
+		                      spec.algorithm);
 	}
 	return spec;
 }
@@ -345,7 +356,10 @@ struct Cpdag {
 	}
 };
 
-Cpdag RunPc(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_conditioning) {
+//! `sepset_out`, when given, receives the separating set of every pair the
+//! skeleton search disconnected - which is what FCI starts from.
+Cpdag RunPc(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_conditioning,
+            std::map<std::pair<idx_t, idx_t>, vector<idx_t>> *sepset_out = nullptr) {
 	Cpdag g;
 	g.p = p;
 	g.adj.assign(p * p, 0);
@@ -469,7 +483,339 @@ Cpdag RunPc(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_
 			}
 		}
 	}
+	if (sepset_out) {
+		*sepset_out = sepset;
+	}
 	return g;
+}
+
+// --- FCI -----------------------------------------------------------------------
+//
+// PC assumes nothing unmeasured causes two of the measured variables. FCI
+// (Spirtes, Glymour and Scheines; Zhang 2008) drops that assumption and pays for
+// it in what it can say. Its output is a partial ancestral graph: each end of an
+// edge is an arrowhead, a tail, or a circle meaning the data did not decide, and
+// a <-> b says neither causes the other and something hidden causes both. It
+// starts from PC's skeleton and separating sets, removes the edges a hidden
+// common cause can fake (the possible-d-sep stage), and orients with rules R1-R4
+// and R8, assuming no selection bias. R9 and R10, which turn some circles into
+// tails along long paths, are not implemented. An edge they would have written
+// a --> b stays a o-> b, which sends it to review rather than past it.
+
+enum PagMark : uint8_t { kNone = 0, kCircle = 1, kArrow = 2, kTail = 3 };
+
+//! mark[i * p + j] is the mark at j on the edge between i and j.
+struct Pag {
+	idx_t p = 0;
+	vector<uint8_t> mark;
+
+	bool Adjacent(idx_t i, idx_t j) const {
+		return mark[i * p + j] != kNone;
+	}
+	uint8_t At(idx_t i, idx_t j) const {
+		return mark[i * p + j];
+	}
+	void Set(idx_t i, idx_t j, uint8_t value) {
+		mark[i * p + j] = value;
+	}
+	//! i --> j: a tail at i and an arrowhead at j.
+	bool Directed(idx_t i, idx_t j) const {
+		return At(i, j) == kArrow && At(j, i) == kTail;
+	}
+};
+
+using Sepsets = std::map<std::pair<idx_t, idx_t>, vector<idx_t>>;
+
+bool InSepset(const Sepsets &sepset, idx_t i, idx_t j, idx_t k) {
+	auto found = sepset.find({std::min(i, j), std::max(i, j)});
+	return found != sepset.end() && std::find(found->second.begin(), found->second.end(), k) != found->second.end();
+}
+
+//! Every edge back to o-o, then the unshielded colliders i *-> k <-* j.
+void OrientColliders(Pag &g, const Sepsets &sepset) {
+	const idx_t p = g.p;
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = 0; j < p; j++) {
+			if (g.Adjacent(i, j)) {
+				g.Set(i, j, kCircle);
+			}
+		}
+	}
+	for (idx_t k = 0; k < p; k++) {
+		for (idx_t i = 0; i < p; i++) {
+			for (idx_t j = i + 1; j < p; j++) {
+				if (i == k || j == k || !g.Adjacent(i, k) || !g.Adjacent(j, k) || g.Adjacent(i, j) ||
+				    InSepset(sepset, i, j, k)) {
+					continue;
+				}
+				g.Set(i, k, kArrow);
+				g.Set(j, k, kArrow);
+			}
+		}
+	}
+}
+
+//! Possible-D-SEP(x): every vertex reachable from x along a path on which each
+//! interior vertex is a collider or forms a triangle with its two neighbours.
+//! Whether a vertex qualifies depends on the edge it was entered by, so the
+//! search runs over directed edges rather than vertices.
+vector<idx_t> PossibleDSep(const Pag &g, idx_t x) {
+	const idx_t p = g.p;
+	vector<uint8_t> reached(p, 0), entered(p * p, 0);
+	vector<std::pair<idx_t, idx_t>> frontier;
+	for (idx_t v = 0; v < p; v++) {
+		if (v != x && g.Adjacent(x, v)) {
+			reached[v] = 1;
+			entered[x * p + v] = 1;
+			frontier.push_back({x, v});
+		}
+	}
+	while (!frontier.empty()) {
+		const auto edge = frontier.back();
+		frontier.pop_back();
+		const idx_t prev = edge.first, cur = edge.second;
+		for (idx_t next = 0; next < p; next++) {
+			if (next == prev || next == cur || !g.Adjacent(cur, next) || entered[cur * p + next]) {
+				continue;
+			}
+			const bool collider = g.At(prev, cur) == kArrow && g.At(next, cur) == kArrow;
+			if (!collider && !g.Adjacent(prev, next)) {
+				continue;
+			}
+			entered[cur * p + next] = 1;
+			if (next != x) {
+				reached[next] = 1;
+			}
+			frontier.push_back({cur, next});
+		}
+	}
+	vector<idx_t> out;
+	for (idx_t v = 0; v < p; v++) {
+		if (reached[v]) {
+			out.push_back(v);
+		}
+	}
+	return out;
+}
+
+//! Remove every edge whose ends a subset of either end's Possible-D-SEP
+//! separates: the separations a hidden common cause hides from the neighbour
+//! sets PC searched. The sets are computed before any removal, as PC-stable
+//! freezes neighbours, so the order edges are visited in cannot matter.
+void PossibleDSepStage(Pag &g, Sepsets &sepset, const vector<double> &C, double n, double alpha,
+                       idx_t max_conditioning) {
+	const idx_t p = g.p;
+	vector<vector<idx_t>> pds(p);
+	for (idx_t x = 0; x < p; x++) {
+		pds[x] = PossibleDSep(g, x);
+	}
+	vector<std::pair<idx_t, idx_t>> removed;
+	vector<vector<idx_t>> separating;
+	for (idx_t x = 0; x < p; x++) {
+		for (idx_t y = x + 1; y < p; y++) {
+			if (!g.Adjacent(x, y)) {
+				continue;
+			}
+			bool separated = false;
+			vector<idx_t> found;
+			for (idx_t side = 0; side < 2 && !separated; side++) {
+				const idx_t from = side == 0 ? x : y, other = side == 0 ? y : x;
+				vector<idx_t> candidates;
+				for (auto v : pds[from]) {
+					if (v != other) {
+						candidates.push_back(v);
+					}
+				}
+				for (idx_t level = 0; level <= max_conditioning && level <= candidates.size() && !separated; level++) {
+					vector<idx_t> pick(level);
+					std::iota(pick.begin(), pick.end(), 0);
+					while (true) {
+						vector<idx_t> S(level);
+						for (idx_t a = 0; a < level; a++) {
+							S[a] = candidates[pick[a]];
+						}
+						if (IndependencePValue(PartialCorrelation(C, p, x, y, S), n, level) > alpha) {
+							separated = true;
+							found = S;
+							break;
+						}
+						idx_t a = level;
+						while (a > 0 && pick[a - 1] == candidates.size() - level + a - 1) {
+							a--;
+						}
+						if (a == 0) {
+							break;
+						}
+						pick[a - 1]++;
+						for (idx_t b = a; b < level; b++) {
+							pick[b] = pick[b - 1] + 1;
+						}
+					}
+				}
+			}
+			if (separated) {
+				removed.push_back({x, y});
+				separating.push_back(found);
+			}
+		}
+	}
+	for (idx_t k = 0; k < removed.size(); k++) {
+		const idx_t x = removed[k].first, y = removed[k].second;
+		g.Set(x, y, kNone);
+		g.Set(y, x, kNone);
+		sepset[{x, y}] = separating[k];
+	}
+}
+
+//! Look for a discriminating path <theta, ..., v, b, c> backwards from v, where
+//! v is already known to be a collider on it and a parent of c. The next vertex
+//! back, d, needs an arrowhead into v; if d is not adjacent to c the path is
+//! discriminating, and otherwise d must itself be a collider and a parent of c.
+bool ExtendDiscriminating(const Pag &g, idx_t v, idx_t c, vector<uint8_t> &on_path, idx_t &theta) {
+	for (idx_t d = 0; d < g.p; d++) {
+		if (on_path[d] || !g.Adjacent(d, v) || g.At(d, v) != kArrow) {
+			continue;
+		}
+		if (!g.Adjacent(d, c)) {
+			theta = d;
+			return true;
+		}
+		if (g.At(v, d) == kArrow && g.Directed(d, c)) {
+			on_path[d] = 1;
+			if (ExtendDiscriminating(g, d, c, on_path, theta)) {
+				return true;
+			}
+			on_path[d] = 0;
+		}
+	}
+	return false;
+}
+
+//! Zhang's rules R1-R4 and R8, to a fixed point. Every rule turns a circle into
+//! something else and nothing turns anything back into a circle, so it ends.
+void ApplyRules(Pag &g, const Sepsets &sepset) {
+	const idx_t p = g.p;
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (idx_t a = 0; a < p; a++) {
+			for (idx_t b = 0; b < p; b++) {
+				if (a == b || !g.Adjacent(a, b)) {
+					continue;
+				}
+				for (idx_t c = 0; c < p; c++) {
+					if (c == a || c == b || !g.Adjacent(b, c)) {
+						continue;
+					}
+					// R1: a *-> b o-* c, a and c apart: b --> c.
+					if (!g.Adjacent(a, c) && g.At(a, b) == kArrow && g.At(c, b) == kCircle) {
+						g.Set(c, b, kTail);
+						g.Set(b, c, kArrow);
+						changed = true;
+					}
+					// R2: a --> b *-> c, or a *-> b --> c, with a *-o c: a *-> c.
+					if (g.Adjacent(a, c) && g.At(a, c) == kCircle &&
+					    ((g.Directed(a, b) && g.At(b, c) == kArrow) || (g.At(a, b) == kArrow && g.Directed(b, c)))) {
+						g.Set(a, c, kArrow);
+						changed = true;
+					}
+					// R8: a --> b --> c, or a -o b --> c, with a o-> c: a --> c.
+					if (g.Adjacent(a, c) && g.At(a, c) == kArrow && g.At(c, a) == kCircle && g.Directed(b, c) &&
+					    (g.Directed(a, b) || (g.At(b, a) == kTail && g.At(a, b) == kCircle))) {
+						g.Set(c, a, kTail);
+						changed = true;
+					}
+				}
+			}
+		}
+		// R3: a *-> b <-* c, a *-o t o-* c, a and c apart, t *-o b: t *-> b.
+		for (idx_t t = 0; t < p; t++) {
+			for (idx_t b = 0; b < p; b++) {
+				if (t == b || !g.Adjacent(t, b) || g.At(t, b) != kCircle) {
+					continue;
+				}
+				bool orient = false;
+				for (idx_t a = 0; a < p && !orient; a++) {
+					for (idx_t c = a + 1; c < p && !orient; c++) {
+						orient = a != t && c != t && a != b && c != b && g.Adjacent(a, b) && g.Adjacent(c, b) &&
+						         !g.Adjacent(a, c) && g.At(a, b) == kArrow && g.At(c, b) == kArrow &&
+						         g.Adjacent(a, t) && g.Adjacent(c, t) && g.At(a, t) == kCircle && g.At(c, t) == kCircle;
+					}
+				}
+				if (orient) {
+					g.Set(t, b, kArrow);
+					changed = true;
+				}
+			}
+		}
+		// R4: a discriminating path <theta, ..., a, b, c> for b, with b o-* c. If
+		// b was in the set that separated theta from c, b --> c; otherwise
+		// a <-> b <-> c.
+		for (idx_t b = 0; b < p; b++) {
+			for (idx_t c = 0; c < p; c++) {
+				if (b == c || !g.Adjacent(b, c) || g.At(c, b) != kCircle) {
+					continue;
+				}
+				for (idx_t a = 0; a < p; a++) {
+					if (a == b || a == c || !g.Adjacent(a, b) || g.At(b, a) != kArrow || !g.Directed(a, c)) {
+						continue;
+					}
+					vector<uint8_t> on_path(p, 0);
+					on_path[a] = on_path[b] = on_path[c] = 1;
+					idx_t theta = 0;
+					if (!ExtendDiscriminating(g, a, c, on_path, theta)) {
+						continue;
+					}
+					if (InSepset(sepset, theta, c, b)) {
+						g.Set(c, b, kTail);
+						g.Set(b, c, kArrow);
+					} else {
+						g.Set(a, b, kArrow);
+						g.Set(b, a, kArrow);
+						g.Set(c, b, kArrow);
+						g.Set(b, c, kArrow);
+					}
+					changed = true;
+					break;
+				}
+			}
+		}
+	}
+}
+
+Pag RunFci(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_conditioning) {
+	Sepsets sepset;
+	const auto skeleton = RunPc(C, p, n, alpha, max_conditioning, &sepset);
+	Pag g;
+	g.p = p;
+	g.mark.assign(p * p, kNone);
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = 0; j < p; j++) {
+			if (i != j && skeleton.Adjacent(i, j)) {
+				g.Set(i, j, kCircle);
+			}
+		}
+	}
+	OrientColliders(g, sepset);
+	PossibleDSepStage(g, sepset, C, n, alpha, max_conditioning);
+	OrientColliders(g, sepset);
+	ApplyRules(g, sepset);
+	return g;
+}
+
+//! The edge read from i's end: "o->" is i o-> j, "<->" is i <-> j.
+string PagEdge(const Pag &g, idx_t i, idx_t j) {
+	static const char at_i[] = {' ', 'o', '<', '-'};
+	static const char at_j[] = {' ', 'o', '>', '-'};
+	return string(1, at_i[g.At(j, i)]) + "-" + string(1, at_j[g.At(i, j)]);
+}
+
+//! Read an edge with its stronger mark on the right: <-o becomes o->, <-- becomes -->.
+void ReadForward(const Pag &g, idx_t &i, idx_t &j) {
+	static const int strength[] = {0, 1, 3, 0};
+	if (strength[g.At(j, i)] > strength[g.At(i, j)]) {
+		std::swap(i, j);
+	}
 }
 
 // --- one run: point graph plus bootstrap ------------------------------------------
@@ -482,12 +828,89 @@ struct Discovery {
 	vector<double> oriented;   // fraction with i -> j
 	vector<double> undirected; // fraction with i - j left unoriented
 	vector<string> warnings;
+	//! Set by algorithm := 'fci', which fills `pag` and `same_marks` instead.
+	bool fci = false;
+	Pag pag;
+	vector<double> same_marks; // fraction of resamples giving the pair the same two marks
 };
+
+//! The FCI path through a discovery: the graph, its bootstrap, and warnings that
+//! state what FCI assumes in place of what PC does.
+void RunFciDiscovery(Discovery &out) {
+	const auto &t = out.table;
+	const idx_t p = t.p;
+	const double n = static_cast<double>(t.n);
+	out.fci = true;
+	vector<idx_t> all(t.n);
+	std::iota(all.begin(), all.end(), 0);
+	out.pag = RunFci(Correlation(t, all), p, n, out.spec.alpha, out.spec.max_conditioning);
+
+	out.adjacent.assign(p * p, 0.0);
+	out.same_marks.assign(p * p, 0.0);
+	const idx_t reps = out.spec.bootstrap;
+	if (reps > 0) {
+		const auto order = ContentOrder(t);
+		vector<Pag> draws(reps);
+		// Seeded from (seed, rep), as the PC bootstrap is, so thread scheduling
+		// cannot change which resample a replicate draws.
+		ParallelJobs(reps, [&](idx_t rep) {
+			std::mt19937_64 rng(static_cast<uint64_t>(out.spec.seed) ^ 0xD15C0DE5ULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+			std::uniform_int_distribution<idx_t> pick(0, t.n - 1);
+			vector<idx_t> rows(t.n);
+			for (auto &r : rows) {
+				r = order[pick(rng)];
+			}
+			draws[rep] = RunFci(Correlation(t, rows), p, n, out.spec.alpha, out.spec.max_conditioning);
+		});
+		for (auto &g : draws) {
+			for (idx_t i = 0; i < p; i++) {
+				for (idx_t j = 0; j < p; j++) {
+					if (i == j || !g.Adjacent(i, j)) {
+						continue;
+					}
+					out.adjacent[i * p + j] += 1.0;
+					if (out.pag.Adjacent(i, j) && PagEdge(g, i, j) == PagEdge(out.pag, i, j)) {
+						out.same_marks[i * p + j] += 1.0;
+					}
+				}
+			}
+		}
+		for (idx_t k = 0; k < p * p; k++) {
+			out.adjacent[k] /= static_cast<double>(reps);
+			out.same_marks[k] /= static_cast<double>(reps);
+		}
+	}
+
+	out.warnings.push_back(StringUtil::Format(
+	    "FCI with Fisher-z tests at alpha %g on %llu complete rows. It allows hidden common causes, and assumes "
+	    "faithfulness, linear-Gaussian dependence and no selection bias. Its orientation rules are R1-R4 and R8; R9 "
+	    "and R10 are not implemented, so some edges a complete FCI would write --> are left o->",
+	    out.spec.alpha, static_cast<unsigned long long>(t.n)));
+	if (t.dropped > 0) {
+		out.warnings.push_back(StringUtil::Format("%llu rows with a NULL in a selected column were dropped",
+		                                          static_cast<unsigned long long>(t.dropped)));
+	}
+	if (t.n < 500) {
+		out.warnings.push_back(StringUtil::Format(
+		    "with %llu rows the tests have little power, so a missing edge is weak evidence of independence",
+		    static_cast<unsigned long long>(t.n)));
+	}
+	if (reps == 0) {
+		out.warnings.push_back("bootstrap := 0, so nothing here says how fragile these edges are");
+	}
+	out.warnings.push_back("this is a proposal, not a graph: do_graph_create refuses do_discover_dot's output until "
+	                       "its review marker is deleted and every edge FCI could not settle is given a direction "
+	                       "or a hidden common cause");
+}
 
 Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, const char *fn) {
 	Discovery out;
 	out.spec = ParseDiscover(context, input, fn);
 	out.table = LoadNumeric(context, out.spec, fn);
+	if (out.spec.algorithm == "fci") {
+		RunFciDiscovery(out);
+		return out;
+	}
 	const auto &t = out.table;
 	const idx_t p = t.p;
 	const double n = static_cast<double>(t.n);
@@ -568,9 +991,53 @@ Value WarningValue(const vector<string> &warnings) {
 	return Value::LIST(LogicalType::VARCHAR, std::move(out));
 }
 
+//! do_discover's rows for an FCI graph: the same columns as PC, with each edge's
+//! two marks - -->, <->, o-> or o-o - in place of -> and --.
+unique_ptr<FunctionData> BindFciEdges(const Discovery &found, vector<LogicalType> &return_types,
+                                      vector<string> &names) {
+	const auto &t = found.table;
+	const auto &g = found.pag;
+	const idx_t p = t.p;
+	const bool resampled = found.spec.bootstrap > 0;
+	names = {"source", "target", "edge", "in_graph", "stability", "orientation_stability", "warnings"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::BOOLEAN,
+	                LogicalType::DOUBLE,
+	                LogicalType::DOUBLE,
+	                LogicalType::LIST(LogicalType::VARCHAR)};
+	auto bind = make_uniq<ResultBindData>();
+	const Value warnings = WarningValue(found.warnings);
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = i + 1; j < p; j++) {
+			const bool in_graph = g.Adjacent(i, j);
+			const double stability = found.adjacent[i * p + j];
+			if (!in_graph && !(resampled && stability >= 0.25)) {
+				continue;
+			}
+			idx_t from = i, to = j;
+			string edge = "absent";
+			if (in_graph) {
+				ReadForward(g, from, to);
+				edge = PagEdge(g, from, to);
+			}
+			bind->rows.push_back(
+			    {Value(t.names[from]), Value(t.names[to]), Value(edge), Value::BOOLEAN(in_graph),
+			     resampled ? Value::DOUBLE(stability) : Value(LogicalType::DOUBLE),
+			     resampled && in_graph ? Value::DOUBLE(found.same_marks[i * p + j]) : Value(LogicalType::DOUBLE),
+			     warnings});
+		}
+	}
+	return std::move(bind);
+}
+
 unique_ptr<FunctionData> BindDiscover(ClientContext &context, TableFunctionBindInput &input,
                                       vector<LogicalType> &return_types, vector<string> &names) {
 	auto found = RunDiscovery(context, input, "do_discover");
+	if (found.fci) {
+		return BindFciEdges(found, return_types, names);
+	}
 	const auto &t = found.table;
 	const auto &g = found.graph;
 	const idx_t p = t.p;
@@ -622,9 +1089,82 @@ string QuoteNode(const string &name) {
 	return "\"" + cleaned + "\"";
 }
 
+//! do_discover_dot's proposal for an FCI graph. -->  becomes ->. <-> becomes a
+//! node marked [latent] with an arrow into each end, which do_graph_create and
+//! do_identify already understand as a hidden common cause. Every edge with a
+//! circle is written --, which do_graph_create refuses until someone settles it,
+//! with a comment saying which readings the marks allow.
+unique_ptr<FunctionData> BindFciDot(const Discovery &found, vector<LogicalType> &return_types, vector<string> &names) {
+	const auto &t = found.table;
+	const auto &g = found.pag;
+	const idx_t p = t.p;
+	const bool resampled = found.spec.bootstrap > 0;
+
+	string dot = "digraph discovered {\n";
+	dot += "  // do_discover: unreviewed - delete this line only after reviewing every edge below.\n";
+	dot += StringUtil::Format("  // FCI, alpha %g, %llu bootstrap resamples, %llu complete rows. It allows hidden\n",
+	                          found.spec.alpha, static_cast<unsigned long long>(found.spec.bootstrap),
+	                          static_cast<unsigned long long>(t.n));
+	dot += "  // common causes, and assumes faithfulness, linear-Gaussian dependence and no selection\n";
+	dot += "  // bias. An edge that is wrong here becomes a wrong adjustment set in do_identify.\n";
+	for (idx_t j = 0; j < p; j++) {
+		dot += "  " + QuoteNode(t.names[j]) + ";\n";
+	}
+	idx_t directed = 0, undirected = 0, bidirected = 0;
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = i + 1; j < p; j++) {
+			if (!g.Adjacent(i, j)) {
+				continue;
+			}
+			idx_t from = i, to = j;
+			ReadForward(g, from, to);
+			const string edge = PagEdge(g, from, to);
+			const string &a = t.names[from];
+			const string &b = t.names[to];
+			const string note =
+			    resampled ? StringUtil::Format("in %.0f%% of resamples, these marks in %.0f%%",
+			                                   100.0 * found.adjacent[i * p + j], 100.0 * found.same_marks[i * p + j])
+			              : string();
+			if (edge == "-->") {
+				dot += "  " + QuoteNode(a) + " -> " + QuoteNode(b) + ";" + (note.empty() ? "" : "  // " + note) + "\n";
+				directed++;
+			} else if (edge == "<->") {
+				const string hidden = QuoteNode("hidden(" + a + ", " + b + ")");
+				dot += "  " + hidden + " [latent];  // " + a + " <-> " + b +
+				       ": neither causes the other, and something unmeasured causes both" +
+				       (note.empty() ? "" : "; " + note) + "\n";
+				dot += "  " + hidden + " -> " + QuoteNode(a) + ";\n";
+				dot += "  " + hidden + " -> " + QuoteNode(b) + ";\n";
+				bidirected++;
+			} else {
+				const string readings = edge == "o->" ? b + " does not cause " + a + ": write " + a + " -> " + b +
+				                                            ", or give them a hidden common cause, or both"
+				                                      : "the data did not decide: write " + a + " -> " + b + ", or " +
+				                                            b + " -> " + a + ", or give them a hidden common cause";
+				dot += "  " + QuoteNode(a) + " -- " + QuoteNode(b) + ";  // " + a + " " + edge + " " + b + ": " +
+				       readings + (note.empty() ? "" : "; " + note) + "\n";
+				undirected++;
+			}
+		}
+	}
+	dot += "}\n";
+
+	names = {"dot", "n_nodes", "n_directed", "n_undirected", "n_bidirected"};
+	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
+	                LogicalType::BIGINT};
+	auto bind = make_uniq<ResultBindData>();
+	bind->rows.push_back(
+	    {Value(dot), Value::BIGINT(static_cast<int64_t>(p)), Value::BIGINT(static_cast<int64_t>(directed)),
+	     Value::BIGINT(static_cast<int64_t>(undirected)), Value::BIGINT(static_cast<int64_t>(bidirected))});
+	return std::move(bind);
+}
+
 unique_ptr<FunctionData> BindDiscoverDot(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	auto found = RunDiscovery(context, input, "do_discover_dot");
+	if (found.fci) {
+		return BindFciDot(found, return_types, names);
+	}
 	const auto &t = found.table;
 	const auto &g = found.graph;
 	const idx_t p = t.p;
@@ -684,6 +1224,7 @@ void AddDiscoverParameters(TableFunction &fn) {
 	fn.named_parameters["max_conditioning"] = LogicalType::BIGINT;
 	fn.named_parameters["bootstrap"] = LogicalType::BIGINT;
 	fn.named_parameters["seed"] = LogicalType::BIGINT;
+	fn.named_parameters["algorithm"] = LogicalType::VARCHAR;
 }
 
 } // namespace
