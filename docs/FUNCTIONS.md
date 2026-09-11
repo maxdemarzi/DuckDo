@@ -522,10 +522,27 @@ the b-c edge in opposite directions, and warns that they conflict. FCI returns `
   edges, two of them spurious and one reversed; `'rank'` returns the true four. Transform the
   columns again, monotonically, and `'rank'` returns the same output bit for bit. Where the data
   really is Gaussian, both find the same graph. Ranks mean little in a column with many ties, so
-  any column with fewer than 10 distinct values is named in `warnings`. Binary and mixed data
-  need a different test, which DuckDo does not have yet. Both algorithms take either test.
+  any column with fewer than 10 distinct values is named in `warnings`.
+- **`test := 'mixed'`** is for binary and mixed data. It reads each two-valued column as the
+  threshold of a latent Gaussian variable, and every other column as a monotone transform of one:
+  the latent Gaussian copula for mixed data of Fan, Liu, Ning and Zou (2017). Each pair's latent
+  correlation comes from Kendall's tau through a bridge function for the pair's kinds. Fisher's z
+  would be wrong on those: a binary column's latent correlations are far noisier than a continuous
+  column's. In simulation, a nominal 1% Fisher test rejected true independences between two
+  binary columns 9-29% of the time, and 5-8% where one side was continuous. So each partial
+  correlation gets its own variance, from every row's influence on the correlations it is built
+  from, and a Wald test. In the same simulation that held the level: 0-2% at 1% and 4-7% at 5%,
+  across marginal and conditional tests of binary and continuous columns. Take the chain
+  a -> c <- b, c -> d -> f with a, c and f observed only as yes/no, b cubed and d on a log scale.
+  Pearson returns nine edges, five of them spurious and every one of those at stability 1.0,
+  because conditioning on a yes/no c is not conditioning on the c the others respond to. `'rank'`
+  returns six. `'mixed'` returns the true four. `warnings` names the columns read as binary, and
+  any with 3 to 9 distinct values, which are read as continuous: ordinal data is not modelled. The
+  row influences cost memory, one number per pair of columns per row, so more than 2^24 of them is
+  refused with a suggestion to test a sample. Both algorithms take every test.
 - **Assumptions**, restated in `warnings`: no hidden common cause of any two variables (PC only),
-  faithfulness, and linear-Gaussian dependence, or a Gaussian copula with `test := 'rank'`. Real
+  faithfulness, and linear-Gaussian dependence, or a Gaussian copula with `test := 'rank'`, or a
+  latent Gaussian copula with `test := 'mixed'`. Real
   data usually breaks the first. When it does, the orientations can be wrong even where every edge
   is right.
 - **The stabilities lean pessimistic.** A resample carries the sample's own error on top of its

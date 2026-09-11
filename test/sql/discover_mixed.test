@@ -1,0 +1,77 @@
+# name: test/sql/discover_mixed.test
+# description: the mixed-data test reads two-valued columns as thresholds of latent Gaussian variables
+# group: [duckdo]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.61);
+
+# A linear-Gaussian world, a and b cause c, which causes d, which causes f,
+# observed as a mix: a, c and f are yes/no thresholds of their latent values, b
+# is cubed and d is on a log scale.
+statement ok
+CREATE TABLE mixed_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS a,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS b,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e1,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e2,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS e3
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT (a > 0.2)::INT AS a, b*b*b AS b, (c > 0.3)::INT AS c, exp(d) AS d, (0.8*d + 0.6*e3 > -0.4)::INT AS f FROM s2;
+
+# The mixed test recovers the graph.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('mixed_world', test := 'mixed') WHERE in_graph;
+----
+a->c b->c c->d d->f
+
+# Pearson on the same columns does not. Conditioning on the yes/no c is not
+# conditioning on the c that a, b and d respond to, so it cannot screen them off.
+query I
+SELECT (SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+        FROM do_discover('mixed_world') WHERE in_graph) <> 'a->c b->c c->d d->f';
+----
+true
+
+# FCI takes the same test, and finds no hidden cause where there is none.
+query I
+SELECT count(*) FILTER (WHERE edge = '<->') FROM do_discover('mixed_world', algorithm := 'fci', test := 'mixed') WHERE in_graph;
+----
+0
+
+# The warnings say what the test assumes, and which columns it read as binary.
+query II
+SELECT len(list_filter(w, lambda x: x LIKE '%latent Gaussian copula%')),
+       len(list_filter(w, lambda x: x = 'read as binary, each the threshold of a latent Gaussian variable: a, c, f'))
+FROM (SELECT warnings AS w FROM do_discover('mixed_world', test := 'mixed') LIMIT 1);
+----
+1	1
+
+# The same query twice gives the same edges, stabilities and warnings.
+query I
+SELECT count(*) FROM (
+  SELECT * FROM do_discover('mixed_world', test := 'mixed')
+  EXCEPT SELECT * FROM do_discover('mixed_world', test := 'mixed'));
+----
+0
+
+# Keeping every row's influence on every correlation costs memory, so a very
+# large input is refused with a way forward.
+statement ok
+CREATE TABLE wide AS SELECT
+  random() AS c1, random() AS c2, random() AS c3, random() AS c4, random() AS c5, random() AS c6,
+  random() AS c7, random() AS c8, random() AS c9, random() AS c10, random() AS c11, random() AS c12,
+  random() AS c13, random() AS c14, random() AS c15, random() AS c16, random() AS c17, random() AS c18,
+  random() AS c19, random() AS c20, random() AS c21, random() AS c22, random() AS c23, random() AS c24,
+  random() AS c25, random() AS c26, random() AS c27, random() AS c28, random() AS c29, random() AS c30
+FROM range(40000);
+
+statement error
+SELECT * FROM do_discover('wide', test := 'mixed');
+----
+keeps each row's influence on every correlation

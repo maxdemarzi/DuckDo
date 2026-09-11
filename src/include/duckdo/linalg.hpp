@@ -131,6 +131,14 @@ double StdDev(const vector<double> &v);
 double NormalTwoSidedP(double z);
 //! Inverse of the standard normal CDF, to double precision.
 double NormalQuantile(double p);
+//! Standard normal CDF.
+double NormalCdf(double x);
+//! P(X <= h, Y <= k) for a standard bivariate normal with correlation r: Genz's
+//! algorithm, accurate to about 1e-15.
+double BivariateNormalCdf(double h, double k, double r);
+//! Eigen-decomposition of a symmetric n x n row-major matrix by cyclic Jacobi
+//! rotations: A = V diag(values) V', with the eigenvectors in V's columns.
+void SymmetricEigen(vector<double> A, idx_t n, vector<double> &values, vector<double> &V);
 //! 97.5th percentile of the standard normal, i.e. the 95% CI multiplier.
 static constexpr double Z95 = 1.959963984540054;
 

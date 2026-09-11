@@ -72,7 +72,8 @@ struct DiscoverSpec {
 	int64_t seed = 42;
 	//! "pc" assumes no hidden common causes; "fci" allows them.
 	string algorithm = "pc";
-	//! "pearson" assumes linear-Gaussian dependence; "rank" only a Gaussian copula.
+	//! "pearson" assumes linear-Gaussian dependence; "rank" only a Gaussian copula;
+	//! "mixed" a latent Gaussian copula in which two-valued columns are thresholds.
 	string test = "pearson";
 };
 
@@ -140,9 +141,11 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 	if (entry != named.end() && !entry->second.IsNull()) {
 		spec.test = StringUtil::Lower(entry->second.ToString());
 	}
-	if (spec.test != "pearson" && spec.test != "rank") {
-		throw BinderException("duckdo: test must be 'pearson' or 'rank', not '%s'. 'rank' tests on normal scores, "
-		                      "which only assumes that monotone transforms of the variables are jointly Gaussian",
+	if (spec.test != "pearson" && spec.test != "rank" && spec.test != "mixed") {
+		throw BinderException("duckdo: test must be 'pearson', 'rank' or 'mixed', not '%s'. 'rank' tests on normal "
+		                      "scores, which only assumes that monotone transforms of the variables are jointly "
+		                      "Gaussian; 'mixed' also reads each two-valued column as the threshold of a latent "
+		                      "Gaussian variable",
 		                      spec.test);
 	}
 	return spec;
@@ -382,6 +385,308 @@ double IndependencePValue(double r, double n, idx_t conditioning) {
 	return NormalTwoSidedP(z);
 }
 
+// --- the test object: Fisher's z, or the mixed-data Wald test --------------------
+
+//! One conditional-independence test over one sample of rows. Pearson and rank
+//! read a correlation matrix with Fisher's z. The mixed test reads latent
+//! correlations, and carries each row's influence on every one of them, because
+//! its partial correlations do not have Fisher's variance: a binary column's
+//! latent correlations are far noisier than a continuous column's, and in
+//! simulation a nominal 1% test run with Fisher's z rejected true independences
+//! among binary columns 9-29% of the time. The influences give each partial
+//! correlation its own variance, and the test holds its level.
+struct CiTest {
+	vector<double> C;
+	idx_t p = 0;
+	double n = 0.0;
+	bool mixed = false;
+	idx_t rows = 0;
+	//! [a * p + b] for a < b: each row's influence on C[a][b]. Mixed only.
+	vector<vector<float>> psi;
+
+	double PValue(idx_t i, idx_t j, const vector<idx_t> &S) const;
+};
+
+//! Dense ranks 0..levels-1 of one column over a sample of rows.
+void DenseRanks(const NumericTable &t, idx_t j, const vector<idx_t> &rows, vector<idx_t> &rank, idx_t &levels) {
+	const idx_t n = rows.size();
+	auto value = [&](idx_t k) {
+		return t.data[rows[k] * t.p + j];
+	};
+	vector<idx_t> order(n);
+	std::iota(order.begin(), order.end(), 0);
+	std::stable_sort(order.begin(), order.end(), [&](idx_t a, idx_t b) { return value(a) < value(b); });
+	rank.assign(n, 0);
+	levels = 0;
+	for (idx_t k = 0; k < n; k++) {
+		if (k > 0 && value(order[k]) != value(order[k - 1])) {
+			levels++;
+		}
+		rank[order[k]] = levels;
+	}
+	levels++;
+}
+
+//! h[k] = (1 / (n - 1)) sum_l sign(x_k - x_l) sign(y_k - y_l): each row's share of
+//! Kendall's tau, whose mean is tau-a. A Fenwick tree over y's ranks counts, for
+//! each row, the rows below and above it in x that sit below or above it in y,
+//! in O(n log n).
+void KendallKernel(const vector<idx_t> &rx, idx_t mx, const vector<idx_t> &ry, idx_t my, vector<double> &h) {
+	const idx_t n = rx.size();
+	vector<idx_t> start(mx + 1, 0), by_x(n);
+	for (idx_t k = 0; k < n; k++) {
+		start[rx[k] + 1]++;
+	}
+	for (idx_t v = 0; v < mx; v++) {
+		start[v + 1] += start[v];
+	}
+	{
+		vector<idx_t> fill(start.begin(), start.end() - 1);
+		for (idx_t k = 0; k < n; k++) {
+			by_x[fill[rx[k]]++] = k;
+		}
+	}
+	vector<double> tree(my + 1);
+	auto add = [&](idx_t rank) {
+		for (idx_t i = rank + 1; i <= my; i += i & (~i + 1)) {
+			tree[i] += 1.0;
+		}
+	};
+	auto below = [&](idx_t rank) { // rows inserted with a y rank < rank
+		double s = 0.0;
+		for (idx_t i = rank; i > 0; i -= i & (~i + 1)) {
+			s += tree[i];
+		}
+		return s;
+	};
+	h.assign(n, 0.0);
+	for (int direction = 0; direction < 2; direction++) {
+		std::fill(tree.begin(), tree.end(), 0.0);
+		double inserted = 0.0;
+		for (idx_t step = 0; step < mx; step++) {
+			const idx_t v = direction == 0 ? step : mx - 1 - step;
+			for (idx_t q = start[v]; q < start[v + 1]; q++) {
+				const idx_t k = by_x[q];
+				const double less = below(ry[k]), greater = inserted - below(ry[k] + 1);
+				// Rows lower in x concord when lower in y; rows higher in x when higher.
+				h[k] += direction == 0 ? less - greater : greater - less;
+			}
+			for (idx_t q = start[v]; q < start[v + 1]; q++) {
+				add(ry[by_x[q]]);
+				inserted += 1.0;
+			}
+		}
+	}
+	for (auto &value : h) {
+		value /= static_cast<double>(n - 1);
+	}
+}
+
+double NormalDensity(double x) {
+	return std::exp(-0.5 * x * x) / 2.5066282746310002;
+}
+
+double BivariateNormalDensity(double h, double k, double r) {
+	const double s = 1.0 - r * r;
+	return std::exp(-(h * h - 2.0 * r * h * k + k * k) / (2.0 * s)) / (2.0 * 3.14159265358979323846 * std::sqrt(s));
+}
+
+//! d/dh of P(X <= h, Y <= k) with correlation r.
+double BivariateCdfDh(double h, double k, double r) {
+	return NormalDensity(h) * NormalCdf((k - r * h) / std::sqrt(1.0 - r * r));
+}
+
+//! Latent correlations for test := 'mixed' (Fan, Liu, Ning and Zou 2017). Each
+//! pair's Kendall's tau is mapped through the bridge for the pair's kinds:
+//! sin(pi tau / 2) for two continuous columns, and an inverted bivariate-normal
+//! expression when either is binary, with a binary column's threshold estimated
+//! from its mean. Each row's influence on each estimate - its U-statistic share
+//! of tau, plus its share of each threshold - is kept for the test's variance.
+void MixedLatent(const NumericTable &t, const vector<idx_t> &rows, const vector<uint8_t> &binary, CiTest &test,
+                 bool *repaired) {
+	const idx_t p = t.p, n = rows.size();
+	test.mixed = true;
+	test.rows = n;
+	test.C.assign(p * p, 0.0);
+	test.psi.assign(p * p, vector<float>());
+	vector<vector<idx_t>> rank(p);
+	vector<idx_t> levels(p);
+	vector<double> delta(p, 0.0), phat(p, 0.0);
+	vector<uint8_t> degenerate(p, 0);
+	for (idx_t j = 0; j < p; j++) {
+		DenseRanks(t, j, rows, rank[j], levels[j]);
+		test.C[j * p + j] = 1.0;
+		// A resample can draw a single value; such a column says nothing about any other.
+		degenerate[j] = levels[j] < 2 ? 1 : 0;
+		if (binary[j] && !degenerate[j]) {
+			double high = 0.0;
+			for (idx_t k = 0; k < n; k++) {
+				high += rank[j][k] == 1 ? 1.0 : 0.0;
+			}
+			phat[j] = high / static_cast<double>(n);
+			delta[j] = NormalQuantile(1.0 - phat[j]);
+		}
+	}
+	const double kPi = 3.14159265358979323846, kRoot2 = std::sqrt(2.0);
+	vector<double> h;
+	for (idx_t a = 0; a < p; a++) {
+		for (idx_t b = a + 1; b < p; b++) {
+			auto &psi = test.psi[a * p + b];
+			psi.assign(n, 0.0f);
+			if (degenerate[a] || degenerate[b]) {
+				continue;
+			}
+			KendallKernel(rank[a], levels[a], rank[b], levels[b], h);
+			double tau = 0.0;
+			for (auto v : h) {
+				tau += v;
+			}
+			tau /= static_cast<double>(n);
+			double r;
+			if (!binary[a] && !binary[b]) {
+				r = std::sin(kPi * tau / 2.0);
+				const double slope = (kPi / 2.0) * std::cos(kPi * tau / 2.0);
+				for (idx_t k = 0; k < n; k++) {
+					psi[k] = static_cast<float>(slope * 2.0 * (h[k] - tau));
+				}
+			} else {
+				const bool both = binary[a] && binary[b];
+				const idx_t u = binary[a] ? a : b; // the binary one, when only one is
+				auto bridge = [&](double rr) {
+					if (both) {
+						return 2.0 *
+						       (BivariateNormalCdf(delta[a], delta[b], rr) - NormalCdf(delta[a]) * NormalCdf(delta[b]));
+					}
+					return 4.0 * BivariateNormalCdf(delta[u], 0.0, rr / kRoot2) - 2.0 * NormalCdf(delta[u]);
+				};
+				// The bridge rises with r, so bisection finds the r it maps to tau.
+				double lo = -0.9999, hi = 0.9999;
+				for (int it = 0; it < 100; it++) {
+					const double mid = 0.5 * (lo + hi);
+					(bridge(mid) < tau ? lo : hi) = mid;
+				}
+				r = 0.5 * (lo + hi);
+				double f_r, f_a = 0.0, f_b = 0.0;
+				if (both) {
+					f_r = 2.0 * BivariateNormalDensity(delta[a], delta[b], r);
+					f_a = 2.0 * (BivariateCdfDh(delta[a], delta[b], r) - NormalDensity(delta[a]) * NormalCdf(delta[b]));
+					f_b = 2.0 * (BivariateCdfDh(delta[b], delta[a], r) - NormalDensity(delta[b]) * NormalCdf(delta[a]));
+				} else {
+					const double q = r / kRoot2;
+					f_r = 4.0 * BivariateNormalDensity(delta[u], 0.0, q) / kRoot2;
+					(u == a ? f_a : f_b) = 4.0 * BivariateCdfDh(delta[u], 0.0, q) - 2.0 * NormalDensity(delta[u]);
+				}
+				// bridge(r, thresholds) = tau, so a row moves r by its move of tau, less
+				// what it moves the thresholds by, over the bridge's slope in r.
+				for (idx_t k = 0; k < n; k++) {
+					double value = 2.0 * (h[k] - tau);
+					if (binary[a]) {
+						value -= f_a * (-((rank[a][k] == 1 ? 1.0 : 0.0) - phat[a]) / NormalDensity(delta[a]));
+					}
+					if (binary[b]) {
+						value -= f_b * (-((rank[b][k] == 1 ? 1.0 : 0.0) - phat[b]) / NormalDensity(delta[b]));
+					}
+					psi[k] = static_cast<float>(value / f_r);
+				}
+			}
+			test.C[a * p + b] = test.C[b * p + a] = r;
+		}
+	}
+	// Pairwise estimates need not be positive definite together. Floor the
+	// eigenvalues and rescale to a unit diagonal; the influences stay as they are.
+	vector<double> values, vectors;
+	SymmetricEigen(test.C, p, values, vectors);
+	const double kFloor = 1e-4;
+	if (*std::min_element(values.begin(), values.end()) < kFloor) {
+		vector<double> fixed(p * p, 0.0);
+		for (idx_t a = 0; a < p; a++) {
+			for (idx_t b = 0; b < p; b++) {
+				double sum = 0.0;
+				for (idx_t m = 0; m < p; m++) {
+					sum += vectors[a * p + m] * std::max(values[m], kFloor) * vectors[b * p + m];
+				}
+				fixed[a * p + b] = sum;
+			}
+		}
+		for (idx_t a = 0; a < p; a++) {
+			for (idx_t b = 0; b < p; b++) {
+				test.C[a * p + b] = a == b ? 1.0 : fixed[a * p + b] / std::sqrt(fixed[a * p + a] * fixed[b * p + b]);
+			}
+		}
+		if (repaired) {
+			*repaired = true;
+		}
+	}
+}
+
+//! Wald test of zero latent partial correlation of i and j given S. The partial
+//! correlation is a function of the correlations among {i, j} and S; its
+//! gradient, from dP = -P dR P with P the inverse, turns each row's influence on
+//! those correlations into its influence on the partial correlation, and the
+//! variance is the mean square of that over n.
+double MixedPValue(const CiTest &test, idx_t i, idx_t j, const vector<idx_t> &S) {
+	vector<idx_t> index = {i, j};
+	index.insert(index.end(), S.begin(), S.end());
+	const idx_t k = index.size(), p = test.p;
+	vector<double> M(k * k), P(k * k);
+	for (idx_t a = 0; a < k; a++) {
+		for (idx_t b = 0; b < k; b++) {
+			M[a * k + b] = test.C[index[a] * p + index[b]];
+		}
+	}
+	bool ok = false;
+	for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+		ok = true;
+		for (idx_t c = 0; c < k && ok; c++) {
+			vector<double> A = M, e(k, 0.0), column;
+			e[c] = 1.0;
+			ok = CholeskySolve(A, k, e, column);
+			for (idx_t r = 0; r < k && ok; r++) {
+				P[r * k + c] = column[r];
+			}
+		}
+		// A near-collinear conditioning set: nudge the diagonal and try once more.
+		for (idx_t a = 0; a < k && !ok; a++) {
+			M[a * k + a] += 1e-8;
+		}
+	}
+	const double p00 = P[0], p11 = P[k + 1], p01 = P[1];
+	if (!ok || !(p00 > 0.0) || !(p11 > 0.0)) {
+		return 1.0;
+	}
+	const double rho = -p01 / std::sqrt(p00 * p11);
+	vector<double> total(test.rows, 0.0);
+	for (idx_t a = 0; a < k; a++) {
+		for (idx_t b = a + 1; b < k; b++) {
+			const double d01 = -(P[a] * P[b * k + 1] + P[b] * P[a * k + 1]);
+			const double d00 = -2.0 * P[a] * P[b];
+			const double d11 = -2.0 * P[k + a] * P[k + b];
+			const double g =
+			    -d01 / std::sqrt(p00 * p11) + 0.5 * p01 * std::pow(p00 * p11, -1.5) * (d00 * p11 + p00 * d11);
+			const auto &psi = test.psi[std::min(index[a], index[b]) * p + std::max(index[a], index[b])];
+			for (idx_t r = 0; r < test.rows; r++) {
+				total[r] += g * psi[r];
+			}
+		}
+	}
+	double ss = 0.0;
+	for (auto v : total) {
+		ss += v * v;
+	}
+	const double se = std::sqrt(ss) / static_cast<double>(test.rows);
+	if (!(se > 0.0)) {
+		return 1.0;
+	}
+	return NormalTwoSidedP(rho / se);
+}
+
+double CiTest::PValue(idx_t i, idx_t j, const vector<idx_t> &S) const {
+	if (mixed) {
+		return MixedPValue(*this, i, j, S);
+	}
+	return IndependencePValue(PartialCorrelation(C, p, i, j, S), n, S.size());
+}
+
 // --- PC-stable -----------------------------------------------------------------
 
 struct Cpdag {
@@ -407,8 +712,9 @@ struct Cpdag {
 
 //! `sepset_out`, when given, receives the separating set of every pair the
 //! skeleton search disconnected - which is what FCI starts from.
-Cpdag RunPc(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_conditioning,
+Cpdag RunPc(const CiTest &test, double alpha, idx_t max_conditioning,
             std::map<std::pair<idx_t, idx_t>, vector<idx_t>> *sepset_out = nullptr) {
+	const idx_t p = test.p;
 	Cpdag g;
 	g.p = p;
 	g.adj.assign(p * p, 0);
@@ -454,7 +760,7 @@ Cpdag RunPc(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_
 					for (idx_t a = 0; a < level; a++) {
 						S[a] = candidates[pick[a]];
 					}
-					if (IndependencePValue(PartialCorrelation(C, p, i, j, S), n, level) > alpha) {
+					if (test.PValue(i, j, S) > alpha) {
 						g.adj[i * p + j] = g.adj[j * p + i] = 0;
 						sepset[{std::min(i, j), std::max(i, j)}] = S;
 						break;
@@ -652,8 +958,7 @@ vector<idx_t> PossibleDSep(const Pag &g, idx_t x) {
 //! separates: the separations a hidden common cause hides from the neighbour
 //! sets PC searched. The sets are computed before any removal, as PC-stable
 //! freezes neighbours, so the order edges are visited in cannot matter.
-void PossibleDSepStage(Pag &g, Sepsets &sepset, const vector<double> &C, double n, double alpha,
-                       idx_t max_conditioning) {
+void PossibleDSepStage(Pag &g, Sepsets &sepset, const CiTest &test, double alpha, idx_t max_conditioning) {
 	const idx_t p = g.p;
 	vector<vector<idx_t>> pds(p);
 	for (idx_t x = 0; x < p; x++) {
@@ -684,7 +989,7 @@ void PossibleDSepStage(Pag &g, Sepsets &sepset, const vector<double> &C, double 
 						for (idx_t a = 0; a < level; a++) {
 							S[a] = candidates[pick[a]];
 						}
-						if (IndependencePValue(PartialCorrelation(C, p, x, y, S), n, level) > alpha) {
+						if (test.PValue(x, y, S) > alpha) {
 							separated = true;
 							found = S;
 							break;
@@ -949,9 +1254,10 @@ void ApplyRules(Pag &g, const Sepsets &sepset) {
 	}
 }
 
-Pag RunFci(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_conditioning) {
+Pag RunFci(const CiTest &test, double alpha, idx_t max_conditioning) {
+	const idx_t p = test.p;
 	Sepsets sepset;
-	const auto skeleton = RunPc(C, p, n, alpha, max_conditioning, &sepset);
+	const auto skeleton = RunPc(test, alpha, max_conditioning, &sepset);
 	Pag g;
 	g.p = p;
 	g.mark.assign(p * p, kNone);
@@ -963,7 +1269,7 @@ Pag RunFci(const vector<double> &C, idx_t p, double n, double alpha, idx_t max_c
 		}
 	}
 	OrientColliders(g, sepset);
-	PossibleDSepStage(g, sepset, C, n, alpha, max_conditioning);
+	PossibleDSepStage(g, sepset, test, alpha, max_conditioning);
 	OrientColliders(g, sepset);
 	ApplyRules(g, sepset);
 	return g;
@@ -988,6 +1294,10 @@ void ReadForward(const Pag &g, idx_t &i, idx_t &j) {
 
 struct Discovery {
 	DiscoverSpec spec;
+	//! test := 'mixed': which columns are two-valued, and whether the full-data
+	//! latent correlations needed repair to be positive definite.
+	vector<uint8_t> binary;
+	bool repaired = false;
 	NumericTable table;
 	Cpdag graph;
 	vector<double> adjacent;   // fraction of resamples with i and j adjacent
@@ -1000,16 +1310,62 @@ struct Discovery {
 	vector<double> same_marks; // fraction of resamples giving the pair the same two marks
 };
 
+//! The test one sample of rows gets: Pearson or rank correlations with Fisher's
+//! z, or latent correlations with their row influences for test := 'mixed'.
+CiTest MakeTest(const Discovery &out, const vector<idx_t> &rows, bool *repaired = nullptr) {
+	const auto &t = out.table;
+	CiTest test;
+	test.p = t.p;
+	test.n = static_cast<double>(t.n);
+	if (out.spec.test == "mixed") {
+		MixedLatent(t, rows, out.binary, test, repaired);
+	} else {
+		test.C = Correlation(t, rows);
+	}
+	return test;
+}
+
+//! For test := 'mixed': mark the two-valued columns, refuse a sample too large to
+//! keep every row's influence on every correlation, and return the columns too
+//! coarse to read as continuous.
+vector<string> ClassifyMixed(Discovery &out, const char *fn) {
+	const auto &t = out.table;
+	const idx_t pairs = t.p * (t.p - 1) / 2;
+	const idx_t kBudget = idx_t(1) << 24;
+	if (pairs * t.n > kBudget) {
+		throw BinderException("duckdo: %s with test := 'mixed' keeps each row's influence on every correlation, and "
+		                      "%llu pairs over %llu rows is more than it will hold; choose fewer columns, or test a "
+		                      "sample of the rows (CREATE TABLE s AS SELECT * FROM t USING SAMPLE 20000)",
+		                      fn, static_cast<unsigned long long>(pairs), static_cast<unsigned long long>(t.n));
+	}
+	out.binary.assign(t.p, 0);
+	vector<string> coarse;
+	for (idx_t j = 0; j < t.p; j++) {
+		vector<double> seen;
+		for (idx_t r = 0; r < t.n && seen.size() < 10; r++) {
+			const double v = t.data[r * t.p + j];
+			if (std::find(seen.begin(), seen.end(), v) == seen.end()) {
+				seen.push_back(v);
+			}
+		}
+		if (seen.size() == 2) {
+			out.binary[j] = 1;
+		} else if (seen.size() < 10) {
+			coarse.push_back(t.names[j]);
+		}
+	}
+	return coarse;
+}
+
 //! The FCI path through a discovery: the graph, its bootstrap, and warnings that
 //! state what FCI assumes in place of what PC does.
 void RunFciDiscovery(Discovery &out) {
 	const auto &t = out.table;
 	const idx_t p = t.p;
-	const double n = static_cast<double>(t.n);
 	out.fci = true;
 	vector<idx_t> all(t.n);
 	std::iota(all.begin(), all.end(), 0);
-	out.pag = RunFci(Correlation(t, all), p, n, out.spec.alpha, out.spec.max_conditioning);
+	out.pag = RunFci(MakeTest(out, all, &out.repaired), out.spec.alpha, out.spec.max_conditioning);
 
 	out.adjacent.assign(p * p, 0.0);
 	out.same_marks.assign(p * p, 0.0);
@@ -1026,7 +1382,7 @@ void RunFciDiscovery(Discovery &out) {
 			for (auto &r : rows) {
 				r = order[pick(rng)];
 			}
-			draws[rep] = RunFci(Correlation(t, rows), p, n, out.spec.alpha, out.spec.max_conditioning);
+			draws[rep] = RunFci(MakeTest(out, rows), out.spec.alpha, out.spec.max_conditioning);
 		});
 		for (auto &g : draws) {
 			for (idx_t i = 0; i < p; i++) {
@@ -1069,23 +1425,52 @@ void RunFciDiscovery(Discovery &out) {
 	                       "or a hidden common cause");
 }
 
-//! With test := 'rank', say what the tests assume in place of linear-Gaussian
-//! dependence, and name any column too coarse for ranks to mean much.
-void NoteRankTest(Discovery &out, const vector<string> &coarse) {
-	if (out.spec.test != "rank") {
+//! With test := 'rank' or 'mixed', say what the tests assume in place of
+//! linear-Gaussian dependence, and name the columns each reads specially.
+void NoteTest(Discovery &out, const vector<string> &coarse) {
+	if (out.spec.test == "rank") {
+		for (auto &warning : out.warnings) {
+			warning = StringUtil::Replace(warning, "Fisher-z tests", "rank-based Fisher-z tests (normal scores)");
+			warning = StringUtil::Replace(
+			    warning, "linear-Gaussian dependence",
+			    "a Gaussian copula (that monotone transforms of the variables are jointly Gaussian)");
+		}
+		for (auto &name : coarse) {
+			out.warnings.push_back(StringUtil::Format(
+			    "column '%s' has fewer than 10 distinct values; rank-based tests assume continuous variables, and "
+			    "ties this heavy weaken them. test := 'mixed' reads a two-valued column as binary",
+			    name));
+		}
+		return;
+	}
+	if (out.spec.test != "mixed") {
 		return;
 	}
 	for (auto &warning : out.warnings) {
-		warning = StringUtil::Replace(warning, "Fisher-z tests", "rank-based Fisher-z tests (normal scores)");
-		warning =
-		    StringUtil::Replace(warning, "linear-Gaussian dependence",
-		                        "a Gaussian copula (that monotone transforms of the variables are jointly Gaussian)");
+		warning = StringUtil::Replace(warning, "Fisher-z tests",
+		                              "Wald tests of latent partial correlation (Kendall's tau bridges)");
+		warning = StringUtil::Replace(warning, "linear-Gaussian dependence",
+		                              "a latent Gaussian copula (each continuous column a monotone transform, and each "
+		                              "two-valued column a threshold, of jointly Gaussian variables)");
+	}
+	string names;
+	for (idx_t j = 0; j < out.table.p; j++) {
+		if (out.binary[j]) {
+			names += (names.empty() ? "" : ", ") + out.table.names[j];
+		}
+	}
+	if (!names.empty()) {
+		out.warnings.push_back("read as binary, each the threshold of a latent Gaussian variable: " + names);
 	}
 	for (auto &name : coarse) {
 		out.warnings.push_back(StringUtil::Format(
-		    "column '%s' has fewer than 10 distinct values; rank-based tests assume continuous variables, and ties "
-		    "this heavy weaken them",
+		    "column '%s' has 3 to 9 distinct values; the mixed test reads it as continuous, and ties this heavy pull "
+		    "its latent correlations toward zero",
 		    name));
+	}
+	if (out.repaired) {
+		out.warnings.push_back("the latent correlations were not positive definite together, so their eigenvalues "
+		                       "were floored at 1e-4 before testing");
 	}
 }
 
@@ -1096,19 +1481,20 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 	vector<string> coarse;
 	if (out.spec.test == "rank") {
 		coarse = RankNormalScores(out.table);
+	} else if (out.spec.test == "mixed") {
+		coarse = ClassifyMixed(out, fn);
 	}
 	if (out.spec.algorithm == "fci") {
 		RunFciDiscovery(out);
-		NoteRankTest(out, coarse);
+		NoteTest(out, coarse);
 		return out;
 	}
 	const auto &t = out.table;
 	const idx_t p = t.p;
-	const double n = static_cast<double>(t.n);
 
 	vector<idx_t> all(t.n);
 	std::iota(all.begin(), all.end(), 0);
-	out.graph = RunPc(Correlation(t, all), p, n, out.spec.alpha, out.spec.max_conditioning);
+	out.graph = RunPc(MakeTest(out, all, &out.repaired), out.spec.alpha, out.spec.max_conditioning);
 
 	out.adjacent.assign(p * p, 0.0);
 	out.oriented.assign(p * p, 0.0);
@@ -1126,7 +1512,7 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 			for (auto &r : rows) {
 				r = order[pick(rng)];
 			}
-			draws[rep] = RunPc(Correlation(t, rows), p, n, out.spec.alpha, out.spec.max_conditioning);
+			draws[rep] = RunPc(MakeTest(out, rows), out.spec.alpha, out.spec.max_conditioning);
 		});
 		for (auto &g : draws) {
 			for (idx_t i = 0; i < p; i++) {
@@ -1171,7 +1557,7 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 	}
 	out.warnings.push_back("this is a proposal, not a graph: do_graph_create refuses do_discover_dot's output until "
 	                       "its review marker is deleted and every undirected edge is given a direction");
-	NoteRankTest(out, coarse);
+	NoteTest(out, coarse);
 	return out;
 }
 
@@ -1343,6 +1729,8 @@ unique_ptr<FunctionData> BindFciDot(const Discovery &found, vector<LogicalType> 
 
 	if (found.spec.test == "rank") {
 		dot = StringUtil::Replace(dot, "linear-Gaussian dependence", "a Gaussian copula (rank-based tests)");
+	} else if (found.spec.test == "mixed") {
+		dot = StringUtil::Replace(dot, "linear-Gaussian dependence", "a latent Gaussian copula (mixed-data tests)");
 	}
 	names = {"dot", "n_nodes", "n_directed", "n_undirected", "n_bidirected"};
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
@@ -1405,6 +1793,8 @@ unique_ptr<FunctionData> BindDiscoverDot(ClientContext &context, TableFunctionBi
 
 	if (found.spec.test == "rank") {
 		dot = StringUtil::Replace(dot, "linear-Gaussian dependence", "a Gaussian copula (rank-based tests)");
+	} else if (found.spec.test == "mixed") {
+		dot = StringUtil::Replace(dot, "linear-Gaussian dependence", "a latent Gaussian copula (mixed-data tests)");
 	}
 	names = {"dot", "n_nodes", "n_directed", "n_undirected"};
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};

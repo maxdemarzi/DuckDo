@@ -81,4 +81,4 @@ SELECT len(list_filter((SELECT warnings FROM do_discover('with_flag', test := 'r
 statement error
 SELECT * FROM do_discover('skewed', test := 'kendall');
 ----
-test must be 'pearson' or 'rank'
+test must be 'pearson', 'rank' or 'mixed'

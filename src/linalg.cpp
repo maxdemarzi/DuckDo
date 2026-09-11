@@ -597,6 +597,139 @@ double StdDev(const vector<double> &v) {
 	return std::sqrt(Variance(v));
 }
 
+double NormalCdf(double x) {
+	return 0.5 * std::erfc(-x / std::sqrt(2.0));
+}
+
+//! P(X <= h, Y <= k) for a standard bivariate normal with correlation r:
+//! Genz's algorithm (Drezner-Wesolowsky with Gauss-Legendre quadrature, and a
+//! separate expansion for |r| >= 0.925), accurate to about 1e-15.
+double BivariateNormalCdf(double h_in, double k_in, double r) {
+	static const double x6[] = {-0.9324695142031522, -0.6612093864662647, -0.2386191860831970};
+	static const double w6[] = {0.1713244923791705, 0.3607615730481384, 0.4679139345726904};
+	static const double x12[] = {-0.9815606342467191, -0.9041172563704750, -0.7699026741943050,
+	                             -0.5873179542866171, -0.3678314989981802, -0.1252334085114692};
+	static const double w12[] = {0.04717533638651177, 0.1069393259953183, 0.1600783285433464,
+	                             0.2031674267230659,  0.2334925365383547, 0.2491470458134029};
+	static const double x20[] = {-0.9931285991850949, -0.9639719272779138, -0.9122344282513259, -0.8391169718222188,
+	                             -0.7463319064601508, -0.6360536807265150, -0.5108670019508271, -0.3737060887154196,
+	                             -0.2277858511416451, -0.07652652113349733};
+	static const double w20[] = {0.01761400713915212, 0.04060142980038694, 0.06267204833410906, 0.08327674157670475,
+	                             0.1019301198172404,  0.1181945319615184,  0.1316886384491766,  0.1420961093183821,
+	                             0.1491729864726037,  0.1527533871307259};
+	const double kPi = 3.14159265358979323846;
+	const double *x, *w;
+	int lg;
+	if (std::fabs(r) < 0.3) {
+		x = x6, w = w6, lg = 3;
+	} else if (std::fabs(r) < 0.75) {
+		x = x12, w = w12, lg = 6;
+	} else {
+		x = x20, w = w20, lg = 10;
+	}
+	// Genz works with the upper orthant P(X > h, Y > k); the lower one is that at (-h, -k).
+	double h = -h_in, k = -k_in, hk = h * k, bvn = 0.0;
+	if (std::fabs(r) < 0.925) {
+		const double hs = (h * h + k * k) / 2.0, asr = std::asin(r);
+		for (int i = 0; i < lg; i++) {
+			for (int side = -1; side <= 1; side += 2) {
+				const double sn = std::sin(asr * (1.0 + side * x[i]) / 2.0);
+				bvn += w[i] * std::exp((sn * hk - hs) / (1.0 - sn * sn));
+			}
+		}
+		bvn = bvn * asr / (4.0 * kPi) + NormalCdf(-h) * NormalCdf(-k);
+	} else {
+		if (r < 0.0) {
+			k = -k;
+			hk = -hk;
+		}
+		if (std::fabs(r) < 1.0) {
+			const double as = (1.0 - r) * (1.0 + r), bs = (h - k) * (h - k);
+			double a = std::sqrt(as);
+			const double c = (4.0 - hk) / 8.0, d = (12.0 - hk) / 16.0;
+			bvn = a * std::exp(-(bs / as + hk) / 2.0) *
+			      (1.0 - c * (bs - as) * (1.0 - d * bs / 5.0) / 3.0 + c * d * as * as / 5.0);
+			if (hk > -160.0) {
+				const double b = std::sqrt(bs);
+				bvn -= std::exp(-hk / 2.0) * std::sqrt(2.0 * kPi) * NormalCdf(-b / a) * b *
+				       (1.0 - c * bs * (1.0 - d * bs / 5.0) / 3.0);
+			}
+			a /= 2.0;
+			for (int i = 0; i < lg; i++) {
+				for (int side = -1; side <= 1; side += 2) {
+					const double xs = (a * (side * x[i] + 1.0)) * (a * (side * x[i] + 1.0));
+					const double rs = std::sqrt(1.0 - xs);
+					const double asr = -(bs / xs + hk) / 2.0;
+					if (asr > -100.0) {
+						bvn += a * w[i] * std::exp(asr) *
+						       (std::exp(-hk * (1.0 - rs) / (2.0 * (1.0 + rs))) / rs - (1.0 + c * xs * (1.0 + d * xs)));
+					}
+				}
+			}
+			bvn = -bvn / (2.0 * kPi);
+		}
+		if (r > 0.0) {
+			bvn += NormalCdf(-std::max(h, k));
+		} else {
+			bvn = -bvn;
+			if (k > h) {
+				bvn += NormalCdf(k) - NormalCdf(h);
+			}
+		}
+	}
+	return std::max(0.0, std::min(1.0, bvn));
+}
+
+//! Eigen-decomposition of a symmetric n x n matrix (row-major) by cyclic Jacobi
+//! rotations: A = V diag(values) V'. Columns of V are the eigenvectors.
+void SymmetricEigen(vector<double> A, idx_t n, vector<double> &values, vector<double> &V) {
+	V.assign(n * n, 0.0);
+	for (idx_t i = 0; i < n; i++) {
+		V[i * n + i] = 1.0;
+	}
+	for (int sweep = 0; sweep < 100; sweep++) {
+		double off = 0.0;
+		for (idx_t i = 0; i < n; i++) {
+			for (idx_t j = i + 1; j < n; j++) {
+				off += A[i * n + j] * A[i * n + j];
+			}
+		}
+		if (off < 1e-30) {
+			break;
+		}
+		for (idx_t p = 0; p < n; p++) {
+			for (idx_t q = p + 1; q < n; q++) {
+				const double apq = A[p * n + q];
+				if (std::fabs(apq) < 1e-300) {
+					continue;
+				}
+				const double theta = (A[q * n + q] - A[p * n + p]) / (2.0 * apq);
+				const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+				const double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+				for (idx_t k = 0; k < n; k++) {
+					const double akp = A[k * n + p], akq = A[k * n + q];
+					A[k * n + p] = c * akp - s * akq;
+					A[k * n + q] = s * akp + c * akq;
+				}
+				for (idx_t k = 0; k < n; k++) {
+					const double apk = A[p * n + k], aqk = A[q * n + k];
+					A[p * n + k] = c * apk - s * aqk;
+					A[q * n + k] = s * apk + c * aqk;
+				}
+				for (idx_t k = 0; k < n; k++) {
+					const double vkp = V[k * n + p], vkq = V[k * n + q];
+					V[k * n + p] = c * vkp - s * vkq;
+					V[k * n + q] = s * vkp + c * vkq;
+				}
+			}
+		}
+	}
+	values.resize(n);
+	for (idx_t i = 0; i < n; i++) {
+		values[i] = A[i * n + i];
+	}
+}
+
 double NormalQuantile(double p) {
 	if (!(p > 0.0 && p < 1.0)) {
 		return p <= 0.0 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
