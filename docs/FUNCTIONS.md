@@ -505,6 +505,10 @@ one row per registered graph, `name, n_nodes, n_edges, nodes`, with `nodes` a `V
 SELECT source, edge, target, in_graph, stability, orientation_stability
 FROM do_discover('measurements', alpha := 0.01, bootstrap := 50);
 
+SELECT source, edge, target, agreement
+FROM do_discover('measurements', algorithm := 'both',
+                 tiers := [['age', 'sex'], ['discount'], ['revenue']]);
+
 SELECT dot FROM do_discover_dot('measurements');
 ```
 
@@ -517,7 +521,10 @@ pair that only the resamples joined. `stability` is the share of resamples conta
 `orientation_stability` is the share that gave it this same orientation, or left it unoriented when
 `edge` is `--`.
 
-The algorithm is PC-stable (Colombo and Maathuis 2014), with Fisher-z tests of partial correlation.
+With `algorithm := 'both'` there is one more column, `agreement`, described below.
+
+The default algorithm is PC-stable (Colombo and Maathuis 2014), with Fisher-z tests of partial
+correlation.
 It orients v-structures and then applies Meek's rules. The result is a CPDAG. Observational data
 identifies a graph only up to its Markov equivalence class, so some edges have no direction the data
 can supply: `x -> y` and `y -> x` fit a two-variable world equally well. The "stable" variant makes
@@ -551,6 +558,53 @@ the b-c edge in opposite directions, and warns that they conflict. FCI returns `
 `b <-> c` and `d o-> c`, naming the hidden cause. On a world with no hidden cause, it invents no
 `<->`.
 
+**`algorithm := 'lingam'`** orients the edges PC has no way to settle. Conditional independence
+cannot tell `x -> y` from `y -> x`, because the two fit a two-variable world equally well, which is
+why the `--` edges exist at all. DirectLiNGAM (Shimizu, Inazumi, Sogawa, Hyvärinen, Kawahara,
+Washio, Hoyer and Bollen 2011) reads a different signal. If every effect is linear, the graph has
+no cycles, nothing unmeasured causes two variables, and the disturbances are non-Gaussian, then
+regressing the effect on the cause leaves a residual independent of the cause while the reverse
+regression does not. The most exogenous variable is the one no other variable explains in that
+sense; it is peeled off, regressed out of the rest, and the search repeats on the residuals. What
+comes back is a causal order — reported in `warnings` — and then one regression of each variable on
+its predecessors. Every edge is directed, so `do_discover_dot`'s output needs only its review
+marker deleted, not a direction invented for each undecided pair.
+
+That is bought with an assumption list strictly longer than PC's, and the last item is the one that
+bites. On Gaussian disturbances the asymmetry is not weaker but absent, and the method returns a
+confident order that is close to a coin flip: over 40 draws of a six-variable graph, 40 orders
+exactly right with uniform disturbances against 1 with Gaussian ones. So each variable's
+disturbance is tested with Jarque–Bera, and **two that cannot be told from Gaussian is a refusal**,
+because identifiability allows at most one. The refusal tracks the failure rather than guessing at
+it: at 1000 rows and above it fired on 0 of 40 draws for uniform, heavy-tailed, mildly skewed and
+near-Gaussian-mixture disturbances, and on 40 of 40 for Gaussian ones. At 200 rows it fired far
+more often — 18 to 39 of 40 for those three mildly non-Gaussian cases — but the order was
+unreliable there too, exactly right only 15 to 25 times of 40, so it is refusing cases it should.
+Strongly non-Gaussian uniform disturbances at the same 200 rows were refused once in 40, with the
+order right 39 times. `test := 'rank'` and `test := 'mixed'` are rejected at
+bind time with this algorithm, since normal scores are Gaussian by construction and erase the only
+signal it reads.
+
+**`algorithm := 'both'`** runs PC-stable and DirectLiNGAM over the same rows and reports the union,
+with an extra `agreement` column saying how the two landed on each pair:
+
+| `agreement` | meaning |
+|---|---|
+| `both` | both found the edge and gave it the same direction |
+| `oriented by lingam` | both found it; PC could not orient it, LiNGAM did |
+| `conflict` | both found it and oriented it opposite ways, so `edge` is `--` |
+| `pc only` | only PC's skeleton had it |
+| `lingam only` | only LiNGAM had it |
+
+Where PC oriented an edge its orientation stands, because it rests on the weaker assumptions.
+Where PC left one undirected, LiNGAM's direction fills it in. Where the two point opposite ways the
+edge goes back to `--` and to review, because two methods contradicting each other is not evidence
+for either answer. A `conflict` is worth reading closely rather than resolving: both methods assume
+nothing unmeasured causes two variables, so a hidden common cause breaks both, and it breaks them
+differently. On a -> c <- b with a and c also sharing a hidden cause, PC reads the v-structure off
+the skeleton while LiNGAM puts the confounded pair in an order of its own, and `both` returns
+`a -- c  conflict` alongside an edge `b -> a` that LiNGAM invented and PC never saw.
+
 - **Columns.** The default is every numeric or boolean column. Use `columns := [...]` to choose, or
   `exclude := [...]` to leave some out. At most 30 variables are allowed, because the number of
   tests, and the chance that one of them errs, grows combinatorially. Rows with a NULL in a
@@ -558,6 +612,27 @@ the b-c edge in opposite directions, and warns that they conflict. FCI returns `
 - **`alpha`** (default 0.01) is the level of each independence test. **`max_conditioning`**
   (default 3) caps the size of the conditioning sets. **`bootstrap`** (default 50) sets the number
   of resamples, and `0` turns them off, with a warning. **`seed`** follows `duckdo_seed`.
+- **`tiers`** states an order you already know, and settles the edges that cross it without any
+  appeal to the data: `tiers := [['age', 'sex'], ['discount'], ['revenue']]` says nothing in a
+  later group causes anything in an earlier one. That is how most undirected edges get settled in
+  practice — not by a cleverer test, but by someone saying demographics precede the campaign. A
+  column named in no group is unconstrained, so a tier can be given for the pair you are sure
+  about without inventing an order for the rest, and `warnings` names the columns left free. The
+  tiers are applied before any test runs and nothing can overturn them, so a tier that is wrong
+  makes a wrong graph that looks well-supported; when a v-structure wanted an orientation the
+  tiers forbid, the tiers win and `warnings` says how often. With `algorithm := 'fci'` a tier
+  becomes an arrowhead at the later end and nothing more: `g o-> h` says h does not cause g while
+  still allowing a hidden common cause of the two, because a tier is not a claim that there is
+  none. With `algorithm := 'lingam'` it restricts which variable may be peeled next.
+- **`min_effect`** (default 0.05, `algorithm := 'lingam'` or `'both'` only) is the smallest
+  coefficient LiNGAM counts as an edge, as a share of the effect's own standard deviation: a
+  one-standard-deviation move in the cause has to shift the effect by at least this much. A
+  coefficient also has to clear a Wald test at `alpha`, which matters at small samples the way
+  `min_effect` matters at large ones, where anything is significant. In simulation over 40
+  six-variable graphs the edge set was fully recovered at every setting up to 0.10, with the false
+  positive rate falling from 0.007 at 0 to 0.000 at 0.10; 0.05 is the default because the
+  simulation's weakest true effect was 0.4 and a real one can be smaller. Passing it to `'pc'` or
+  `'fci'` is an error rather than a silent no-op.
 - **`test`** (default `'pearson'`) chooses the independence test. `'rank'` replaces each column
   by its normal scores, the inverse normal CDF of rank / (n + 1) with ties sharing their average
   rank, and runs the same Fisher-z tests on those (the nonparanormal of Liu, Lafferty and

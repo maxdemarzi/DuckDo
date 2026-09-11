@@ -421,6 +421,25 @@ implies the same distribution in either direction. Also read `orientation_stabil
 and sometimes join a and b. At `alpha := 0.001` it is 0.98. Discovery assumes no hidden common
 causes, and real data usually has them.
 
+**The `--` edges have two honest ways out, and a guess is not one of them.** `tiers :=
+[['age', 'sex'], ['discount'], ['revenue']]` says nothing in a later group causes anything in an
+earlier one, which settles every edge that crosses a tier before any test runs — that is how these
+edges get settled in practice, by someone who knows the order rather than by a better test.
+`algorithm := 'lingam'` settles them from the data instead: where PC reads conditional
+independence, which cannot tell `x -> y` from `y -> x`, DirectLiNGAM reads the shape of each
+variable's disturbance, which can. It costs a longer assumption list, and the last item is enforced
+rather than mentioned — two disturbances that cannot be told from Gaussian is a refusal, because
+identifiability allows one. `algorithm := 'both'` runs the two and adds an `agreement` column
+saying which method gave each direction, leaving the pairs they contradict each other on
+undirected and in the review pile.
+
+```sql
+SELECT source, edge, target, agreement
+FROM do_discover('measurements', algorithm := 'both');
+-- a -> c   both                 both methods, same direction
+-- g -> h   oriented by lingam   the edge PC had to leave for a person
+```
+
 **When rows are not units, say what the unit is.** Joining customers to their orders turns each
 customer into several rows, and every estimator treats rows as independent. The estimate survives
 this, but the interval does not:

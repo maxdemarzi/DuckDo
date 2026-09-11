@@ -125,6 +125,21 @@ leaves confounding between the *mediator* and the outcome completely untouched. 
 perfect randomised trial, the direct/indirect split can still be badly wrong. Every
 `do_mediate` result says so.
 
+### `do_discover` with `algorithm := 'lingam'` — non-Gaussian disturbances
+
+PC and FCI say nothing about the shape of the data. LiNGAM's whole ability to orient
+`x -- y` comes from that shape: if the disturbances are non-Gaussian, regressing the
+effect on the cause leaves a residual independent of the cause while the reverse
+regression does not. If they are Gaussian, that asymmetry does not weaken, it vanishes,
+and the method still returns an order — a confident one, and close to a coin flip. This
+is the one assumption in DuckDo enforced rather than reported: each disturbance is tested
+with Jarque–Bera, and two that cannot be told from Gaussian makes `do_discover` refuse,
+because identifiability allows at most one. It also assumes linear effects, no cycles,
+and no hidden common cause of any two variables — the last shared with PC, and the
+likeliest of the four to be false in real data. `algorithm := 'both'` is the way to see
+that: where a hidden cause is at work, PC and LiNGAM tend to disagree, and the
+disagreement is reported rather than resolved.
+
 ### `do_msm` — sequential exchangeability
 
 No unmeasured confounder of treatment and outcome at *any* period. This buys nothing

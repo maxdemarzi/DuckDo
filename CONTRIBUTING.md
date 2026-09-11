@@ -16,8 +16,8 @@ and [dev/UPDATING.md](dev/UPDATING.md) covers moving to a new DuckDB release.
 DUCKDO_MODEL_DIR=$(pwd)/build/models ./build/release/test/unittest "test/*"
 ```
 
-698 assertions across 26 test files, with three further files that run only when
-`DUCKDO_MODEL_DIR` points at exported weights. They cover estimator recovery, diagnostics, error paths, guardrails, graph identification, mediation,
+753 assertions across 27 test files, with three further files that run only when
+`DUCKDO_MODEL_DIR` points at exported weights. They cover estimator recovery, diagnostics, error paths, guardrails, graph identification, discovery, mediation,
 time-varying treatment, survival, the `do()` surface and end-to-end inference for both models.
 
 Three further dev-only harnesses, none shipped:

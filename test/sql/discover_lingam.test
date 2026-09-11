@@ -1,0 +1,287 @@
+# name: test/sql/discover_lingam.test
+# description: LiNGAM orients what conditional independence cannot, refuses when its own assumption fails, and tiers settle the rest
+# group: [sql]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.77);
+
+# The same shape of world discover.test uses, with uniform disturbances instead
+# of Gaussian ones. a and b are independent causes of c, c causes d, d causes f,
+# and separately g causes h - the pair no conditional-independence test can
+# orient, because g -> h and h -> g imply the same distribution.
+statement ok
+CREATE TABLE causal_world AS
+WITH u AS (
+  SELECT (random() - 0.5) * 3.4641 AS a,
+         (random() - 0.5) * 3.4641 AS b,
+         (random() - 0.5) * 3.4641 AS e1,
+         (random() - 0.5) * 3.4641 AS e2,
+         (random() - 0.5) * 3.4641 AS e3,
+         (random() - 0.5) * 3.4641 AS g,
+         (random() - 0.5) * 3.4641 AS e4
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, b, c, d, 0.8*d + 0.6*e3 AS f, g, 0.9*g + 0.6*e4 AS h FROM s2;
+
+# PC gets the skeleton right and leaves g -- h for a person.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', bootstrap := 0) WHERE in_graph;
+----
+a->c b->c c->d d->f g--h
+
+# LiNGAM finds the same skeleton and orients g -> h as well, which is the whole
+# point: it reads the shape of the disturbances, not conditional independence.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', algorithm := 'lingam', bootstrap := 0) WHERE in_graph;
+----
+a->c b->c c->d d->f g->h
+
+# The causal order is reported, because an order that reads backwards is easier
+# to argue with than five separate edges. Every true edge runs forward along it.
+query I
+WITH order_found AS (
+  SELECT string_split(split_part(split_part(w, 'most exogenous first: ', 2), '.', 1), ' < ') AS names
+  FROM (SELECT DISTINCT unnest(warnings) AS w
+        FROM do_discover('causal_world', algorithm := 'lingam', bootstrap := 0))
+  WHERE w LIKE 'the causal order LiNGAM found%'
+)
+SELECT len(names) = 7
+   AND list_position(names, 'a') < list_position(names, 'c')
+   AND list_position(names, 'b') < list_position(names, 'c')
+   AND list_position(names, 'c') < list_position(names, 'd')
+   AND list_position(names, 'd') < list_position(names, 'f')
+   AND list_position(names, 'g') < list_position(names, 'h')
+FROM order_found;
+----
+true
+
+# algorithm := 'both' runs the two together and says where each direction came
+# from: the collider edges both methods settle, g -> h only LiNGAM can.
+query II
+SELECT source || edge || target, agreement
+FROM do_discover('causal_world', algorithm := 'both', bootstrap := 0)
+WHERE in_graph ORDER BY source, target;
+----
+a->c	both
+b->c	both
+c->d	both
+d->f	both
+g->h	oriented by lingam
+
+# Every edge and every orientation survives resampling.
+query II
+SELECT bool_and(stability >= 0.9), bool_and(orientation_stability >= 0.6)
+FROM do_discover('causal_world', algorithm := 'lingam') WHERE in_graph;
+----
+true	true
+
+# And the resampling does not depend on the thread budget: each replicate is
+# seeded from (seed, rep), not from the order threads reach them in.
+statement ok
+CREATE TABLE one_thread AS SELECT source, target, edge, stability, orientation_stability
+FROM do_discover('causal_world', algorithm := 'both');
+
+statement ok
+SET threads = 1;
+
+query I
+SELECT count(*) FROM (
+  SELECT source, target, edge, stability, orientation_stability
+  FROM do_discover('causal_world', algorithm := 'both')
+  EXCEPT SELECT * FROM one_thread);
+----
+0
+
+statement ok
+RESET threads;
+
+# The proposal carries the causal order and has nothing left undirected, so a
+# reviewer has an order to accept or reject rather than five coin flips.
+query IIII
+SELECT dot LIKE '%do_discover: unreviewed%', dot LIKE '%Causal order, most exogenous first%',
+       n_directed, n_undirected
+FROM do_discover_dot('causal_world', algorithm := 'lingam', bootstrap := 0);
+----
+true	true	5	0
+
+statement ok
+SET VARIABLE lingam_proposal = (SELECT dot FROM do_discover_dot('causal_world', algorithm := 'lingam', bootstrap := 0));
+
+# Review is still required...
+statement error
+SELECT * FROM do_graph_create('found_lingam', getvariable('lingam_proposal'));
+----
+review marker
+
+# ...but deleting the marker is now the whole of it, because no edge was left
+# for a person to orient by hand.
+query II
+SELECT n_nodes, n_edges FROM do_graph_create('found_lingam',
+    replace(getvariable('lingam_proposal'), 'do_discover: unreviewed', ''));
+----
+7	5
+
+# min_effect is a standardised coefficient. Set it above every real effect and
+# LiNGAM claims nothing, so every edge is PC's alone.
+query I
+SELECT string_agg(DISTINCT agreement, ' ')
+FROM do_discover('causal_world', algorithm := 'both', min_effect := 0.99, bootstrap := 0)
+WHERE in_graph;
+----
+pc only
+
+# --- where the two methods disagree ---------------------------------------------
+
+statement ok
+SELECT setseed(0.9);
+
+# A hidden common cause of a and c, with b also causing c. Both methods assume
+# no hidden cause, so both are wrong here, but they are wrong differently: PC
+# reads a v-structure off the skeleton, LiNGAM has to put the confounded pair in
+# some order, and nothing makes those two answers agree.
+statement ok
+CREATE TABLE confounded AS
+WITH u AS (
+  SELECT (random() - 0.5) * 3.4641 AS lat,
+         (random() - 0.5) * 3.4641 AS b,
+         (random() - 0.5) * 3.4641 AS e1,
+         (random() - 0.5) * 3.4641 AS e2
+  FROM range(4000) t(i))
+SELECT 1.4*lat + 0.3*e1 AS a, b, 1.4*lat + 0.9*b + 0.3*e2 AS c FROM u;
+
+# The disagreement is reported rather than resolved: a and c go back to
+# undirected, which is the honest reading of two methods contradicting each
+# other, and the edge LiNGAM invented is labelled as its own.
+query II
+SELECT source || edge || target, agreement
+FROM do_discover('confounded', algorithm := 'both', bootstrap := 0)
+WHERE in_graph ORDER BY source, target;
+----
+a--c	conflict
+b->a	lingam only
+b->c	both
+
+# --- the assumption that has to hold --------------------------------------------
+
+statement ok
+SELECT setseed(0.41);
+
+# The same chain with Gaussian disturbances. LiNGAM's order is then not
+# identified at all, and it would still return one, so it refuses instead.
+statement ok
+CREATE TABLE gaussian_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ex,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ey,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ez
+  FROM range(3000) t(i))
+SELECT ex AS x, 0.8*ex + ey AS y, 0.6*(0.8*ex + ey) + 0.5*ex + ez AS z FROM u;
+
+statement error
+SELECT * FROM do_discover('gaussian_world', algorithm := 'lingam');
+----
+indistinguishable from Gaussian
+
+# PC says what it can about the same data without complaint: it assumes nothing
+# about the shape of the disturbances.
+query I
+SELECT count(*) FROM do_discover('gaussian_world', bootstrap := 0) WHERE in_graph;
+----
+3
+
+# Normal scores are Gaussian by construction, so they erase the only signal
+# LiNGAM reads. That is refused at bind time rather than discovered later.
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'lingam', test := 'rank');
+----
+cannot run with test := 'rank'
+
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'both', test := 'mixed');
+----
+cannot run with test := 'mixed'
+
+statement error
+SELECT * FROM do_discover('causal_world', min_effect := 0.1);
+----
+applies to algorithm := 'lingam' or 'both'
+
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'lingam', min_effect := 1.5);
+----
+standardised coefficient
+
+# --- tiers ------------------------------------------------------------------------
+
+# A stated order settles g -- h without any appeal to the data, which is how
+# most undirected edges get settled in practice.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', columns := ['g','h'], tiers := [['g'],['h']], bootstrap := 0)
+WHERE in_graph;
+----
+g->h
+
+# The tiers win, even when they are wrong. Nothing in the data can talk them out
+# of it, which is exactly why the warning says so.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', columns := ['g','h'], tiers := [['h'],['g']], bootstrap := 0)
+WHERE in_graph;
+----
+h->g
+
+query I
+SELECT count(*) FROM (
+  SELECT DISTINCT unnest(warnings) AS w FROM do_discover('causal_world', columns := ['a','b','c','g','h'],
+         tiers := [['a','b'],['c']], bootstrap := 0)
+) WHERE w LIKE 'tiers settled the direction of 2 edge(s)%' OR w LIKE 'no tier was given for: g, h%';
+----
+2
+
+# Tiers reach FCI too, as an arrowhead at the later end and nothing more. The
+# tier says h does not cause g, so h gets the arrowhead; the circle at g stays,
+# because g o-> h still allows a hidden common cause of the two, and a tier is
+# not a claim that there is none.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', columns := ['g','h'], algorithm := 'fci',
+                 tiers := [['g'],['h']], bootstrap := 0)
+WHERE in_graph;
+----
+go->h
+
+# And LiNGAM, where a tier restricts which variable may be peeled next rather
+# than which edge may be oriented.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', columns := ['g','h'], algorithm := 'lingam',
+                 tiers := [['h'],['g']], bootstrap := 0)
+WHERE in_graph;
+----
+h->g
+
+statement error
+SELECT * FROM do_discover('causal_world', tiers := [['a'],['nosuch']]);
+----
+tiers names column 'nosuch'
+
+statement error
+SELECT * FROM do_discover('causal_world', tiers := [['a','b'],['b']]);
+----
+is in two tiers
+
+statement error
+SELECT * FROM do_discover('causal_world', tiers := [['a','b']]);
+----
+at least two groups
+
+statement error
+SELECT * FROM do_discover('causal_world', tiers := [['a'],[]]);
+----
+must name at least one column
