@@ -147,7 +147,8 @@ FROM do_discover('causal_world', algorithm := 'resit', bootstrap := 0) WHERE in_
 ----
 a->c b->c c->d d->f g->h
 
-# 'pc+resit' is the union, with the same agreement column 'pc+lingam' has, and
+# 'pc+resit' is the union, with the same agreement column 'pc+lingam' has - naming
+# the method that actually supplied the direction, which it used to get wrong - and
 # 'both' still means what it meant before RESIT existed.
 query II
 SELECT source || edge || target, agreement
@@ -158,7 +159,7 @@ a->c	both
 b->c	both
 c->d	both
 d->f	both
-g->h	oriented by lingam
+g->h	oriented by resit
 
 query I
 SELECT (SELECT count(*) FROM do_discover('causal_world', algorithm := 'both', bootstrap := 0))

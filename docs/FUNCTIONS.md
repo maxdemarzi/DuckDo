@@ -506,13 +506,47 @@ SELECT source, edge, target, in_graph, stability, orientation_stability
 FROM do_discover('measurements', alpha := 0.01, bootstrap := 50);
 
 SELECT source, edge, target, agreement
-FROM do_discover('measurements', algorithm := 'both',
+FROM do_discover('measurements', algorithm := 'pc+resit',
                  tiers := [['age', 'sex'], ['discount'], ['revenue']]);
 
 SELECT dot FROM do_discover_dot('measurements');
 ```
 
 These functions propose a graph from data. Treat the output as a draft to review, not an answer.
+
+**Choosing between them.** There are two independent choices: `test :=` decides what a dependence
+is allowed to look like, and `algorithm :=` decides what is done with the dependences found. The
+defaults are the cheapest and the most cautious.
+
+| `test` | assumes | reach for it when |
+|---|---|---|
+| `pearson` *(default)* | linear dependence | you have no reason not to; it is by far the fastest |
+| `rank` | a Gaussian copula: *some* monotone transform makes the variables jointly Gaussian | columns are skewed, heavy-tailed or on a log scale |
+| `mixed` | a latent Gaussian copula, with 2-valued columns as thresholds and 3-9 valued ones as ordinal | yes/no and small-integer columns |
+| `kernel` | nothing about the shape of the dependence | an effect might bend — and accept ~100× the time |
+
+| `algorithm` | assumes, on top of the test | gives you |
+|---|---|---|
+| `pc` *(default)* | no hidden common cause of any two variables; faithfulness | a CPDAG — some edges stay `--` |
+| `fci` | faithfulness; hidden causes allowed | a PAG — names hidden causes as `<->`, leaves circles where undecided |
+| `lingam` | linear, acyclic, **non-Gaussian** disturbances, no hidden cause | every edge directed |
+| `resit` | acyclic, disturbance **added** to an effect that may bend, no hidden cause | every edge directed |
+| `pc+lingam` / `pc+resit` | both of the corresponding rows | the union, plus an `agreement` column saying which method gave each direction |
+
+A workable order. **Start with `pc`.** If it leaves `--` edges and you already know the order —
+demographics precede the campaign, the campaign precedes revenue — `tiers :=` settles them without
+any appeal to the data, and that is the honest first move. If you do not know the order, try
+`pc+resit`: RESIT orients what PC cannot under assumptions you can check, and the `agreement`
+column keeps the two answers separable. Prefer `lingam` over `resit` only for speed, since RESIT
+matches or beats it everywhere both run. If the skeleton itself looks wrong — an edge you expected
+is missing, or one you cannot explain is present — that is a `test :=` problem, not an
+`algorithm :=` one. And if you suspect something unmeasured drives two of your columns, `fci` is
+the one that allows for it.
+
+**What refuses, and when.** `lingam` stops when two or more disturbances cannot be told from
+Gaussian; `resit` stops when no fit needs more than a straight line *and* two or more disturbances
+are Gaussian. Both refusals mean the same thing — nothing here can read this data — and `pc` will
+still say what it can about the same rows, leaving undecided edges undirected rather than guessing.
 
 `do_discover` returns `source, target, edge, in_graph, stability, orientation_stability, warnings`,
 with one row per pair of variables that is joined in the full-data graph or in at least 25% of
@@ -521,7 +555,8 @@ pair that only the resamples joined. `stability` is the share of resamples conta
 `orientation_stability` is the share that gave it this same orientation, or left it unoriented when
 `edge` is `--`.
 
-With `algorithm := 'both'` there is one more column, `agreement`, described below.
+With `algorithm := 'pc+lingam'` or `'pc+resit'` there is one more column, `agreement`, described
+below.
 
 The default algorithm is PC-stable (Colombo and Maathuis 2014), with Fisher-z tests of partial
 correlation.

@@ -2954,28 +2954,30 @@ struct Discovery {
 	vector<uint8_t> agreement;
 };
 
-//! How PC and LiNGAM landed on one pair, for algorithm := 'both'.
+//! How PC and the functional method landed on one pair, for the 'pc+...' algorithms.
 enum Agreement : uint8_t {
 	kAgreeNone = 0,
-	kAgreeBoth,            // both found the edge and give it the same direction
-	kAgreeLingamDirection, // both found it; PC could not orient it, LiNGAM did
-	kAgreeConflict,        // both found it and oriented it opposite ways
+	kAgreeBoth,                // both found the edge and give it the same direction
+	kAgreeFunctionalDirection, // both found it; PC could not orient it, the other did
+	kAgreeConflict,            // both found it and oriented it opposite ways
 	kAgreePcOnly,
-	kAgreeLingamOnly
+	kAgreeFunctionalOnly
 };
 
-const char *AgreementName(uint8_t code) {
+//! `functional` names the method PC was paired with, so 'pc+resit' does not report an
+//! edge as oriented by LiNGAM.
+string AgreementName(uint8_t code, const string &functional) {
 	switch (code) {
 	case kAgreeBoth:
 		return "both";
-	case kAgreeLingamDirection:
-		return "oriented by lingam";
+	case kAgreeFunctionalDirection:
+		return "oriented by " + functional;
 	case kAgreeConflict:
 		return "conflict";
 	case kAgreePcOnly:
 		return "pc only";
-	case kAgreeLingamOnly:
-		return "lingam only";
+	case kAgreeFunctionalOnly:
+		return functional + " only";
 	default:
 		return "";
 	}
@@ -3014,7 +3016,7 @@ Cpdag MergeGraphs(const Cpdag &pc, const Cpdag &li, vector<uint8_t> *agreement) 
 					code = kAgreeConflict;
 				} else {
 					g.Orient(from, to);
-					code = kAgreeLingamDirection;
+					code = kAgreeFunctionalDirection;
 				}
 			} else if (in_pc) {
 				if (pc.Directed(i, j)) {
@@ -3029,7 +3031,7 @@ Cpdag MergeGraphs(const Cpdag &pc, const Cpdag &li, vector<uint8_t> *agreement) 
 				} else if (li.Directed(j, i)) {
 					g.Orient(j, i);
 				}
-				code = kAgreeLingamOnly;
+				code = kAgreeFunctionalOnly;
 			}
 			if (agreement) {
 				(*agreement)[i * p + j] = (*agreement)[j * p + i] = code;
@@ -3309,13 +3311,13 @@ void RunResitDiscovery(Discovery &out) {
 		for (idx_t i = 0; i < p; i++) {
 			for (idx_t j = i + 1; j < p; j++) {
 				conflicts += out.agreement[i * p + j] == kAgreeConflict ? 1 : 0;
-				from_resit += out.agreement[i * p + j] == kAgreeLingamDirection ? 1 : 0;
+				from_resit += out.agreement[i * p + j] == kAgreeFunctionalDirection ? 1 : 0;
 			}
 		}
 		out.warnings.push_back(StringUtil::Format(
 		    "the agreement column says how the two methods landed on each pair. RESIT gave a direction to %llu "
 		    "edge(s) PC could not orient; %llu edge(s) they oriented opposite ways, and those are reported "
-		    "undirected",
+		    "undirected. The column names RESIT, not LiNGAM, when RESIT supplied the direction",
 		    static_cast<unsigned long long>(from_resit), static_cast<unsigned long long>(conflicts)));
 	}
 	out.warnings.push_back("this is a proposal, not a graph: do_graph_create refuses do_discover_dot's output until "
@@ -3500,7 +3502,7 @@ void RunLingamDiscovery(Discovery &out, const char *fn) {
 		for (idx_t i = 0; i < p; i++) {
 			for (idx_t j = i + 1; j < p; j++) {
 				conflicts += out.agreement[i * p + j] == kAgreeConflict ? 1 : 0;
-				from_lingam += out.agreement[i * p + j] == kAgreeLingamDirection ? 1 : 0;
+				from_lingam += out.agreement[i * p + j] == kAgreeFunctionalDirection ? 1 : 0;
 			}
 		}
 		out.warnings.push_back(StringUtil::Format(
@@ -3827,8 +3829,9 @@ unique_ptr<FunctionData> BindDiscover(ClientContext &context, TableFunctionBindI
 			                     resampled ? Value::DOUBLE(stability) : Value(LogicalType::DOUBLE),
 			                     resampled && in_graph ? Value::DOUBLE(orientation) : Value(LogicalType::DOUBLE)};
 			if (found.merged) {
-				const char *code = in_graph ? AgreementName(found.agreement[i * p + j]) : "";
-				row.push_back(code[0] != '\0' ? Value(code) : Value(LogicalType::VARCHAR));
+				const string code =
+				    in_graph ? AgreementName(found.agreement[i * p + j], found.resit ? "resit" : "lingam") : "";
+				row.push_back(code.empty() ? Value(LogicalType::VARCHAR) : Value(code));
 			}
 			row.push_back(warnings);
 			bind->rows.push_back(std::move(row));
