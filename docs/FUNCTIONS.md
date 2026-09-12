@@ -664,15 +664,38 @@ the skeleton while LiNGAM puts the confounded pair in an order of its own, and `
   becomes an arrowhead at the later end and nothing more: `g o-> h` says h does not cause g while
   still allowing a hidden common cause of the two, because a tier is not a claim that there is
   none. With `algorithm := 'lingam'` it restricts which variable may be peeled next.
-- **`min_effect`** (default 0.05, `algorithm := 'lingam'` or `'both'` only) is the smallest
+- **`groups`** (`algorithm := 'lingam'` only) names a column splitting the rows into datasets
+  that share one causal order but need not share coefficients — sites, regions, cohorts,
+  experiment arms. MultiGroupDirectLiNGAM (Shimizu 2012) peels them together, each weighted by its
+  own row count, which is what constrains them to one order; coefficients are then fitted inside
+  each group, and an edge is reported when at least half of them find it. Requiring all would
+  contradict the premise that the coefficients differ; requiring one would let the noisiest group
+  write the graph.
+
+  The point is that this is not the same as pooling the rows. Take a chain x → y → z observed at
+  four sites with the sign of every effect flipped at two of them: pooled, the correlation of x
+  and y is under 0.1 and LiNGAM recovers neither edge; told which rows belong together it recovers
+  both. Over 40 draws that is 40/40 against **3/40**. On a denser five-variable world with
+  independently drawn per-group coefficients, the joint order was exactly right 25/25 at 120, 200
+  and 400 rows per group, where ignoring the labels managed 13/25, 11/25 and 18/25.
+
+  The group column is a label rather than a variable, so it never joins the graph even when it is
+  numeric. Resampling draws inside each group, so a replicate cannot lose a dataset. Each group
+  needs comfortably more rows than variables and is named if it does not have them, at most 50
+  groups are allowed, and the disturbance check runs inside each group rather than pooled —
+  a pooled residual carries the differences between the groups' coefficients, which looks Gaussian
+  and refused data every group could read on its own. It is refused with `'pc+lingam'` on purpose:
+  PC would run on the pooled rows and know nothing of the groups, which is the thing `groups` is
+  for avoiding.
+- **`min_effect`** (default 0.05, `algorithm := 'lingam'` or `'pc+lingam'` only) is the smallest
   coefficient LiNGAM counts as an edge, as a share of the effect's own standard deviation: a
   one-standard-deviation move in the cause has to shift the effect by at least this much. A
   coefficient also has to clear a Wald test at `alpha`, which matters at small samples the way
   `min_effect` matters at large ones, where anything is significant. In simulation over 40
   six-variable graphs the edge set was fully recovered at every setting up to 0.10, with the false
   positive rate falling from 0.007 at 0 to 0.000 at 0.10; 0.05 is the default because the
-  simulation's weakest true effect was 0.4 and a real one can be smaller. Passing it to `'pc'` or
-  `'fci'` is an error rather than a silent no-op.
+  simulation's weakest true effect was 0.4 and a real one can be smaller. Passing it to `'pc'`,
+  `'fci'` or `'resit'` is an error rather than a silent no-op.
 - **`test`** (default `'pearson'`) chooses the independence test. `'rank'` replaces each column
   by its normal scores, the inverse normal CDF of rank / (n + 1) with ties sharing their average
   rank, and runs the same Fisher-z tests on those (the nonparanormal of Liu, Lafferty and

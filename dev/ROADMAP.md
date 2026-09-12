@@ -2,8 +2,8 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase is implemented, built and tested, Phase 10 included.** 810 assertions
-> in 29 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 831 assertions
+> in 30 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
 > at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
 > gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
 > Section 9 lists what each Phase 10 item still leaves open.
@@ -913,6 +913,14 @@ Roughly in order of value per unit of effort:
    LayeredLiNGAM's peel (Suzuki, ECML-PKDD 2024) was built and measured against plain DirectLiNGAM rather than assumed: it cut the iteration count by a third and cost recall (0.933 against 1.000) and orders (33/40 against 40/40). Its speedup is for variable counts far above the 30 `do_discover` allows, so it is not what ships. `min_effect` defaults to 0.05 as a standardised coefficient; over 40 six-variable graphs the edge set was fully recovered at every setting to 0.10, with the false positive rate falling from 0.007 to 0.000.
 
    `algorithm := 'both'` runs PC and LiNGAM over the same rows and unions them, with an `agreement` column per pair: `both`, `oriented by lingam`, `conflict`, `pc only`, `lingam only`. PC's orientation wins where it has one, because it rests on weaker assumptions; LiNGAM fills in what PC left undirected; a contradiction goes back to `--` and to review. The conflicts are the useful part — both methods assume nothing unmeasured causes two variables, and a hidden common cause breaks them differently, so the disagreement is where that assumption shows.
+   Sharing a causal order across datasets is **DONE**, as `groups := 'site'` on `algorithm := 'lingam'` - MultiGroupDirectLiNGAM (Shimizu 2012). The groups are peeled together, each weighted by its own row count, which is what constrains them to one order; coefficients are fitted inside each group, and an edge needs at least half of them.
+
+   It is not the same as pooling the rows, which is the comparison that matters since pooling is what a user would otherwise do. A chain x -> y -> z observed at four sites with the sign of every effect flipped at two of them has a pooled correlation under 0.1: ignoring the labels recovers the chain 3 times in 40, `groups :=` recovers it 40 times in 40. On a denser five-variable world with independently drawn per-group coefficients, the joint order was exactly right 25/25 at 120, 200 and 400 rows per group against 13/25, 11/25 and 18/25 for ignoring the labels.
+
+   Two things were wrong on the way and are worth recording. Penalising each group's likelihood ratio separately and summing those charges the true source again for every group that dips negative on noise; the ratios are summed first and the total penalised once. And the disturbance check must run inside each group: pooled, the residual carries the differences between the groups' coefficients, which is a mixture and looks Gaussian, and the check was refusing data that every group on its own could read - that alone was the difference between 18/25 and 25/25.
+
+   `groups :=` is refused with `'pc+lingam'` on purpose, since PC would run on the pooled rows and know nothing of the groups.
+
    Nonlinear orientation is **DONE**, as `algorithm := 'resit'` (Peters, Mooij, Janzing and Scholkopf, JMLR 2014). It runs LiNGAM's search from the other end - peeling a sink, the variable whose residual once the others are regressed out of it is least dependent on them - with kernel ridge regression on the random Fourier features `test := 'kernel'` already builds, then prunes the order into a graph with the same kernel test. A continuous additive noise model is identified by a nonlinear effect *or* a non-Gaussian disturbance, so RESIT covers exactly the case LiNGAM refuses.
 
    Measured on `a -> b -> c` with `a -> d`, 15 draws, as oriented true edges of 3 and false edges per run: straight links and non-Gaussian disturbances, LiNGAM 1.00/0.00-0.07 and RESIT 1.00/0.00-0.07; bent links and non-Gaussian, LiNGAM 0.58-0.64/1.07-1.27 and RESIT 1.00/0.00-0.20; bent links and Gaussian, LiNGAM 0.00-0.02/2.40-2.47 and RESIT 1.00/0.00-0.07. RESIT is at least as good as LiNGAM wherever both run; the only reason to keep LiNGAM is speed, 0.01 s against 0.76 s.

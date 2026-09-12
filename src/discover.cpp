@@ -80,6 +80,9 @@ struct DiscoverSpec {
 	//! Groups of columns in causal order: nothing in a later group may cause
 	//! anything in an earlier one. Columns left out are unconstrained.
 	vector<vector<string>> tiers;
+	//! lingam: a column splitting the rows into datasets that share one causal
+	//! order but need not share coefficients.
+	string groups;
 	//! "pearson" assumes linear-Gaussian dependence; "rank" only a Gaussian copula;
 	//! "mixed" a latent Gaussian copula in which two-valued columns are thresholds.
 	string test = "pearson";
@@ -192,6 +195,19 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 			throw BinderException("duckdo: tiers needs at least two groups to say anything; one group forbids nothing");
 		}
 	}
+	entry = named.find("groups");
+	if (entry != named.end() && !entry->second.IsNull()) {
+		spec.groups = entry->second.ToString();
+		if (spec.algorithm != "lingam") {
+			throw BinderException(
+			    "duckdo: groups splits the rows into datasets that share one causal order but not their "
+			    "coefficients, which is a LiNGAM idea (Shimizu 2012), so it applies to algorithm := 'lingam', not "
+			    "'%s'. It is refused with 'pc+lingam' on purpose: PC would run on the pooled rows and know nothing "
+			    "of the groups, and pooling is exactly what groups is for avoiding - where the coefficients differ "
+			    "in sign the pooled correlation goes to nothing and PC drops the edge",
+			    spec.algorithm);
+		}
+	}
 	entry = named.find("test");
 	if (entry != named.end() && !entry->second.IsNull()) {
 		spec.test = StringUtil::Lower(entry->second.ToString());
@@ -230,6 +246,14 @@ struct NumericTable {
 	idx_t p = 0;
 	vector<double> data; // n x p, row-major
 	idx_t dropped = 0;
+	//! groups := 'site': which group each row belongs to, and what they are called.
+	//! Empty when no group column was given.
+	vector<idx_t> group;
+	vector<string> group_names;
+
+	idx_t Groups() const {
+		return group_names.size();
+	}
 };
 
 NumericTable LoadNumeric(ClientContext &context, const DiscoverSpec &spec, const char *fn) {
@@ -268,6 +292,25 @@ NumericTable LoadNumeric(ClientContext &context, const DiscoverSpec &spec, const
 			}
 		}
 	}
+	// The group column labels the rows; it is not one of the variables, so it never
+	// joins the graph even when it is numeric and would have been picked up.
+	string group_column;
+	if (!spec.groups.empty()) {
+		for (idx_t k = 0; k < probe->names.size(); k++) {
+			if (StringUtil::CIEquals(probe->names[k], spec.groups)) {
+				group_column = probe->names[k];
+			}
+		}
+		if (group_column.empty()) {
+			throw BinderException("duckdo: groups names column '%s', which is not in %s", spec.groups, spec.relation);
+		}
+		for (idx_t k = 0; k < chosen.size(); k++) {
+			if (StringUtil::CIEquals(chosen[k], group_column)) {
+				chosen.erase(chosen.begin() + k);
+				break;
+			}
+		}
+	}
 	if (chosen.size() < 2) {
 		throw BinderException("duckdo: %s needs at least two numeric columns; found %llu", fn,
 		                      static_cast<unsigned long long>(chosen.size()));
@@ -284,10 +327,14 @@ NumericTable LoadNumeric(ClientContext &context, const DiscoverSpec &spec, const
 	for (auto &column : chosen) {
 		select += (select.empty() ? "" : ", ") + string("CAST(") + QuoteIdentifier(column) + " AS DOUBLE)";
 	}
+	if (!group_column.empty()) {
+		select += ", CAST(" + QuoteIdentifier(group_column) + " AS VARCHAR)";
+	}
 	auto result = RunQuery(context, "SELECT " + select + " FROM " + rel, string(fn) + " reading " + spec.relation);
 	NumericTable table;
 	table.names = chosen;
 	table.p = chosen.size();
+	std::map<string, idx_t> group_index;
 	vector<double> row(table.p);
 	for (idx_t r = 0; r < result->RowCount(); r++) {
 		bool complete = true;
@@ -299,17 +346,58 @@ NumericTable LoadNumeric(ClientContext &context, const DiscoverSpec &spec, const
 				row[j] = v.GetValue<double>();
 			}
 		}
+		string label;
+		if (complete && !group_column.empty()) {
+			const Value v = result->GetValue(table.p, r);
+			if (v.IsNull()) {
+				complete = false;
+			} else {
+				label = v.ToString();
+			}
+		}
 		if (!complete) {
 			table.dropped++;
 			continue;
 		}
 		table.data.insert(table.data.end(), row.begin(), row.end());
+		if (!group_column.empty()) {
+			auto found = group_index.find(label);
+			if (found == group_index.end()) {
+				found = group_index.insert(std::make_pair(label, table.group_names.size())).first;
+				table.group_names.push_back(label);
+			}
+			table.group.push_back(found->second);
+		}
 	}
 	table.n = table.data.size() / table.p;
 	if (table.n < table.p + 10) {
 		throw BinderException("duckdo: %s needs comfortably more complete rows than variables; %llu rows for %llu "
 		                      "variables",
 		                      fn, static_cast<unsigned long long>(table.n), static_cast<unsigned long long>(table.p));
+	}
+	if (!group_column.empty()) {
+		if (table.Groups() < 2) {
+			throw BinderException("duckdo: groups := '%s' found %llu group in %s. Sharing a causal order across "
+			                      "datasets needs at least two of them",
+			                      group_column, static_cast<unsigned long long>(table.Groups()), spec.relation);
+		}
+		if (table.Groups() > 50) {
+			throw BinderException("duckdo: groups := '%s' has %llu distinct values, which reads more like an "
+			                      "identifier than a set of datasets; each group is fitted on its own rows",
+			                      group_column, static_cast<unsigned long long>(table.Groups()));
+		}
+		vector<idx_t> counts(table.Groups(), 0);
+		for (auto g : table.group) {
+			counts[g]++;
+		}
+		for (idx_t g = 0; g < counts.size(); g++) {
+			if (counts[g] < table.p + 10) {
+				throw BinderException("duckdo: group '%s' has %llu rows for %llu variables. Every group is fitted on "
+				                      "its own rows, so each needs comfortably more rows than variables",
+				                      table.group_names[g], static_cast<unsigned long long>(counts[g]),
+				                      static_cast<unsigned long long>(table.p));
+			}
+		}
 	}
 	for (idx_t j = 0; j < table.p; j++) {
 		double lo = table.data[j], hi = lo;
@@ -2409,6 +2497,8 @@ struct Lingam {
 	vector<double> gaussian_p;
 	//! How many rows the ordering statistics actually saw.
 	idx_t order_rows = 0;
+	//! Datasets the order was estimated across, from groups := 'site'.
+	idx_t groups = 1;
 };
 
 //! `C` is the correlation matrix over the same `rows`: with every column
@@ -2435,12 +2525,25 @@ Lingam RunLingam(const NumericTable &t, const vector<idx_t> &rows, const vector<
 	const idx_t m = sample.size();
 	out.order_rows = m;
 
-	vector<vector<double>> Z(p, vector<double>(m));
-	for (idx_t j = 0; j < p; j++) {
-		for (idx_t r = 0; r < m; r++) {
-			Z[j][r] = t.data[sample[r] * p + j];
+	// One block of standardised columns per group, or a single block when there are
+	// none. MultiGroupDirectLiNGAM (Shimizu 2012) is this and nothing more: the groups
+	// are peeled together, which is what constrains them to share a causal order, and
+	// their coefficients are fitted separately afterwards because the premise is that
+	// those need not match.
+	const idx_t groups = std::max<idx_t>(1, t.Groups());
+	vector<vector<idx_t>> block(groups);
+	for (idx_t r = 0; r < m; r++) {
+		block[t.group.empty() ? 0 : t.group[sample[r]]].push_back(r);
+	}
+	vector<vector<vector<double>>> Z(groups);
+	for (idx_t g = 0; g < groups; g++) {
+		Z[g].assign(p, vector<double>(block[g].size()));
+		for (idx_t j = 0; j < p; j++) {
+			for (idx_t r = 0; r < block[g].size(); r++) {
+				Z[g][j][r] = t.data[sample[block[g][r]] * p + j];
+			}
+			Standardise(Z[g][j]);
 		}
-		Standardise(Z[j]);
 	}
 
 	vector<idx_t> remaining(p);
@@ -2468,18 +2571,37 @@ Lingam RunLingam(const NumericTable &t, const vector<idx_t> &rows, const vector<
 
 		idx_t next = pool[0];
 		if (pool.size() > 1) {
-			vector<double> entropy(pool.size());
-			for (idx_t a = 0; a < pool.size(); a++) {
-				entropy[a] = EntropyApprox(Z[pool[a]]);
-			}
-			// R(a, b) is the likelihood ratio between "b causes a" and "a causes b".
-			// It is exactly antisymmetric, so one pass over each pair scores both.
+			// R(a, b) is the likelihood ratio between "b causes a" and "a causes b". It
+			// is exactly antisymmetric, so one pass over each pair scores both. Across
+			// groups the ratios are added first, each weighted by its own row count,
+			// and only the total is penalised. Penalising each group separately and
+			// adding those was tried and is worse: under the true order every group's
+			// ratio is positive only in expectation, so each one that dips negative on
+			// noise charges the true source again, and four groups of 200 rows then
+			// recovered the order less often than one group of 200 did.
 			vector<double> penalty(pool.size(), 0.0);
+			vector<double> entropy(pool.size());
+			vector<double> ratio(pool.size() * pool.size(), 0.0);
+			for (idx_t g = 0; g < groups; g++) {
+				const double weight = static_cast<double>(block[g].size());
+				if (weight < 2.0) {
+					continue;
+				}
+				for (idx_t a = 0; a < pool.size(); a++) {
+					entropy[a] = EntropyApprox(Z[g][pool[a]]);
+				}
+				for (idx_t a = 0; a < pool.size(); a++) {
+					for (idx_t b = a + 1; b < pool.size(); b++) {
+						UniResidual(Z[g][pool[a]], Z[g][pool[b]], forward);
+						UniResidual(Z[g][pool[b]], Z[g][pool[a]], backward);
+						const double r = (entropy[a] + EntropyApprox(backward)) - (entropy[b] + EntropyApprox(forward));
+						ratio[a * pool.size() + b] += weight * r;
+					}
+				}
+			}
 			for (idx_t a = 0; a < pool.size(); a++) {
 				for (idx_t b = a + 1; b < pool.size(); b++) {
-					UniResidual(Z[pool[a]], Z[pool[b]], forward);
-					UniResidual(Z[pool[b]], Z[pool[a]], backward);
-					const double r = (entropy[a] + EntropyApprox(backward)) - (entropy[b] + EntropyApprox(forward));
+					const double r = ratio[a * pool.size() + b];
 					const double against_b = std::min(0.0, r);
 					const double against_a = std::min(0.0, -r);
 					penalty[b] += against_b * against_b;
@@ -2496,10 +2618,15 @@ Lingam RunLingam(const NumericTable &t, const vector<idx_t> &rows, const vector<
 		}
 		out.order.push_back(next);
 		remaining.erase(std::find(remaining.begin(), remaining.end(), next));
-		peeled = Z[next];
-		for (auto i : remaining) {
-			UniResidual(Z[i], peeled, forward);
-			Z[i] = forward;
+		for (idx_t g = 0; g < groups; g++) {
+			if (block[g].size() < 2) {
+				continue;
+			}
+			peeled = Z[g][next];
+			for (auto i : remaining) {
+				UniResidual(Z[g][i], peeled, forward);
+				Z[g][i] = forward;
+			}
 		}
 	}
 	if (!remaining.empty()) {
@@ -2509,71 +2636,109 @@ Lingam RunLingam(const NumericTable &t, const vector<idx_t> &rows, const vector<
 	// Each variable on its predecessors in that order, over every row. The columns
 	// are standardised, so min_effect reads as "a one-standard-deviation move in
 	// the cause shifts the effect by this much of its own standard deviation".
-	const double n = static_cast<double>(rows.size());
-	vector<vector<double>> coefficients(p);
-	for (idx_t pos = 1; pos < out.order.size(); pos++) {
-		const idx_t j = out.order[pos];
-		vector<idx_t> S(out.order.begin(), out.order.begin() + pos);
-		const idx_t k = S.size();
-		vector<double> M(k * k), rhs(k), inv;
-		for (idx_t a = 0; a < k; a++) {
-			rhs[a] = C[S[a] * p + j];
-			for (idx_t b = 0; b < k; b++) {
-				M[a * k + b] = C[S[a] * p + S[b]];
+	// Each group's own rows, so its coefficients are its own. With no groups this is
+	// one block holding everything and the loop below runs once.
+	vector<vector<idx_t>> whole(groups);
+	for (auto r : rows) {
+		whole[t.group.empty() ? 0 : t.group[r]].push_back(r);
+	}
+	vector<idx_t> votes(p * p, 0);
+	vector<vector<vector<double>>> by_group(groups, vector<vector<double>>(p));
+	for (idx_t g = 0; g < groups; g++) {
+		const vector<double> own = groups == 1 ? C : Correlation(t, whole[g]);
+		const double n = static_cast<double>(whole[g].size());
+		for (idx_t pos = 1; pos < out.order.size(); pos++) {
+			const idx_t j = out.order[pos];
+			vector<idx_t> S(out.order.begin(), out.order.begin() + pos);
+			const idx_t k = S.size();
+			vector<double> M(k * k), rhs(k), inv;
+			for (idx_t a = 0; a < k; a++) {
+				rhs[a] = own[S[a] * p + j];
+				for (idx_t b = 0; b < k; b++) {
+					M[a * k + b] = own[S[a] * p + S[b]];
+				}
 			}
-		}
-		if (!SmallInverse(M, k, inv)) {
-			continue;
-		}
-		vector<double> coef(k, 0.0);
-		double explained = 0.0;
-		for (idx_t a = 0; a < k; a++) {
-			for (idx_t b = 0; b < k; b++) {
-				coef[a] += inv[a * k + b] * rhs[b];
+			if (!SmallInverse(M, k, inv)) {
+				continue;
 			}
-			explained += coef[a] * rhs[a];
-		}
-		coefficients[j] = coef;
-		// The target has unit variance, so what the predecessors do not explain is
-		// what is left of that 1, scaled from a mean square to an unbiased one.
-		const double dof = std::max(n - static_cast<double>(k), 1.0);
-		const double sigma2 = std::max(1.0 - explained, 1e-12) * n / dof;
-		for (idx_t a = 0; a < k; a++) {
-			const double variance = std::max(sigma2 * inv[a * k + a] / n, 1e-300);
-			const double se = std::sqrt(variance);
-			if (std::fabs(coef[a]) >= spec.min_effect && NormalTwoSidedP(coef[a] / se) < spec.alpha) {
-				out.graph.adj[S[a] * p + j] = out.graph.adj[j * p + S[a]] = 1;
-				out.graph.Orient(S[a], j);
+			vector<double> coef(k, 0.0);
+			double explained = 0.0;
+			for (idx_t a = 0; a < k; a++) {
+				for (idx_t b = 0; b < k; b++) {
+					coef[a] += inv[a * k + b] * rhs[b];
+				}
+				explained += coef[a] * rhs[a];
+			}
+			by_group[g][j] = coef;
+			// The target has unit variance, so what the predecessors do not explain is
+			// what is left of that 1, scaled from a mean square to an unbiased one.
+			const double dof = std::max(n - static_cast<double>(k), 1.0);
+			const double sigma2 = std::max(1.0 - explained, 1e-12) * n / dof;
+			for (idx_t a = 0; a < k; a++) {
+				const double variance = std::max(sigma2 * inv[a * k + a] / n, 1e-300);
+				const double se = std::sqrt(variance);
+				if (std::fabs(coef[a]) >= spec.min_effect && NormalTwoSidedP(coef[a] / se) < spec.alpha) {
+					votes[S[a] * p + j]++;
+				}
 			}
 		}
 	}
+	// An edge needs a majority of the groups. Requiring all of them would contradict
+	// the premise that coefficients differ - one group where the effect is near zero
+	// would erase it - and requiring one would let the noisiest group write the graph.
+	const idx_t needed = (groups + 1) / 2;
+	for (idx_t a = 0; a < p; a++) {
+		for (idx_t b = 0; b < p; b++) {
+			if (a != b && votes[a * p + b] >= needed) {
+				out.graph.adj[a * p + b] = out.graph.adj[b * p + a] = 1;
+				out.graph.Orient(a, b);
+			}
+		}
+	}
+	out.groups = groups;
 
 	if (!disturbances) {
 		return out;
 	}
-	// What is left of each variable once its predecessors are regressed out. The
-	// coefficients here are every predecessor's, not only the ones that cleared
+	// What is left of each variable once its predecessors are regressed out, inside
+	// each group and with that group's own coefficients. Pooling this across groups
+	// was tried and is wrong: the pooled residual carries the differences between the
+	// groups' coefficients, which is a mixture and looks Gaussian, so the check
+	// refused data that every group on its own could read. The order is identified as
+	// long as the disturbances are non-Gaussian somewhere, so the smallest p-value
+	// across groups is the one that counts.
+	//
+	// The coefficients used are every predecessor's, not only the ones that cleared
 	// min_effect: the disturbance is what the model does not explain, and a
 	// coefficient dropped for being small still explained its part.
-	vector<vector<double>> raw(p, vector<double>(m));
-	for (idx_t j = 0; j < p; j++) {
-		for (idx_t r = 0; r < m; r++) {
-			raw[j][r] = t.data[sample[r] * p + j];
+	vector<double> residual;
+	for (idx_t g = 0; g < groups; g++) {
+		const idx_t rows_here = block[g].size();
+		if (rows_here < 8) {
+			continue;
 		}
-		Standardise(raw[j]);
-	}
-	vector<double> residual(m);
-	for (idx_t pos = 0; pos < out.order.size(); pos++) {
-		const idx_t j = out.order[pos];
-		residual = raw[j];
-		const auto &coef = coefficients[j];
-		for (idx_t a = 0; a < coef.size(); a++) {
-			const idx_t src = out.order[a];
-			for (idx_t r = 0; r < m; r++) {
-				residual[r] -= coef[a] * raw[src][r];
+		vector<vector<double>> raw(p, vector<double>(rows_here));
+		for (idx_t j = 0; j < p; j++) {
+			for (idx_t r = 0; r < rows_here; r++) {
+				raw[j][r] = t.data[sample[block[g][r]] * p + j];
+			}
+			Standardise(raw[j]);
+		}
+		for (idx_t pos = 0; pos < out.order.size(); pos++) {
+			const idx_t j = out.order[pos];
+			residual = raw[j];
+			const auto &coef = by_group[g][j];
+			for (idx_t a = 0; a < coef.size(); a++) {
+				const idx_t src = out.order[a];
+				for (idx_t r = 0; r < rows_here; r++) {
+					residual[r] -= coef[a] * raw[src][r];
+				}
+			}
+			const double here = JarqueBeraP(residual);
+			if (g == 0 || here < out.gaussian_p[j]) {
+				out.gaussian_p[j] = here;
 			}
 		}
-		out.gaussian_p[j] = JarqueBeraP(residual);
 	}
 	return out;
 }
@@ -3185,12 +3350,34 @@ void RunLingamDiscovery(Discovery &out, const char *fn) {
 	const idx_t reps = out.spec.bootstrap;
 	if (reps > 0) {
 		vector<Cpdag> draws(reps);
+		// With groups, the resample is drawn inside each group, so every replicate has
+		// the same group sizes the data has. Drawing across them would let a replicate
+		// lose a whole dataset, and what it measured would no longer be the same
+		// question.
+		vector<vector<idx_t>> strata;
+		if (t.Groups() > 1) {
+			strata.assign(t.Groups(), vector<idx_t>());
+			for (auto r : order) {
+				strata[t.group[r]].push_back(r);
+			}
+		}
 		ParallelJobs(reps, [&](idx_t rep) {
 			std::mt19937_64 rng(static_cast<uint64_t>(out.spec.seed) ^ 0xD15C0DE5ULL ^ (rep * 0x9E3779B97F4A7C15ULL));
-			std::uniform_int_distribution<idx_t> pick(0, t.n - 1);
-			vector<idx_t> rows(t.n);
-			for (auto &r : rows) {
-				r = order[pick(rng)];
+			vector<idx_t> rows;
+			if (strata.empty()) {
+				std::uniform_int_distribution<idx_t> pick(0, t.n - 1);
+				rows.assign(t.n, 0);
+				for (auto &r : rows) {
+					r = order[pick(rng)];
+				}
+			} else {
+				rows.reserve(t.n);
+				for (auto &stratum : strata) {
+					std::uniform_int_distribution<idx_t> pick(0, stratum.size() - 1);
+					for (idx_t a = 0; a < stratum.size(); a++) {
+						rows.push_back(stratum[pick(rng)]);
+					}
+				}
 			}
 			const auto resampled = Correlation(t, rows);
 			const auto draw = RunLingam(t, rows, resampled, out.spec, out.knowledge, false);
@@ -3243,6 +3430,19 @@ void RunLingamDiscovery(Discovery &out, const char *fn) {
 	out.warnings.push_back("the causal order LiNGAM found, most exogenous first: " + causal_order +
 	                       ". Every edge below runs forward along it, so an order that reads backwards to you is "
 	                       "the thing to argue with, not the individual edges");
+	if (t.Groups() > 1) {
+		string names;
+		for (auto &name : t.group_names) {
+			names += (names.empty() ? "" : ", ") + name;
+		}
+		out.warnings.push_back(StringUtil::Format(
+		    "that order is one order across %llu datasets, from groups := '%s': %s. They were peeled together, each "
+		    "weighted by its own row count, which is what constrains them to share it (Shimizu 2012). Coefficients "
+		    "were fitted separately in each, and an edge is reported when at least %llu of them find it - requiring "
+		    "all would contradict the premise that the coefficients differ",
+		    static_cast<unsigned long long>(t.Groups()), out.spec.groups, names,
+		    static_cast<unsigned long long>((t.Groups() + 1) / 2)));
+	}
 	if (!gaussian.empty()) {
 		out.warnings.push_back(StringUtil::Format(
 		    "the disturbance of '%s' cannot be told from Gaussian (Jarque-Bera p %.3f). Identifiability allows one, "
@@ -3800,6 +4000,7 @@ void AddDiscoverParameters(TableFunction &fn) {
 	fn.named_parameters["test"] = LogicalType::VARCHAR;
 	fn.named_parameters["min_effect"] = LogicalType::DOUBLE;
 	fn.named_parameters["tiers"] = LogicalType::LIST(LogicalType::LIST(LogicalType::VARCHAR));
+	fn.named_parameters["groups"] = LogicalType::VARCHAR;
 }
 
 } // namespace

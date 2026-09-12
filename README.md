@@ -444,7 +444,10 @@ true edges with none false, where LiNGAM gets none of the three and invents 2.4.
 unidentifiable corner - straight links *and* Gaussian disturbances, which nothing can read.
 `algorithm := 'pc+lingam'` and `'pc+resit'` run PC alongside one of them and add an `agreement`
 column saying which method gave each direction, leaving the pairs they contradict each other on
-undirected and in the review pile.
+undirected and in the review pile. And when the rows come from several sites or cohorts that share
+a causal order but not its coefficients, `groups := 'site'` estimates one order across all of them
+instead of pooling — on a chain whose effects flip sign between sites, pooling recovers it 3 times
+in 40 and `groups :=` 40 times in 40.
 
 ```sql
 SELECT source, edge, target, agreement

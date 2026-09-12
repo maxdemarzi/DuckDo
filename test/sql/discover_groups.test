@@ -1,0 +1,133 @@
+# name: test/sql/discover_groups.test
+# description: groups := shares one causal order across datasets whose coefficients differ, which pooling the rows cannot do
+# group: [sql]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.37);
+
+# Four sites observing the same chain x -> y -> z, with the sign of every effect
+# flipped at two of them. Each site on its own is unambiguous. Pooled into one
+# table the effects cancel, and the correlations go to almost nothing.
+statement ok
+CREATE TABLE sites AS
+WITH u AS (
+  SELECT i, 's' || (i % 4)::VARCHAR AS site,
+         CASE WHEN (i % 4) IN (0, 2) THEN 1.0 ELSE -1.0 END AS sign,
+         (random() - 0.5) * 3.4641 AS ex,
+         (random() - 0.5) * 3.4641 AS ey,
+         (random() - 0.5) * 3.4641 AS ez
+  FROM range(1200) t(i)),
+ s AS (SELECT site, sign, ex AS x, sign * 0.8 * ex + ey AS y, ez FROM u)
+SELECT site, x, y, sign * 0.7 * y + ez AS z FROM s;
+
+# The cancellation is real: pooled, x and y are barely correlated; inside one
+# site they plainly are.
+query II
+SELECT abs(corr(x, y)) < 0.1,
+       (SELECT abs(corr(x, y)) > 0.5 FROM sites WHERE site = 's0')
+FROM sites;
+----
+true	true
+
+# Ignoring the site column, LiNGAM has almost nothing to read and does not
+# recover the chain.
+query I
+SELECT count(*) FROM do_discover('sites', exclude := ['site'], algorithm := 'lingam', bootstrap := 0)
+WHERE in_graph AND edge = '->'
+  AND ((source = 'x' AND target = 'y') OR (source = 'y' AND target = 'z'));
+----
+0
+
+# Told which rows belong together, it recovers both edges: the groups are peeled
+# together, so they share one order, and their coefficients are fitted apart.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('sites', groups := 'site', algorithm := 'lingam', bootstrap := 0) WHERE in_graph;
+----
+x->y y->z
+
+# The warning names the datasets and says how many have to agree on an edge.
+query I
+SELECT count(*) FROM (
+  SELECT DISTINCT unnest(warnings) AS w
+  FROM do_discover('sites', groups := 'site', algorithm := 'lingam', bootstrap := 0)
+) WHERE w LIKE '%one order across 4 datasets%s0, s1, s2, s3%at least 2 of them find it%';
+----
+1
+
+# The group column is a label, not a variable, so it never joins the graph even
+# when it is numeric.
+statement ok
+CREATE TABLE numbered AS SELECT (site = 's0')::INTEGER * 1 + (site = 's1')::INTEGER * 2
+       + (site = 's2')::INTEGER * 3 + (site = 's3')::INTEGER * 4 AS site_id, x, y, z FROM sites;
+
+query I
+SELECT count(*) FROM do_discover('numbered', groups := 'site_id', algorithm := 'lingam', bootstrap := 0)
+WHERE source = 'site_id' OR target = 'site_id';
+----
+0
+
+# Resampling draws inside each group, so a replicate cannot lose a dataset, and
+# it still does not depend on the thread budget.
+statement ok
+CREATE TABLE one_thread AS SELECT source, target, edge, stability
+FROM do_discover('sites', groups := 'site', algorithm := 'lingam', bootstrap := 10);
+
+statement ok
+SET threads = 1;
+
+query I
+SELECT count(*) FROM (
+  SELECT source, target, edge, stability
+  FROM do_discover('sites', groups := 'site', algorithm := 'lingam', bootstrap := 10)
+  EXCEPT SELECT * FROM one_thread);
+----
+0
+
+statement ok
+RESET threads;
+
+# The union with PC is refused rather than offered, because PC would run on the
+# pooled rows and know nothing of the groups - and pooling is the thing groups
+# exists to avoid. Here it would drop both true edges and add a spurious one.
+statement error
+SELECT * FROM do_discover('sites', groups := 'site', algorithm := 'pc+lingam', bootstrap := 0);
+----
+PC would run on the pooled rows
+
+# --- the contract -----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_discover('sites', groups := 'nosuch', algorithm := 'lingam');
+----
+groups names column 'nosuch'
+
+statement error
+SELECT * FROM do_discover('sites', groups := 'site');
+----
+applies to algorithm := 'lingam'
+
+statement error
+SELECT * FROM do_discover('sites', groups := 'site', algorithm := 'resit');
+----
+applies to algorithm := 'lingam'
+
+# One group cannot share an order with anything.
+statement ok
+CREATE TABLE single_site AS SELECT * FROM sites WHERE site = 's0';
+
+statement error
+SELECT * FROM do_discover('single_site', groups := 'site', algorithm := 'lingam');
+----
+needs at least two of them
+
+# A group too thin to fit is named rather than silently carried.
+statement ok
+CREATE TABLE thin AS SELECT * FROM sites UNION ALL SELECT 'tiny', 1.0, 2.0, 3.0;
+
+statement error
+SELECT * FROM do_discover('thin', groups := 'site', algorithm := 'lingam');
+----
+group 'tiny' has 1 rows
