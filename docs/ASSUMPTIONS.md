@@ -163,26 +163,6 @@ non-Gaussianity and lets it run on data it should not. On a bent world with Gaus
 disturbances LiNGAM recovered none of three true edges and invented 2.4; RESIT
 recovered all three.
 
-### `do_discover` with `algorithm := 'rcd'` — the one that drops causal sufficiency
-
-Every other functional method here assumes nothing unmeasured causes two of your
-variables, which is the assumption most likely to be false. RCD does not. It asks, of
-each related pair, whether regressing either one on the other leaves an independent
-residual; when neither does, no model without a hidden common cause fits, and it says
-so with `<->`. It still assumes linear effects, no cycles, and non-Gaussian
-disturbances.
-
-It is the only discovery method here that needs no refusal, because it can express its
-own failure: on Gaussian disturbances every pair comes back `o-o`, undecided. Read a
-mostly-`o-o` result as "this data cannot answer the question", not as a finding.
-
-Two limits, both measured. It does not invent hidden causes — 0.00 per run over 40 runs
-on a world with none. But it detects one best when it is moderate: naming it 12-15 times
-in 20 when the hidden cause is 70% of each variable it links, 3-6 in 20 at 50%, and 0 in
-20 at both 30% and 90%. The 90% case is the interesting one — when the hidden cause is
-nearly all of what a variable is, that variable stands in for it and "a causes c" is
-very nearly true.
-
 ### `do_msm` — sequential exchangeability
 
 No unmeasured confounder of treatment and outcome at *any* period. This buys nothing

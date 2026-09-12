@@ -199,6 +199,22 @@ platform, and a compiler is free to contract `a*b+c` into a fused multiply-add,
 which changes the last bits. Everything on this page was measured on one Windows
 build; the guarantees are within a platform, not across platforms.
 
+That said, the gap between "the last bits differ" and "the answer differs" is worth
+keeping narrow, and one thing on the wrong side of it has been fixed. The random
+Fourier features behind `test := 'kernel'` and `algorithm := 'resit'` were drawn with
+`std::normal_distribution` and `std::uniform_real_distribution`, which are
+implementation-defined: the same engine and the same seed give a different sequence
+under libstdc++ than under MSVC. Those features decide the graph rather than merely
+perturbing it, and CI caught the consequence as one platform finding an edge the other
+did not. They are now drawn from the engine's bits and put through the inverse normal
+CDF, both fixed by arithmetic, so the same rows and the same `duckdo_seed` give the
+same features everywhere.
+
+Resampling is still drawn with `std::uniform_int_distribution`, which is
+implementation-defined in the same way, so **`stability` and `orientation_stability`
+can differ across platforms** while the graph itself does not. The discovery tests
+assert graphs exactly and stabilities only as bounds, for that reason.
+
 The foundation-model path has one further caveat, already measured during the
 export: ONNX Runtime decomposes attention where PyTorch fuses it, and over twelve
 layers that is worth about 1e-3 of relative agreement at the logit level. It comes

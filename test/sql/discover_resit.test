@@ -188,7 +188,7 @@ h->g
 statement error
 SELECT * FROM do_discover('causal_world', algorithm := 'resit', min_effect := 0.1);
 ----
-RESIT and RCD have no coefficients to threshold
+RESIT has no coefficients to threshold
 
 statement error
 SELECT * FROM do_discover('causal_world', algorithm := 'resit', test := 'kernel');
@@ -203,4 +203,4 @@ cannot run with test := 'rank'
 statement error
 SELECT * FROM do_discover('causal_world', algorithm := 'ges');
 ----
-algorithm must be 'pc', 'fci', 'lingam', 'resit', 'rcd', 'pc+lingam' or 'pc+resit'
+algorithm must be 'pc', 'fci', 'lingam', 'resit', 'pc+lingam' or 'pc+resit'

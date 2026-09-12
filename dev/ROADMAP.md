@@ -2,8 +2,8 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase is implemented, built and tested, Phase 10 included.** 854 assertions
-> in 31 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 831 assertions
+> in 30 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
 > at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
 > gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
 > Section 9 lists what each Phase 10 item still leaves open.
@@ -913,16 +913,6 @@ Roughly in order of value per unit of effort:
    LayeredLiNGAM's peel (Suzuki, ECML-PKDD 2024) was built and measured against plain DirectLiNGAM rather than assumed: it cut the iteration count by a third and cost recall (0.933 against 1.000) and orders (33/40 against 40/40). Its speedup is for variable counts far above the 30 `do_discover` allows, so it is not what ships. `min_effect` defaults to 0.05 as a standardised coefficient; over 40 six-variable graphs the edge set was fully recovered at every setting to 0.10, with the false positive rate falling from 0.007 to 0.000.
 
    `algorithm := 'both'` runs PC and LiNGAM over the same rows and unions them, with an `agreement` column per pair: `both`, `oriented by lingam`, `conflict`, `pc only`, `lingam only`. PC's orientation wins where it has one, because it rests on weaker assumptions; LiNGAM fills in what PC left undirected; a contradiction goes back to `--` and to review. The conflicts are the useful part — both methods assume nothing unmeasured causes two variables, and a hidden common cause breaks them differently, so the disagreement is where that assumption shows.
-   Discovery that does not assume causal sufficiency is **DONE**, as `algorithm := 'rcd'` (Maeda and Shimizu, AISTATS 2020). Every functional method above assumes nothing unmeasured causes two of the measured variables, which is the assumption most likely to be false, and `'pc+lingam'` could only surface it indirectly as a conflict. RCD tests both directions of every dependent pair: exactly one leaving an independent residual is a cause, neither is a hidden common cause written `<->`, both is undecided written `o-o`. Its output is a PAG, so it reuses FCI's rows and FCI's proposal, and a `<->` becomes the `[latent]` node `do_identify` already understands.
-
-   On a and c sharing a hidden cause with b also causing c: LiNGAM returns `b -> a`, `b -> c`, `c -> a`, wrong throughout; FCI returns `a o-> c`, which still allows a to cause c; RCD returns `a <-> c` and `b --> c`.
-
-   It needs no refusal, which is the nicest property in the set: on Gaussian disturbances every pair comes back `o-o`, so it says it cannot tell in its own vocabulary rather than guessing. LiNGAM and RESIT refuse precisely because they have no way to write that down.
-
-   Limits, measured rather than asserted. It does not invent hidden causes: 0.00 `<->` per run over 40 runs on a world with none, with the exact true graph 19/20 at 2,000 rows and 20/20 at 6,000, fully oriented. Detection is a band rather than a threshold - over 20 runs, named 0/20 and 1/20 when the hidden cause is 30% of each variable, 3/20 and 6/20 at 50%, 12/20 and 15/20 at 70%, and 0/20 at 90%. The fall-off at the top is real: when the hidden cause is nearly all of what a variable is, that variable stands in for it and `a --> c` is close to right for the wrong reason. The rest of the graph survives either way, `b --> c` found 18-20 of 20 across the whole sweep.
-
-   A tier that contradicts the data surfaces here as a `<->` rather than quietly winning, since neither allowed direction then leaves an independent residual. That is the honest answer to RCD's own question and a useful signal that the tier is wrong.
-
    Sharing a causal order across datasets is **DONE**, as `groups := 'site'` on `algorithm := 'lingam'` - MultiGroupDirectLiNGAM (Shimizu 2012). The groups are peeled together, each weighted by its own row count, which is what constrains them to one order; coefficients are fitted inside each group, and an edge needs at least half of them.
 
    It is not the same as pooling the rows, which is the comparison that matters since pooling is what a user would otherwise do. A chain x -> y -> z observed at four sites with the sign of every effect flipped at two of them has a pooled correlation under 0.1: ignoring the labels recovers the chain 3 times in 40, `groups :=` recovers it 40 times in 40. On a denser five-variable world with independently drawn per-group coefficients, the joint order was exactly right 25/25 at 120, 200 and 400 rows per group against 13/25, 11/25 and 18/25 for ignoring the labels.
@@ -930,6 +920,18 @@ Roughly in order of value per unit of effort:
    Two things were wrong on the way and are worth recording. Penalising each group's likelihood ratio separately and summing those charges the true source again for every group that dips negative on noise; the ratios are summed first and the total penalised once. And the disturbance check must run inside each group: pooled, the residual carries the differences between the groups' coefficients, which is a mixture and looks Gaussian, and the check was refusing data that every group on its own could read - that alone was the difference between 18/25 and 25/25.
 
    `groups :=` is refused with `'pc+lingam'` on purpose, since PC would run on the pooled rows and know nothing of the groups.
+
+   **RCD was built, measured and reverted.** `algorithm := 'rcd'` (Maeda and Shimizu 2020) tests both directions of every dependent pair and reports `<->` when neither leaves an independent residual, which would name a hidden common cause instead of guessing an edge. It shipped in 05c8f7a and was reverted, because the detection rates it shipped with - 12/20 and 15/20 at a hidden cause worth 70% of each variable - were an artefact of two defects rather than of the method working.
+
+   The first: the random Fourier features were drawn with `std::normal_distribution`, which is implementation-defined, so Windows and Linux drew different features and CI found the same rows giving `a <-> c` on one and `a o-o c` on the other. The second: the features for a residual - a vector that is not one of the columns - borrowed five entries from the first column's slice of the set-feature weights instead of having their own, so whether they spread well was luck. With both fixed, detection is 0 of 20 at every confounder strength measured, from 30% to 90%, at 6,000 and 20,000 rows.
+
+   Its other three behaviours were real and survived the fix: no invented `<->` at all (0.00 per run over 40 runs on a world with none), the exact true graph 20/20 on that world fully oriented, and every pair `o-o` on Gaussian disturbances, which is the one method here that can report its own failure instead of refusing. None of those is worth shipping on its own - FCI already covers that ground with completeness guarantees RCD does not have.
+
+   Re-landing is a clear path, and the third defect is why the first two did not explain everything. An independent reference implementation of the same pairwise test recovers the hidden cause 23 of 40 times at five features per side and 39 of 40 at twenty, where the C++ managed none - because `IndependenceP` builds both sides' features from the *same* five weights, differing only by each vector's bandwidth, instead of drawing each side its own. Correlated feature maps on the two sides is exactly what cancels the cross-covariance the statistic is made of.
+
+   So re-landing wants three things: independent draws per side, a wider basis, and fresh numbers. Width is the constraint. The statistic's null covariance is `d^2` by `d^2`, so ten features per side costs about 1e7 per test against 1.6e8 at twenty; at ten, detection measures 34-40 of 40. That is affordable for a handful of variables and not for thirty, so a re-landed RCD would need to say what it costs, the way `test := 'kernel'` does.
+
+   Both defects are fixed on their own, since they also reached `test := 'kernel'` and RESIT. RESIT was re-measured after the fix and is unchanged: 1.00 of 3 true edges with 0.00-0.07 false across every world it runs on.
 
    Nonlinear orientation is **DONE**, as `algorithm := 'resit'` (Peters, Mooij, Janzing and Scholkopf, JMLR 2014). It runs LiNGAM's search from the other end - peeling a sink, the variable whose residual once the others are regressed out of it is least dependent on them - with kernel ridge regression on the random Fourier features `test := 'kernel'` already builds, then prunes the order into a graph with the same kernel test. A continuous additive noise model is identified by a nonlinear effect *or* a non-Gaussian disturbance, so RESIT covers exactly the case LiNGAM refuses.
 

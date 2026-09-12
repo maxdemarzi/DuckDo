@@ -444,12 +444,7 @@ true edges with none false, where LiNGAM gets none of the three and invents 2.4.
 unidentifiable corner - straight links *and* Gaussian disturbances, which nothing can read.
 `algorithm := 'pc+lingam'` and `'pc+resit'` run PC alongside one of them and add an `agreement`
 column saying which method gave each direction, leaving the pairs they contradict each other on
-undirected and in the review pile. `algorithm := 'rcd'` drops the assumption all of them share - that nothing unmeasured causes two
-of your variables - and says which pairs have a hidden cause rather than guessing an edge: where
-LiNGAM returns a wrong graph and FCI will not commit, RCD returns `a <-> c`. It invented 0.00 false
-ones per run over 40 runs on a world with none, and where the disturbances are Gaussian it reports
-every pair undecided rather than refusing, because it can say "I cannot tell" in its own output.
-And when the rows come from several sites or cohorts that share
+undirected and in the review pile. And when the rows come from several sites or cohorts that share
 a causal order but not its coefficients, `groups := 'site'` estimates one order across all of them
 instead of pooling — on a chain whose effects flip sign between sites, pooling recovers it 3 times
 in 40 and `groups :=` 40 times in 40.

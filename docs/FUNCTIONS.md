@@ -624,58 +624,6 @@ quietly in it — in the simulation above it returned 0.47 of 3 true edges and 2
 no sign anything was wrong. A fit counts as bending when the kernel regression leaves at least 5%
 less of the target's variance than a straight line does, and `warnings` reports how many did.
 
-**`algorithm := 'rcd'`** drops the assumption every functional method above leans on: that
-nothing unmeasured causes two of the measured variables. It rests on one clean fact — if i causes
-j and nothing hidden links them, regressing j on i leaves a residual independent of i — so it tests
-both directions of every dependent pair and reads the answer off which of them hold:
-
-| both directions tested | reported as | meaning |
-|---|---|---|
-| exactly one leaves an independent residual | `-->` | that is the cause, and the pair is clean |
-| neither does | `<->` | no unconfounded model fits: a hidden common cause |
-| both do | `o-o` | the data admits either direction |
-
-The repetition in RCD's name (Maeda and Shimizu, AISTATS 2020) is the outer loop: once i is known
-to cause j, later tests regress it out first, which uncovers relations that were masked. The output
-is a partial ancestral graph, so it reuses FCI's rows and FCI's proposal — a `<->` becomes a node
-marked `[latent]` that `do_graph_create` and `do_identify` already treat as a hidden common cause.
-
-Take a and c sharing a hidden cause, with b also causing c. LiNGAM has to explain the pair with a
-direct edge and gets the rest of the graph wrong doing it, returning `b -> a`, `b -> c`, `c -> a`.
-FCI finds the skeleton but will not commit: `a o-> c` still allows a to cause c. RCD returns
-`a <-> c` and `b --> c`.
-
-**It needs no refusal of its own**, and that is the nicest thing about it. Where the disturbances
-are Gaussian, both directions leave an independent residual and every pair comes back `o-o` — it
-says it cannot tell, in its own output vocabulary, which is exactly what LiNGAM and RESIT have no
-way to express and why they have to refuse instead. A run that is mostly `o-o` is that, not a
-finding.
-
-Two measured limits. **It does not cry wolf**: on a four-variable world with no hidden cause it
-invented 0.00 `<->` per run over 40 runs, and returned the exact true graph 19/20 at 2,000 rows and
-20/20 at 6,000 — fully oriented, which PC on the same world cannot manage. But **detection is a
-band, not a threshold**. With the hidden cause contributing this share of the variance of each of
-the two variables it links, over 20 runs it was named:
-
-| share | 2,000 rows | 6,000 rows |
-|---|---|---|
-| 30% | 0/20 | 1/20 |
-| 50% | 3/20 | 6/20 |
-| 70% | 12/20 | 15/20 |
-| 90% | 0/20 | 0/20 |
-
-The fall-off at 90% is not a bug and is worth understanding: when the hidden cause is almost all of
-what a variable is, that variable is a stand-in for it, and "a causes c" is very nearly the true
-model. RCD reports `a --> c`, which is close to right for the wrong reason. Throughout the sweep the
-rest of the graph was unaffected — `b --> c` was still found 18-20 times out of 20 — which is the
-practical point: a confounded pair is quarantined rather than poisoning everything around it.
-
-One interaction with `tiers` to know about. A tier that contradicts the data does not quietly win
-here. Told that c cannot cause d when it does, RCD finds that neither allowed direction leaves an
-independent residual and reports `c <-> d`. That is the honest answer to its own question — no
-unconfounded model fits what you have told me — and a `<->` that appears only after a tier was
-added is a sign the tier is wrong.
-
 **`algorithm := 'pc+lingam'`** (also spelled `'both'`, its name before RESIT existed) and
 **`algorithm := 'pc+resit'`** run PC-stable over the same rows and report the union, with an extra
 `agreement` column saying how the two landed on each pair:
