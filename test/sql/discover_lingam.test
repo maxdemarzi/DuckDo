@@ -209,7 +209,7 @@ cannot run with test := 'mixed'
 statement error
 SELECT * FROM do_discover('causal_world', min_effect := 0.1);
 ----
-applies to algorithm := 'lingam' or 'both'
+applies to algorithm := 'lingam' or 'pc+lingam'
 
 statement error
 SELECT * FROM do_discover('causal_world', algorithm := 'lingam', min_effect := 1.5);

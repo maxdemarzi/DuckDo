@@ -1,0 +1,206 @@
+# name: test/sql/discover_resit.test
+# description: RESIT orients an effect that bends, including with Gaussian disturbances, and refuses the corner nothing can read
+# group: [sql]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.63);
+
+# A chain a -> b -> c with a fork a -> d, every link bent, and Gaussian
+# disturbances throughout. LiNGAM refuses this data because its own signal, a
+# non-Gaussian disturbance, is absent; RESIT reads the bend instead.
+statement ok
+CREATE TABLE bent_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ea,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS eb,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ec,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ed
+  FROM range(4000) t(i)),
+ s1 AS (SELECT ea AS a, tanh(2*ea) + 0.4*eb AS b, ec, ed FROM u),
+ s2 AS (SELECT a, b, b*b - 1 + 0.4*ec AS c, ed FROM s1)
+SELECT a, b, c, sin(1.5*a) + 0.4*ed AS d FROM s2;
+
+# LiNGAM gets none of the three true edges. Its own Gaussian check does not save
+# it here, and that is worth knowing: the check tests what is left after a *linear*
+# fit, so a bend it cannot model shows up in the residual as non-Gaussianity and
+# reads as the very signal LiNGAM is looking for. It reports a causal order with
+# confidence and the order is wrong.
+query I
+SELECT count(*) FROM do_discover('bent_world', algorithm := 'lingam', bootstrap := 0)
+WHERE in_graph AND edge = '->'
+  AND ((source = 'a' AND target = 'b') OR (source = 'b' AND target = 'c')
+       OR (source = 'a' AND target = 'd'));
+----
+0
+
+# RESIT recovers the graph exactly.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('bent_world', algorithm := 'resit', bootstrap := 0) WHERE in_graph;
+----
+a->b a->d b->c
+
+# PC does no better, and not only because it leaves edges undirected: its tests
+# are linear, so it misses the bent b -> c link entirely and puts b -- d where the
+# truth is a -> d, because tanh(2a) and sin(1.5a) correlate more with each other
+# than sin(1.5a) does with a. test := 'kernel' is the fix for that half.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('bent_world', bootstrap := 0) WHERE in_graph;
+----
+a--b b--d
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('bent_world', test := 'kernel', bootstrap := 0) WHERE in_graph;
+----
+a--b a--d b--c
+
+# The causal order is reported, and every true edge runs forward along it.
+query I
+WITH order_found AS (
+  SELECT string_split(split_part(split_part(w, 'most exogenous first: ', 2), '.', 1), ' < ') AS names
+  FROM (SELECT DISTINCT unnest(warnings) AS w
+        FROM do_discover('bent_world', algorithm := 'resit', bootstrap := 0))
+  WHERE w LIKE 'the causal order RESIT found%'
+)
+SELECT len(names) = 4
+   AND list_position(names, 'a') < list_position(names, 'b')
+   AND list_position(names, 'b') < list_position(names, 'c')
+   AND list_position(names, 'a') < list_position(names, 'd')
+FROM order_found;
+----
+true
+
+# It says how it decided: the bend, or a disturbance that is not Gaussian.
+query I
+SELECT count(*) FROM (
+  SELECT DISTINCT unnest(warnings) AS w
+  FROM do_discover('bent_world', algorithm := 'resit', bootstrap := 0)
+) WHERE w LIKE '%fitted variables need more than a straight line%';
+----
+1
+
+# --- the corner neither method can read ------------------------------------------
+
+statement ok
+SELECT setseed(0.19);
+
+# The same shape with straight links and Gaussian disturbances. This is the
+# textbook unidentifiable case, and RESIT does not fail quietly in it, so it
+# refuses - the same corner LiNGAM refuses from the other side.
+statement ok
+CREATE TABLE flat_world AS
+WITH u AS (
+  SELECT sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ea,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS eb,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ec,
+         sqrt(-2*ln(random()+1e-12))*cos(2*pi()*random()) AS ed
+  FROM range(4000) t(i)),
+ s1 AS (SELECT ea AS a, ea + 0.4*eb AS b, ec, ed FROM u),
+ s2 AS (SELECT a, b, b + 0.4*ec AS c, ed FROM s1)
+SELECT a, b, c, a + 0.4*ed AS d FROM s2;
+
+statement error
+SELECT * FROM do_discover('flat_world', algorithm := 'resit');
+----
+no method here can read
+
+statement error
+SELECT * FROM do_discover('flat_world', algorithm := 'lingam');
+----
+indistinguishable from Gaussian
+
+# PC says what it can about the same data without complaint.
+query I
+SELECT count(*) FROM do_discover('flat_world', bootstrap := 0) WHERE in_graph;
+----
+3
+
+# --- where it agrees, and where it is combined ------------------------------------
+
+statement ok
+SELECT setseed(0.77);
+
+# A straight-line world with uniform disturbances: both functional methods work,
+# so RESIT costs nothing in accuracy for being the more general of the two.
+statement ok
+CREATE TABLE causal_world AS
+WITH u AS (
+  SELECT (random() - 0.5) * 3.4641 AS a,
+         (random() - 0.5) * 3.4641 AS b,
+         (random() - 0.5) * 3.4641 AS e1,
+         (random() - 0.5) * 3.4641 AS e2,
+         (random() - 0.5) * 3.4641 AS e3,
+         (random() - 0.5) * 3.4641 AS g,
+         (random() - 0.5) * 3.4641 AS e4
+  FROM range(3000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, b, c, d, 0.8*d + 0.6*e3 AS f, g, 0.9*g + 0.6*e4 AS h FROM s2;
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', algorithm := 'resit', bootstrap := 0) WHERE in_graph;
+----
+a->c b->c c->d d->f g->h
+
+# 'pc+resit' is the union, with the same agreement column 'pc+lingam' has, and
+# 'both' still means what it meant before RESIT existed.
+query II
+SELECT source || edge || target, agreement
+FROM do_discover('causal_world', algorithm := 'pc+resit', bootstrap := 0)
+WHERE in_graph ORDER BY source, target;
+----
+a->c	both
+b->c	both
+c->d	both
+d->f	both
+g->h	oriented by lingam
+
+query I
+SELECT (SELECT count(*) FROM do_discover('causal_world', algorithm := 'both', bootstrap := 0))
+     = (SELECT count(*) FROM do_discover('causal_world', algorithm := 'pc+lingam', bootstrap := 0));
+----
+true
+
+# The proposal has nothing left undirected, so review is the marker alone.
+query III
+SELECT dot LIKE '%Causal order, most exogenous first%', n_directed, n_undirected
+FROM do_discover_dot('causal_world', algorithm := 'resit', bootstrap := 0);
+----
+true	5	0
+
+# Tiers reach it too, from the other end than LiNGAM: they restrict which
+# variable may be peeled as a sink rather than as a source.
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', columns := ['g','h'], algorithm := 'resit',
+                 tiers := [['h'],['g']], bootstrap := 0)
+WHERE in_graph;
+----
+h->g
+
+# --- the contract -----------------------------------------------------------------
+
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'resit', min_effect := 0.1);
+----
+RESIT has no coefficients to threshold
+
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'resit', test := 'kernel');
+----
+is a kernel method already
+
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'resit', test := 'rank');
+----
+cannot run with test := 'rank'
+
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'ges');
+----
+algorithm must be 'pc', 'fci', 'lingam', 'resit', 'pc+lingam' or 'pc+resit'

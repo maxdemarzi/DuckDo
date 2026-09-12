@@ -136,9 +136,32 @@ is the one assumption in DuckDo enforced rather than reported: each disturbance 
 with Jarque–Bera, and two that cannot be told from Gaussian makes `do_discover` refuse,
 because identifiability allows at most one. It also assumes linear effects, no cycles,
 and no hidden common cause of any two variables — the last shared with PC, and the
-likeliest of the four to be false in real data. `algorithm := 'both'` is the way to see
-that: where a hidden cause is at work, PC and LiNGAM tend to disagree, and the
+likeliest of the four to be false in real data. `algorithm := 'pc+lingam'` is the way to
+see that: where a hidden cause is at work, PC and LiNGAM tend to disagree, and the
 disagreement is reported rather than resolved.
+
+The refusal has one blind spot worth knowing. It tests what is left after a *linear*
+fit, so if the true effect bends, what LiNGAM cannot model lands in the residual and
+reads as the non-Gaussianity it is looking for. It then runs on data it should not, and
+reports a confident order that is wrong. `algorithm := 'resit'`, below, is the method
+for that case.
+
+### `do_discover` with `algorithm := 'resit'` — an added disturbance
+
+RESIT lets the effect bend, which LiNGAM does not, and lets the disturbance be
+Gaussian, which LiNGAM cannot. What it will not let you have is a disturbance that is
+*mixed into* the effect rather than added to it: `x = f(parents) + e`, not
+`x = f(parents, e)`. It shares LiNGAM's other two assumptions, no cycles and no hidden
+common cause of any two variables, and the second is again the likeliest to be false.
+
+It refuses one corner outright, and it is the same one LiNGAM refuses from the other
+side: when no fit needs more than a straight line and two or more disturbances cannot
+be told from Gaussian, nothing here can read the data, so `do_discover` stops rather
+than returning an order. Note the asymmetry this exposes in LiNGAM's own check: LiNGAM
+tests what is left after a *linear* fit, so a bend it cannot model shows up as
+non-Gaussianity and lets it run on data it should not. On a bent world with Gaussian
+disturbances LiNGAM recovered none of three true edges and invented 2.4; RESIT
+recovered all three.
 
 ### `do_msm` — sequential exchangeability
 

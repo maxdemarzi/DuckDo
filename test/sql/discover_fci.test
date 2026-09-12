@@ -159,7 +159,7 @@ SELECT n_nodes, n_edges FROM do_graph_create('fci_found',
 statement error
 SELECT * FROM do_discover('hidden', algorithm := 'ges');
 ----
-algorithm must be 'pc', 'fci', 'lingam' or 'both'
+algorithm must be 'pc', 'fci', 'lingam', 'resit', 'pc+lingam' or 'pc+resit'
 
 # The same data twice gives the same FCI graph and stabilities.
 query I

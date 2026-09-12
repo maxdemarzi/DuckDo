@@ -2,8 +2,8 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase is implemented, built and tested, Phase 10 included.** 775 assertions
-> in 28 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 810 assertions
+> in 29 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
 > at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
 > gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
 > Section 9 lists what each Phase 10 item still leaves open.
@@ -913,6 +913,16 @@ Roughly in order of value per unit of effort:
    LayeredLiNGAM's peel (Suzuki, ECML-PKDD 2024) was built and measured against plain DirectLiNGAM rather than assumed: it cut the iteration count by a third and cost recall (0.933 against 1.000) and orders (33/40 against 40/40). Its speedup is for variable counts far above the 30 `do_discover` allows, so it is not what ships. `min_effect` defaults to 0.05 as a standardised coefficient; over 40 six-variable graphs the edge set was fully recovered at every setting to 0.10, with the false positive rate falling from 0.007 to 0.000.
 
    `algorithm := 'both'` runs PC and LiNGAM over the same rows and unions them, with an `agreement` column per pair: `both`, `oriented by lingam`, `conflict`, `pc only`, `lingam only`. PC's orientation wins where it has one, because it rests on weaker assumptions; LiNGAM fills in what PC left undirected; a contradiction goes back to `--` and to review. The conflicts are the useful part — both methods assume nothing unmeasured causes two variables, and a hidden common cause breaks them differently, so the disagreement is where that assumption shows.
+   Nonlinear orientation is **DONE**, as `algorithm := 'resit'` (Peters, Mooij, Janzing and Scholkopf, JMLR 2014). It runs LiNGAM's search from the other end - peeling a sink, the variable whose residual once the others are regressed out of it is least dependent on them - with kernel ridge regression on the random Fourier features `test := 'kernel'` already builds, then prunes the order into a graph with the same kernel test. A continuous additive noise model is identified by a nonlinear effect *or* a non-Gaussian disturbance, so RESIT covers exactly the case LiNGAM refuses.
+
+   Measured on `a -> b -> c` with `a -> d`, 15 draws, as oriented true edges of 3 and false edges per run: straight links and non-Gaussian disturbances, LiNGAM 1.00/0.00-0.07 and RESIT 1.00/0.00-0.07; bent links and non-Gaussian, LiNGAM 0.58-0.64/1.07-1.27 and RESIT 1.00/0.00-0.20; bent links and Gaussian, LiNGAM 0.00-0.02/2.40-2.47 and RESIT 1.00/0.00-0.07. RESIT is at least as good as LiNGAM wherever both run; the only reason to keep LiNGAM is speed, 0.01 s against 0.76 s.
+
+   That third row exposed a real blind spot in LiNGAM's own refusal, which is now written down rather than left for a user to hit: it tests what is left after a *linear* fit, so a bend it cannot model lands in the residual and reads as the non-Gaussianity it is looking for. On bent Gaussian data LiNGAM does not refuse - it returns a confident order and gets none of three true edges.
+
+   RESIT has a refusal of its own, the same corner from the other side: no fit needing more than a straight line, and two or more disturbances indistinguishable from Gaussian. That is the textbook unidentifiable case, and RESIT does not fail quietly in it - 0.47 of 3 true and 2.53 false, with no sign anything was wrong. A fit counts as bending when the kernel regression leaves at least 5% less of the target's variance than a straight line does.
+
+   `algorithm := 'both'` became `'pc+lingam'`, with `'both'` kept as its older name, and `'pc+resit'` is the matching union.
+
 7. **Federated / multi-table estimation** — effects across joins without materializing the join. **DONE**, in two parts: correct inference across one-to-many joins, and pooling across sites that cannot share rows.
 
    Taken literally, "without materializing the join" is not a goal DuckDo should have. Cross-fitted nuisance models need row-level data, so the frame is materialised by design, and a join is already a valid first argument. What actually went wrong across joins was correctness. A one-to-many join, such as customers joined to their orders, turns one unit into several rows, and every estimator treated them as independent. On 4,000 units joined to three orders each, the estimate was unchanged, but the standard error fell from 0.0352 to 0.0203: an interval 42% too narrow, with no warning. `id :=` did not help, because it was never checked for repeats.

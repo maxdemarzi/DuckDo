@@ -140,19 +140,28 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 	if (entry != named.end() && !entry->second.IsNull()) {
 		spec.algorithm = StringUtil::Lower(entry->second.ToString());
 	}
-	if (spec.algorithm != "pc" && spec.algorithm != "fci" && spec.algorithm != "lingam" && spec.algorithm != "both") {
+	// 'both' is what 'pc+lingam' was called when it was the only union there was.
+	if (spec.algorithm == "both") {
+		spec.algorithm = "pc+lingam";
+	}
+	if (spec.algorithm != "pc" && spec.algorithm != "fci" && spec.algorithm != "lingam" && spec.algorithm != "resit" &&
+	    spec.algorithm != "pc+lingam" && spec.algorithm != "pc+resit") {
 		throw BinderException(
-		    "duckdo: algorithm must be 'pc', 'fci', 'lingam' or 'both', not '%s'. 'fci' allows hidden common causes; "
-		    "'pc' assumes there are none; 'lingam' orients every edge from non-Gaussian disturbances, under "
-		    "assumptions stronger than PC's; 'both' runs 'pc' and 'lingam' and says where they differ",
+		    "duckdo: algorithm must be 'pc', 'fci', 'lingam', 'resit', 'pc+lingam' or 'pc+resit', not '%s'. 'fci' "
+		    "allows hidden common causes; 'pc' assumes there are none; 'lingam' orients every edge from non-Gaussian "
+		    "disturbances and 'resit' from an added disturbance under an effect that may bend, both under assumptions "
+		    "stronger than PC's; 'pc+lingam' and 'pc+resit' run PC alongside one of those and say where they differ. "
+		    "'both' is accepted as the older name for 'pc+lingam'",
 		    spec.algorithm);
 	}
-	const bool lingam = spec.algorithm == "lingam" || spec.algorithm == "both";
+	const bool lingam = spec.algorithm == "lingam" || spec.algorithm == "pc+lingam";
+	const bool resit = spec.algorithm == "resit" || spec.algorithm == "pc+resit";
 	entry = named.find("min_effect");
 	if (entry != named.end() && !entry->second.IsNull()) {
 		if (!lingam) {
 			throw BinderException("duckdo: min_effect is the smallest coefficient LiNGAM counts as an edge, so it "
-			                      "applies to algorithm := 'lingam' or 'both', not '%s'",
+			                      "applies to algorithm := 'lingam' or 'pc+lingam', not '%s'. RESIT has no "
+			                      "coefficients to threshold; it prunes with a test at alpha",
 			                      spec.algorithm);
 		}
 		spec.min_effect = entry->second.GetValue<double>();
@@ -194,7 +203,7 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 		                      "Gaussian variable; 'kernel' assumes nothing about the shape of the dependence at all",
 		                      spec.test);
 	}
-	if (lingam && (spec.test == "rank" || spec.test == "mixed")) {
+	if ((lingam || resit) && (spec.test == "rank" || spec.test == "mixed")) {
 		throw BinderException("duckdo: algorithm := '%s' cannot run with test := '%s'. LiNGAM reads direction from "
 		                      "the shape of each variable's disturbance, and '%s' replaces every column with scores "
 		                      "that are Gaussian by construction - exactly the case LiNGAM cannot read",
@@ -202,8 +211,14 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 	}
 	if (spec.algorithm == "lingam" && spec.test != "pearson") {
 		throw BinderException("duckdo: algorithm := 'lingam' runs no independence tests, so test := '%s' would do "
-		                      "nothing. It is accepted with algorithm := 'both', where PC runs the tests and LiNGAM "
-		                      "reads the columns as they are",
+		                      "nothing. It is accepted with algorithm := 'pc+lingam', where PC runs the tests and "
+		                      "LiNGAM reads the columns as they are",
+		                      spec.test);
+	}
+	if (spec.algorithm == "resit" && spec.test != "pearson") {
+		throw BinderException("duckdo: algorithm := 'resit' is a kernel method already - it regresses on random "
+		                      "Fourier features and prunes with the same test as test := 'kernel' - so test := '%s' "
+		                      "has nothing to change",
 		                      spec.test);
 	}
 	return spec;
@@ -584,6 +599,17 @@ struct KernelTest {
 	mutable vector<std::pair<vector<idx_t>, vector<double>>> gram_cache;
 
 	double PValue(idx_t i, idx_t j, const vector<idx_t> &S) const;
+	void SetFeatures(const vector<idx_t> &S, vector<double> &fz) const;
+	bool Residual(const vector<double> &target, const vector<idx_t> &S, const vector<double> &fz,
+	              vector<double> &out) const;
+	//! Cholesky factor of the set features' Gram matrix, from the cache or freshly built.
+	//! Null when the features are degenerate enough that the factorisation fails.
+	const vector<double> *GramFactor(const vector<idx_t> &S, const vector<double> &fz) const;
+	//! How dependent a residual still is on the set it was regressed off: the squared
+	//! cross-covariance of their features, which is an HSIC in the random-feature basis.
+	//! Comparable across candidates, which is all a causal-order search needs.
+	double ResidualDependence(const vector<double> &residual, const vector<double> &fz) const;
+	double LinearResidualVariance(idx_t target, const vector<idx_t> &S) const;
 };
 
 //! Cholesky factor L with A = L L', lower triangular, in place over the lower half.
@@ -625,6 +651,8 @@ void CholeskySolveFactored(const vector<double> &L, idx_t n, const vector<double
 		x[i] = sum / L[i * n + i];
 	}
 }
+
+bool SmallInverse(vector<double> M, idx_t k, vector<double> &inv);
 
 //! Median pairwise distance over a strided subsample - the usual kernel bandwidth.
 double MedianDistance(const KernelTest &k, const vector<idx_t> &columns) {
@@ -669,71 +697,197 @@ void CentreColumns(vector<double> &block, idx_t m, idx_t d) {
 	}
 }
 
+const vector<double> *KernelTest::GramFactor(const vector<idx_t> &S, const vector<double> &fz) const {
+	const idx_t D = kSetFeatures;
+	for (auto &entry : gram_cache) {
+		if (entry.first == S) {
+			return &entry.second;
+		}
+	}
+	vector<double> built(D * D, 0.0);
+	for (idx_t a = 0; a < D; a++) {
+		for (idx_t b = a; b < D; b++) {
+			double sum = 0.0;
+			for (idx_t r = 0; r < m; r++) {
+				sum += fz[r * D + a] * fz[r * D + b];
+			}
+			built[a * D + b] = built[b * D + a] = sum / static_cast<double>(m);
+		}
+	}
+	double trace = 0.0;
+	for (idx_t a = 0; a < D; a++) {
+		trace += built[a * D + a];
+	}
+	for (idx_t a = 0; a < D; a++) {
+		built[a * D + a] += 1e-8 * trace / static_cast<double>(D);
+	}
+	if (!CholeskyFactorise(built, D)) {
+		return nullptr;
+	}
+	if (gram_cache.size() >= kGramCacheSets) {
+		gram_cache.erase(gram_cache.begin());
+	}
+	gram_cache.push_back(std::make_pair(S, built));
+	return &gram_cache.back().second;
+}
+
+//! The random Fourier features of a set of columns, centred: a stand-in for the kernel on
+//! their joint values.
+void KernelTest::SetFeatures(const vector<idx_t> &S, vector<double> &fz) const {
+	const idx_t D = kSetFeatures;
+	const double bandwidth = MedianDistance(*this, S);
+	fz.assign(m * D, 0.0);
+	for (idx_t r = 0; r < m; r++) {
+		for (idx_t c = 0; c < D; c++) {
+			fz[r * D + c] = phase[c];
+		}
+	}
+	for (auto column : S) {
+		const auto &values = value[column];
+		for (idx_t c = 0; c < D; c++) {
+			const double w = weight[c * p + column] / bandwidth;
+			for (idx_t r = 0; r < m; r++) {
+				fz[r * D + c] += w * values[r];
+			}
+		}
+	}
+	const double scale = std::sqrt(2.0 / static_cast<double>(D));
+	for (auto &entry : fz) {
+		entry = scale * std::cos(entry);
+	}
+	CentreColumns(fz, m, D);
+}
+
+//! Residual of `target` after regressing it on the features of a set, standardised. This is
+//! kernel ridge regression with the kernel replaced by its random-feature approximation, and
+//! it is what turns a causal-order search into a nonlinear one.
+bool KernelTest::Residual(const vector<double> &target, const vector<idx_t> &S, const vector<double> &fz,
+                          vector<double> &out) const {
+	const idx_t D = kSetFeatures;
+	const vector<double> *factor = GramFactor(S, fz);
+	if (!factor) {
+		return false;
+	}
+	vector<double> rhs(D), solution;
+	for (idx_t a = 0; a < D; a++) {
+		double sum = 0.0;
+		for (idx_t r = 0; r < m; r++) {
+			sum += fz[r * D + a] * target[r];
+		}
+		rhs[a] = sum / static_cast<double>(m);
+	}
+	CholeskySolveFactored(*factor, D, rhs, solution);
+	out.assign(m, 0.0);
+	for (idx_t r = 0; r < m; r++) {
+		double fitted = 0.0;
+		for (idx_t a = 0; a < D; a++) {
+			fitted += fz[r * D + a] * solution[a];
+		}
+		out[r] = target[r] - fitted;
+	}
+	return true;
+}
+
+//! Residual variance of the same target under an ordinary linear fit on the same columns.
+//! The target is standardised, so this is 1 - R^2, and comparing it with what the kernel
+//! regression leaves says whether the relationship bends at all.
+double KernelTest::LinearResidualVariance(idx_t target, const vector<idx_t> &S) const {
+	const idx_t k = S.size();
+	if (k == 0) {
+		return 1.0;
+	}
+	vector<double> M(k * k), rhs(k), inverse;
+	for (idx_t a = 0; a < k; a++) {
+		double cross = 0.0;
+		for (idx_t r = 0; r < m; r++) {
+			cross += value[S[a]][r] * value[target][r];
+		}
+		rhs[a] = cross / static_cast<double>(m);
+		for (idx_t b = 0; b < k; b++) {
+			double sum = 0.0;
+			for (idx_t r = 0; r < m; r++) {
+				sum += value[S[a]][r] * value[S[b]][r];
+			}
+			M[a * k + b] = sum / static_cast<double>(m);
+		}
+	}
+	if (!SmallInverse(M, k, inverse)) {
+		return 1.0;
+	}
+	double explained = 0.0;
+	for (idx_t a = 0; a < k; a++) {
+		double coefficient = 0.0;
+		for (idx_t b = 0; b < k; b++) {
+			coefficient += inverse[a * k + b] * rhs[b];
+		}
+		explained += coefficient * rhs[a];
+	}
+	return std::max(1.0 - explained, 1e-12);
+}
+
+double KernelTest::ResidualDependence(const vector<double> &residual, const vector<double> &fz) const {
+	const idx_t d = kXyFeatures, D = kSetFeatures;
+	// The residual's own features. Its bandwidth is its median distance, which for a
+	// standardised column is close enough to constant that the scores stay comparable.
+	vector<double> fr(m * d, 0.0);
+	const idx_t take = std::min(m, kBandwidthRows);
+	vector<double> spread;
+	spread.reserve(take * (take - 1) / 2);
+	for (idx_t a = 0; a < take; a++) {
+		for (idx_t b = a + 1; b < take; b++) {
+			const idx_t ra = take == m ? a : a * (m - 1) / (take - 1);
+			const idx_t rb = take == m ? b : b * (m - 1) / (take - 1);
+			const double delta = residual[ra] - residual[rb];
+			spread.push_back(delta * delta);
+		}
+	}
+	double bandwidth = 1.0;
+	if (!spread.empty()) {
+		const idx_t middle = spread.size() / 2;
+		std::nth_element(spread.begin(), spread.begin() + middle, spread.end());
+		bandwidth = std::sqrt(spread[middle]);
+		if (!(bandwidth > 1e-12)) {
+			bandwidth = 1.0;
+		}
+	}
+	const double scale = std::sqrt(2.0 / static_cast<double>(d));
+	for (idx_t c = 0; c < d; c++) {
+		const double w = weight[c * p] / bandwidth;
+		const double b = phase[c];
+		for (idx_t r = 0; r < m; r++) {
+			fr[r * d + c] = scale * std::cos(w * residual[r] + b);
+		}
+	}
+	CentreColumns(fr, m, d);
+	double total = 0.0;
+	for (idx_t a = 0; a < d; a++) {
+		for (idx_t b = 0; b < D; b++) {
+			double sum = 0.0;
+			for (idx_t r = 0; r < m; r++) {
+				sum += fr[r * d + a] * fz[r * D + b];
+			}
+			sum /= static_cast<double>(m);
+			total += sum * sum;
+		}
+	}
+	return total;
+}
+
 double KernelTest::PValue(idx_t i, idx_t j, const vector<idx_t> &S) const {
 	const idx_t d = kXyFeatures;
 	vector<double> fx = feature[i], fy = feature[j];
 	if (!S.empty()) {
 		const idx_t D = kSetFeatures;
-		const double bandwidth = MedianDistance(*this, S);
-		vector<double> fz(m * D, 0.0);
-		for (idx_t r = 0; r < m; r++) {
-			for (idx_t c = 0; c < D; c++) {
-				fz[r * D + c] = phase[c];
-			}
-		}
-		for (auto column : S) {
-			const auto &values = value[column];
-			for (idx_t c = 0; c < D; c++) {
-				const double w = weight[c * p + column] / bandwidth;
-				for (idx_t r = 0; r < m; r++) {
-					fz[r * D + c] += w * values[r];
-				}
-			}
-		}
-		const double scale = std::sqrt(2.0 / static_cast<double>(D));
-		for (auto &entry : fz) {
-			entry = scale * std::cos(entry);
-		}
-		CentreColumns(fz, m, D);
+		vector<double> fz;
+		SetFeatures(S, fz);
 
 		// Regress the x and y features on the set's features and keep the residual.
 		// The nudge on the diagonal is only enough to make the solve safe: a real ridge
 		// leaves part of S unabsorbed, and that reads as dependence between x and y. At
 		// 1e-6 relative the level went from 0.005 to 0.21.
-		const vector<double> *factor = nullptr;
-		for (auto &entry : gram_cache) {
-			if (entry.first == S) {
-				factor = &entry.second;
-				break;
-			}
-		}
-		vector<double> built;
+		const vector<double> *factor = GramFactor(S, fz);
 		if (!factor) {
-			built.assign(D * D, 0.0);
-			for (idx_t a = 0; a < D; a++) {
-				for (idx_t b = a; b < D; b++) {
-					double sum = 0.0;
-					for (idx_t r = 0; r < m; r++) {
-						sum += fz[r * D + a] * fz[r * D + b];
-					}
-					built[a * D + b] = built[b * D + a] = sum / static_cast<double>(m);
-				}
-			}
-			double trace = 0.0;
-			for (idx_t a = 0; a < D; a++) {
-				trace += built[a * D + a];
-			}
-			for (idx_t a = 0; a < D; a++) {
-				built[a * D + a] += 1e-8 * trace / static_cast<double>(D);
-			}
-			if (!CholeskyFactorise(built, D)) {
-				return 1.0;
-			}
-			if (gram_cache.size() >= kGramCacheSets) {
-				gram_cache.erase(gram_cache.begin());
-			}
-			gram_cache.push_back(std::make_pair(S, built));
-			factor = &gram_cache.back().second;
+			return 1.0;
 		}
 		vector<double> rhs(D), solution;
 		for (int side = 0; side < 2; side++) {
@@ -2424,6 +2578,164 @@ Lingam RunLingam(const NumericTable &t, const vector<idx_t> &rows, const vector<
 	return out;
 }
 
+// --- RESIT -----------------------------------------------------------------------
+//
+// LiNGAM buys its orientations with linearity. RESIT (Peters, Mooij, Janzing and
+// Scholkopf, JMLR 2014) buys the same thing with a different trade: the effect may
+// bend however it likes, so long as the disturbance is added rather than mixed in.
+// A continuous additive noise model x_k = f_k(parents) + e_k is identifiable for a
+// nonlinear f, and - this is the part that matters next to LiNGAM - for *any*
+// disturbance distribution, Gaussian included. So RESIT covers exactly the case
+// LiNGAM refuses.
+//
+// It runs LiNGAM's search from the other end. LiNGAM peels the most exogenous
+// variable; RESIT peels a sink, because a sink is the variable whose residual, once
+// every other remaining variable is regressed out of it, is most independent of
+// them. Regressing here is kernel ridge regression on the same random Fourier
+// features test := 'kernel' uses, and "most independent" is the squared cross-
+// covariance of their features, an HSIC in that basis. Then the order is pruned:
+// a predecessor is a parent only if the pair is still dependent given every other
+// predecessor, which is the kernel test again.
+
+struct Resit {
+	Cpdag graph;
+	//! Most exogenous first, as LiNGAM's is.
+	vector<idx_t> order;
+	idx_t rows = 0;
+	//! Predecessors the pruning stage dropped, which is what separates an order from
+	//! a graph: an order alone would make every earlier variable a parent.
+	idx_t pruned = 0;
+	//! Variables whose fit on their predecessors bends - where the kernel regression
+	//! leaves meaningfully less than a straight line does - and how many variables
+	//! could have. A continuous additive noise model is identified by the bend or by
+	//! a non-Gaussian disturbance; linear effects with Gaussian disturbances is the
+	//! one corner neither covers, and the one no method here can read.
+	idx_t bending = 0;
+	idx_t fitted = 0;
+	//! Jarque-Bera p-value of each variable's disturbance.
+	vector<double> gaussian_p;
+};
+
+Resit RunResit(const KernelTest &k, const DiscoverSpec &spec, const Knowledge &knowledge) {
+	const idx_t p = k.p;
+	Resit out;
+	out.graph.p = p;
+	out.graph.adj.assign(p * p, 0);
+	out.graph.head.assign(p * p, 0);
+	out.rows = k.m;
+
+	vector<idx_t> remaining(p);
+	std::iota(remaining.begin(), remaining.end(), 0);
+	vector<idx_t> sinks;
+	vector<double> fz, residual;
+	while (remaining.size() > 1) {
+		// Tiers narrow what may be peeled, from the other end than LiNGAM: a sink
+		// cannot sit in an earlier tier than something still remaining.
+		vector<idx_t> pool;
+		if (knowledge.any) {
+			idx_t last = 0;
+			bool seen = false;
+			for (auto j : remaining) {
+				if (knowledge.tier[j] != kNoTier && (!seen || knowledge.tier[j] > last)) {
+					last = knowledge.tier[j];
+					seen = true;
+				}
+			}
+			for (auto j : remaining) {
+				if (!seen || knowledge.tier[j] == kNoTier || knowledge.tier[j] == last) {
+					pool.push_back(j);
+				}
+			}
+		} else {
+			pool = remaining;
+		}
+
+		idx_t sink = pool[0];
+		if (pool.size() > 1) {
+			double best = 0.0;
+			bool first = true;
+			for (auto candidate : pool) {
+				vector<idx_t> others;
+				for (auto j : remaining) {
+					if (j != candidate) {
+						others.push_back(j);
+					}
+				}
+				k.SetFeatures(others, fz);
+				if (!k.Residual(k.value[candidate], others, fz, residual)) {
+					continue;
+				}
+				const double score = k.ResidualDependence(residual, fz);
+				if (first || score < best) {
+					best = score;
+					sink = candidate;
+					first = false;
+				}
+			}
+		}
+		sinks.push_back(sink);
+		remaining.erase(std::find(remaining.begin(), remaining.end(), sink));
+	}
+	if (!remaining.empty()) {
+		out.order.push_back(remaining[0]);
+	}
+	for (idx_t a = sinks.size(); a-- > 0;) {
+		out.order.push_back(sinks[a]);
+	}
+
+	// Before pruning: is any of this identified? Each variable's disturbance is what
+	// the kernel regression on its predecessors leaves, and the fit "bends" when that
+	// is meaningfully less than a straight line leaves. A source variable has no fit,
+	// so it cannot bend, and its own values stand in for its disturbance.
+	out.gaussian_p.assign(p, 1.0);
+	for (idx_t pos = 0; pos < out.order.size(); pos++) {
+		const idx_t target = out.order[pos];
+		const vector<idx_t> predecessors(out.order.begin(), out.order.begin() + pos);
+		if (predecessors.empty()) {
+			out.gaussian_p[target] = JarqueBeraP(k.value[target]);
+			continue;
+		}
+		k.SetFeatures(predecessors, fz);
+		if (!k.Residual(k.value[target], predecessors, fz, residual)) {
+			continue;
+		}
+		out.fitted++;
+		double bent = 0.0;
+		for (auto entry : residual) {
+			bent += entry * entry;
+		}
+		bent /= static_cast<double>(k.m);
+		// Five percent of the target's variance is the line between a fit that curves
+		// and one that is a straight line with noise around it.
+		if (bent < 0.95 * k.LinearResidualVariance(target, predecessors)) {
+			out.bending++;
+		}
+		out.gaussian_p[target] = JarqueBeraP(residual);
+	}
+
+	// Prune. Without this every earlier variable in the order would be a parent of
+	// every later one, which is an order dressed up as a graph.
+	for (idx_t pos = 1; pos < out.order.size(); pos++) {
+		const idx_t target = out.order[pos];
+		for (idx_t a = 0; a < pos; a++) {
+			const idx_t parent = out.order[a];
+			vector<idx_t> rest;
+			for (idx_t b = 0; b < pos; b++) {
+				if (b != a) {
+					rest.push_back(out.order[b]);
+				}
+			}
+			if (k.PValue(parent, target, rest) < spec.alpha) {
+				out.graph.adj[parent * p + target] = out.graph.adj[target * p + parent] = 1;
+				out.graph.Orient(parent, target);
+			} else {
+				out.pruned++;
+			}
+		}
+	}
+	return out;
+}
+
 // --- one run: point graph plus bootstrap ------------------------------------------
 
 struct Discovery {
@@ -2444,8 +2756,9 @@ struct Discovery {
 	vector<double> same_marks; // fraction of resamples giving the pair the same two marks
 	//! tiers := [...], resolved against the loaded columns.
 	Knowledge knowledge;
-	//! Set by algorithm := 'lingam' and 'both'.
+	//! Set by algorithm := 'lingam', 'resit' and their unions with PC.
 	bool lingam = false;
+	bool resit = false;
 	vector<idx_t> order;
 	vector<double> gaussian_p;
 	//! Set by algorithm := 'both': how the two methods landed on each pair.
@@ -2659,10 +2972,172 @@ void RunFciDiscovery(Discovery &out) {
 //! The LiNGAM path: the graph, its bootstrap, and the check that decides whether
 //! any of it means anything. algorithm := 'both' runs PC alongside it and reports
 //! the union, marking every pair with how the two methods landed on it.
+//! Turn the resampled graphs into the three fractions do_discover reports.
+void Accumulate(Discovery &out, const vector<Cpdag> &draws) {
+	const idx_t p = out.table.p;
+	out.adjacent.assign(p * p, 0.0);
+	out.oriented.assign(p * p, 0.0);
+	out.undirected.assign(p * p, 0.0);
+	if (draws.empty()) {
+		return;
+	}
+	for (auto &g : draws) {
+		for (idx_t i = 0; i < p; i++) {
+			for (idx_t j = 0; j < p; j++) {
+				if (i == j) {
+					continue;
+				}
+				out.adjacent[i * p + j] += g.Adjacent(i, j) ? 1.0 : 0.0;
+				out.oriented[i * p + j] += g.Directed(i, j) ? 1.0 : 0.0;
+				out.undirected[i * p + j] += g.Undirected(i, j) ? 1.0 : 0.0;
+			}
+		}
+	}
+	for (idx_t k = 0; k < p * p; k++) {
+		out.adjacent[k] /= static_cast<double>(draws.size());
+		out.oriented[k] /= static_cast<double>(draws.size());
+		out.undirected[k] /= static_cast<double>(draws.size());
+	}
+}
+
+//! The RESIT path. algorithm := 'pc+resit' runs PC alongside it and reports the union,
+//! the same way 'pc+lingam' does.
+void RunResitDiscovery(Discovery &out) {
+	const auto &t = out.table;
+	const idx_t p = t.p;
+	const bool merged = out.spec.algorithm == "pc+resit";
+	out.resit = true;
+	out.merged = merged;
+
+	const auto order = ContentOrder(t);
+	const auto fit = RunResit(MakeKernelTest(t, order, out.spec.seed), out.spec, out.knowledge);
+	out.order = fit.order;
+	out.gaussian_p = fit.gaussian_p;
+
+	// The corner nothing can read: every fit a straight line, and more than one
+	// disturbance that cannot be told from Gaussian. A linear-Gaussian model is the
+	// textbook unidentifiable case, and RESIT does not fail quietly there - measured
+	// over 15 draws of a four-variable chain it returned 0.47 of 3 true edges and 2.53
+	// false ones, with no sign that anything was wrong. LiNGAM refuses the same corner
+	// from the other side, so between them the refusal is symmetric.
+	vector<idx_t> gaussian;
+	for (idx_t j = 0; j < p; j++) {
+		if (fit.gaussian_p[j] > 0.05) {
+			gaussian.push_back(j);
+		}
+	}
+	if (fit.fitted > 0 && fit.bending == 0 && gaussian.size() >= 2) {
+		string names;
+		for (auto j : gaussian) {
+			names += (names.empty() ? "" : ", ") + t.names[j];
+		}
+		throw BinderException(
+		    "duckdo: do_discover cannot run RESIT here. It reads direction from an effect that bends or a "
+		    "disturbance that is not Gaussian, and this data has neither: not one of %llu fitted variables needed "
+		    "more than a straight line, and %llu disturbances are indistinguishable from Gaussian (Jarque-Bera "
+		    "p > 0.05): %s. Linear effects with Gaussian disturbances is the one case no method here can read, and "
+		    "RESIT does not fail quietly in it - in simulation it returned 0.47 of 3 true edges and 2.53 false ones. "
+		    "Use algorithm := 'pc', which will leave undecided edges undirected rather than guess",
+		    static_cast<unsigned long long>(fit.fitted), static_cast<unsigned long long>(gaussian.size()), names);
+	}
+
+	vector<idx_t> all(t.n);
+	std::iota(all.begin(), all.end(), 0);
+	if (merged) {
+		const auto pc = RunPc(MakeTest(out, all), out.spec.alpha, out.spec.max_conditioning, out.knowledge);
+		out.graph = MergeGraphs(pc, fit.graph, &out.agreement);
+	} else {
+		out.graph = fit.graph;
+	}
+
+	const idx_t reps = out.spec.bootstrap;
+	vector<Cpdag> draws(reps);
+	if (reps > 0) {
+		ParallelJobs(reps, [&](idx_t rep) {
+			std::mt19937_64 rng(static_cast<uint64_t>(out.spec.seed) ^ 0xD15C0DE5ULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+			std::uniform_int_distribution<idx_t> pick(0, t.n - 1);
+			vector<idx_t> rows(t.n);
+			for (auto &r : rows) {
+				r = order[pick(rng)];
+			}
+			const auto kernel = MakeKernelTest(t, rows, out.spec.seed);
+			const auto draw = RunResit(kernel, out.spec, out.knowledge);
+			if (!merged) {
+				draws[rep] = draw.graph;
+				return;
+			}
+			draws[rep] =
+			    MergeGraphs(RunPc(MakeTest(out, rows), out.spec.alpha, out.spec.max_conditioning, out.knowledge),
+			                draw.graph, nullptr);
+		});
+	}
+	Accumulate(out, draws);
+
+	string causal_order;
+	for (auto j : fit.order) {
+		causal_order += (causal_order.empty() ? "" : " < ") + t.names[j];
+	}
+	out.warnings.push_back(StringUtil::Format(
+	    "%s on %llu complete rows. It assumes no cycles, no hidden common cause of any two variables, and that each "
+	    "variable is some function of its causes plus a disturbance that is added rather than mixed in. The function "
+	    "may bend however it likes and the disturbance may be Gaussian, which is where this differs from LiNGAM",
+	    merged ? "PC-stable and RESIT together, their edges unioned," : "RESIT (Peters et al. 2014)",
+	    static_cast<unsigned long long>(t.n)));
+	out.warnings.push_back("the causal order RESIT found, most exogenous first: " + causal_order +
+	                       ". It is found by peeling off a sink at a time - the variable whose residual, once the "
+	                       "others are regressed out of it, is least dependent on them");
+	out.warnings.push_back(StringUtil::Format(
+	    "the order was found on %llu of the %llu rows, taken by stride in content order, with kernel ridge "
+	    "regression on random Fourier features. %llu predecessor pair(s) were pruned at alpha %g, which is what "
+	    "separates a graph from an order",
+	    static_cast<unsigned long long>(fit.rows), static_cast<unsigned long long>(t.n),
+	    static_cast<unsigned long long>(fit.pruned), out.spec.alpha));
+	out.warnings.push_back(StringUtil::Format(
+	    "%llu of %llu fitted variables need more than a straight line, and %llu disturbance(s) cannot be told from "
+	    "Gaussian. Either one identifies the order; neither, and nothing here could have read this data",
+	    static_cast<unsigned long long>(fit.bending), static_cast<unsigned long long>(fit.fitted),
+	    static_cast<unsigned long long>(gaussian.size())));
+	if (p > 10) {
+		out.warnings.push_back(StringUtil::Format(
+		    "pruning conditions on every earlier variable in the order, and with %llu variables that is a wide "
+		    "conditioning set for %llu random features to represent; read the sparsest edges with that in mind",
+		    static_cast<unsigned long long>(p - 1), static_cast<unsigned long long>(kSetFeatures)));
+	}
+	if (t.dropped > 0) {
+		out.warnings.push_back(StringUtil::Format("%llu rows with a NULL in a selected column were dropped",
+		                                          static_cast<unsigned long long>(t.dropped)));
+	}
+	if (t.n < 500) {
+		out.warnings.push_back(StringUtil::Format(
+		    "with %llu rows a nonparametric regression has little to work with, and the order rests on those "
+		    "regressions",
+		    static_cast<unsigned long long>(t.n)));
+	}
+	if (reps == 0) {
+		out.warnings.push_back("bootstrap := 0, so nothing here says how fragile these edges are");
+	}
+	if (merged) {
+		idx_t conflicts = 0, from_resit = 0;
+		for (idx_t i = 0; i < p; i++) {
+			for (idx_t j = i + 1; j < p; j++) {
+				conflicts += out.agreement[i * p + j] == kAgreeConflict ? 1 : 0;
+				from_resit += out.agreement[i * p + j] == kAgreeLingamDirection ? 1 : 0;
+			}
+		}
+		out.warnings.push_back(StringUtil::Format(
+		    "the agreement column says how the two methods landed on each pair. RESIT gave a direction to %llu "
+		    "edge(s) PC could not orient; %llu edge(s) they oriented opposite ways, and those are reported "
+		    "undirected",
+		    static_cast<unsigned long long>(from_resit), static_cast<unsigned long long>(conflicts)));
+	}
+	out.warnings.push_back("this is a proposal, not a graph: do_graph_create refuses do_discover_dot's output until "
+	                       "its review marker is deleted and every undirected edge is given a direction");
+}
+
 void RunLingamDiscovery(Discovery &out, const char *fn) {
 	const auto &t = out.table;
 	const idx_t p = t.p;
-	const bool merged = out.spec.algorithm == "both";
+	const bool merged = out.spec.algorithm == "pc+lingam";
 	out.lingam = true;
 	out.merged = merged;
 
@@ -2940,8 +3415,14 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 		NoteTiers(out);
 		return out;
 	}
-	if (out.spec.algorithm == "lingam" || out.spec.algorithm == "both") {
+	if (out.spec.algorithm == "lingam" || out.spec.algorithm == "pc+lingam") {
 		RunLingamDiscovery(out, fn);
+		NoteTest(out, coarse);
+		NoteTiers(out);
+		return out;
+	}
+	if (out.spec.algorithm == "resit" || out.spec.algorithm == "pc+resit") {
+		RunResitDiscovery(out);
 		NoteTest(out, coarse);
 		NoteTiers(out);
 		return out;
@@ -3227,7 +3708,19 @@ unique_ptr<FunctionData> BindDiscoverDot(ClientContext &context, TableFunctionBi
 
 	string dot = "digraph discovered {\n";
 	dot += "  // do_discover: unreviewed - delete this line only after reviewing every edge below.\n";
-	if (found.lingam) {
+	if (found.resit) {
+		dot += StringUtil::Format("  // %s, alpha %g, %llu bootstrap resamples, %llu complete rows.\n",
+		                          found.merged ? "PC-stable and RESIT, unioned" : "RESIT", found.spec.alpha,
+		                          static_cast<unsigned long long>(found.spec.bootstrap),
+		                          static_cast<unsigned long long>(t.n));
+		dot += "  // It assumes no hidden common causes, no cycles, and a disturbance added rather than\n";
+		dot += "  // mixed in. The effect itself may bend, and the disturbance may be Gaussian.\n";
+		string causal_order;
+		for (auto j : found.order) {
+			causal_order += (causal_order.empty() ? "" : " < ") + t.names[j];
+		}
+		dot += "  // Causal order, most exogenous first: " + causal_order + "\n";
+	} else if (found.lingam) {
 		dot +=
 		    StringUtil::Format("  // %s, alpha %g, min_effect %g, %llu bootstrap resamples, %llu complete rows.\n",
 		                       found.merged ? "PC-stable and DirectLiNGAM, unioned" : "DirectLiNGAM", found.spec.alpha,

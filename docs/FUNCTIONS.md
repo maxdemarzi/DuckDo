@@ -585,19 +585,59 @@ order right 39 times. `test := 'rank'` and `test := 'mixed'` are rejected at
 bind time with this algorithm, since normal scores are Gaussian by construction and erase the only
 signal it reads.
 
-**`algorithm := 'both'`** runs PC-stable and DirectLiNGAM over the same rows and reports the union,
-with an extra `agreement` column saying how the two landed on each pair:
+**`algorithm := 'resit'`** buys the same orientations with a different trade: the effect may bend
+however it likes, so long as the disturbance is *added* rather than mixed in. A continuous
+additive noise model `x = f(parents) + e` is identifiable for a nonlinear `f` and — the part that
+matters next to LiNGAM — for **any** disturbance distribution, Gaussian included. So RESIT covers
+exactly the case LiNGAM refuses.
+
+RESIT (Peters, Mooij, Janzing and Schölkopf, JMLR 2014) runs LiNGAM's search from the other end.
+LiNGAM peels the most exogenous variable; RESIT peels a *sink* — the variable whose residual, once
+every other remaining variable is regressed out of it, is least dependent on them. The regression
+is kernel ridge regression on the same random Fourier features `test := 'kernel'` uses, and
+"least dependent" is the squared cross-covariance of their features. Then the order is pruned:
+a predecessor is a parent only if the pair is still dependent given every other predecessor, which
+is the kernel test again. `min_effect` does not apply — there are no coefficients to threshold —
+and `test :=` is refused, because RESIT is a kernel method already.
+
+Measured on a four-variable world (`a -> b -> c` with `a -> d`) over 15 draws, as oriented true
+edges out of 3 and false edges per run:
+
+| world | LiNGAM | RESIT |
+|---|---|---|
+| straight links, non-Gaussian | 1.00 true, 0.00–0.07 false | 1.00 true, 0.00–0.07 false |
+| straight links, Gaussian | refused | refused |
+| bent links, non-Gaussian | 0.58–0.64 true, 1.07–1.27 false | **1.00 true, 0.00–0.20 false** |
+| bent links, Gaussian | 0.00–0.02 true, 2.40–2.47 false | **1.00 true, 0.00–0.07 false** |
+
+RESIT is at least as good as LiNGAM everywhere both run, and the only reason to prefer LiNGAM is
+speed: about 0.01 s against 0.76 s on those runs. **Read the bent-Gaussian row carefully**, because
+it is a caveat on LiNGAM rather than a point for RESIT: LiNGAM does not refuse there, even though
+its disturbances are Gaussian. Its check tests what is left after a *linear* fit, so a bend it
+cannot model lands in the residual and reads as the non-Gaussianity it is looking for. It then
+reports a confident causal order that is wrong.
+
+RESIT has its own refusal, and it is the same corner from the other side: **when no fit needs more
+than a straight line and two or more disturbances cannot be told from Gaussian**, it stops. Linear
+effects with Gaussian disturbances is the textbook unidentifiable case, and RESIT does not fail
+quietly in it — in the simulation above it returned 0.47 of 3 true edges and 2.53 false ones with
+no sign anything was wrong. A fit counts as bending when the kernel regression leaves at least 5%
+less of the target's variance than a straight line does, and `warnings` reports how many did.
+
+**`algorithm := 'pc+lingam'`** (also spelled `'both'`, its name before RESIT existed) and
+**`algorithm := 'pc+resit'`** run PC-stable over the same rows and report the union, with an extra
+`agreement` column saying how the two landed on each pair:
 
 | `agreement` | meaning |
 |---|---|
 | `both` | both found the edge and gave it the same direction |
-| `oriented by lingam` | both found it; PC could not orient it, LiNGAM did |
+| `oriented by lingam` | both found it; PC could not orient it, the functional method did |
 | `conflict` | both found it and oriented it opposite ways, so `edge` is `--` |
 | `pc only` | only PC's skeleton had it |
-| `lingam only` | only LiNGAM had it |
+| `lingam only` | only the functional method had it |
 
 Where PC oriented an edge its orientation stands, because it rests on the weaker assumptions.
-Where PC left one undirected, LiNGAM's direction fills it in. Where the two point opposite ways the
+Where PC left one undirected, the functional method's direction fills it in. Where the two point opposite ways the
 edge goes back to `--` and to review, because two methods contradicting each other is not evidence
 for either answer. A `conflict` is worth reading closely rather than resolving: both methods assume
 nothing unmeasured causes two variables, so a hidden common cause breaks both, and it breaks them

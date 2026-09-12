@@ -437,13 +437,18 @@ edges get settled in practice, by someone who knows the order rather than by a b
 independence, which cannot tell `x -> y` from `y -> x`, DirectLiNGAM reads the shape of each
 variable's disturbance, which can. It costs a longer assumption list, and the last item is enforced
 rather than mentioned — two disturbances that cannot be told from Gaussian is a refusal, because
-identifiability allows one. `algorithm := 'both'` runs the two and adds an `agreement` column
-saying which method gave each direction, leaving the pairs they contradict each other on
+identifiability allows one. `algorithm := 'resit'` makes the same kind of claim without the linearity:
+the effect may bend, the disturbance may be Gaussian, and it covers exactly the case LiNGAM
+refuses. On a four-variable world with bent links and Gaussian disturbances it recovers all three
+true edges with none false, where LiNGAM gets none of the three and invents 2.4. It refuses its own
+unidentifiable corner - straight links *and* Gaussian disturbances, which nothing can read.
+`algorithm := 'pc+lingam'` and `'pc+resit'` run PC alongside one of them and add an `agreement`
+column saying which method gave each direction, leaving the pairs they contradict each other on
 undirected and in the review pile.
 
 ```sql
 SELECT source, edge, target, agreement
-FROM do_discover('measurements', algorithm := 'both');
+FROM do_discover('measurements', algorithm := 'pc+lingam');
 -- a -> c   both                 both methods, same direction
 -- g -> h   oriented by lingam   the edge PC had to leave for a person
 ```
