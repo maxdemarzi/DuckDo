@@ -148,13 +148,14 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 		spec.algorithm = "pc+lingam";
 	}
 	if (spec.algorithm != "pc" && spec.algorithm != "fci" && spec.algorithm != "lingam" && spec.algorithm != "resit" &&
-	    spec.algorithm != "pc+lingam" && spec.algorithm != "pc+resit") {
+	    spec.algorithm != "rcd" && spec.algorithm != "pc+lingam" && spec.algorithm != "pc+resit") {
 		throw BinderException(
-		    "duckdo: algorithm must be 'pc', 'fci', 'lingam', 'resit', 'pc+lingam' or 'pc+resit', not '%s'. 'fci' "
-		    "allows hidden common causes; 'pc' assumes there are none; 'lingam' orients every edge from non-Gaussian "
-		    "disturbances and 'resit' from an added disturbance under an effect that may bend, both under assumptions "
-		    "stronger than PC's; 'pc+lingam' and 'pc+resit' run PC alongside one of those and say where they differ. "
-		    "'both' is accepted as the older name for 'pc+lingam'",
+		    "duckdo: algorithm must be 'pc', 'fci', 'lingam', 'resit', 'rcd', 'pc+lingam' or 'pc+resit', not '%s'. "
+		    "'fci' and 'rcd' allow hidden common causes and name the pairs that have one; 'pc' assumes there are "
+		    "none; 'lingam' orients every edge from non-Gaussian disturbances and 'resit' from an added disturbance "
+		    "under an effect that may bend, both under assumptions stronger than PC's; 'pc+lingam' and 'pc+resit' "
+		    "run PC alongside one of those and say where they differ. 'both' is accepted as the older name for "
+		    "'pc+lingam'",
 		    spec.algorithm);
 	}
 	const bool lingam = spec.algorithm == "lingam" || spec.algorithm == "pc+lingam";
@@ -163,8 +164,8 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 	if (entry != named.end() && !entry->second.IsNull()) {
 		if (!lingam) {
 			throw BinderException("duckdo: min_effect is the smallest coefficient LiNGAM counts as an edge, so it "
-			                      "applies to algorithm := 'lingam' or 'pc+lingam', not '%s'. RESIT has no "
-			                      "coefficients to threshold; it prunes with a test at alpha",
+			                      "applies to algorithm := 'lingam' or 'pc+lingam', not '%s'. RESIT and RCD have no "
+			                      "coefficients to threshold; they decide with a test at alpha",
 			                      spec.algorithm);
 		}
 		spec.min_effect = entry->second.GetValue<double>();
@@ -229,6 +230,11 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 		throw BinderException("duckdo: algorithm := 'lingam' runs no independence tests, so test := '%s' would do "
 		                      "nothing. It is accepted with algorithm := 'pc+lingam', where PC runs the tests and "
 		                      "LiNGAM reads the columns as they are",
+		                      spec.test);
+	}
+	if (spec.algorithm == "rcd" && spec.test != "pearson") {
+		throw BinderException("duckdo: algorithm := 'rcd' regresses linearly and tests independence with kernels "
+		                      "already, so test := '%s' has nothing to change",
 		                      spec.test);
 	}
 	if (spec.algorithm == "resit" && spec.test != "pearson") {
@@ -698,6 +704,9 @@ struct KernelTest {
 	//! Comparable across candidates, which is all a causal-order search needs.
 	double ResidualDependence(const vector<double> &residual, const vector<double> &fz) const;
 	double LinearResidualVariance(idx_t target, const vector<idx_t> &S) const;
+	double IndependenceP(const vector<double> &u, const vector<double> &v) const;
+	void VectorFeatures(const vector<double> &u, vector<double> &out) const;
+	void LinearResidual(idx_t target, const vector<idx_t> &S, vector<double> &out) const;
 };
 
 //! Cholesky factor L with A = L L', lower triangular, in place over the lower half.
@@ -879,6 +888,119 @@ bool KernelTest::Residual(const vector<double> &target, const vector<idx_t> &S, 
 //! Residual variance of the same target under an ordinary linear fit on the same columns.
 //! The target is standardised, so this is 1 - R^2, and comparing it with what the kernel
 //! regression leaves says whether the relationship bends at all.
+//! Independence of two arbitrary vectors over the sampled rows, by the same random-feature
+//! statistic the conditional test uses with nothing to condition on. This is the HSIC that
+//! a functional causal model needs: "is what is left of the effect independent of the
+//! cause" is the whole question those models turn on.
+double KernelTest::IndependenceP(const vector<double> &u, const vector<double> &v) const {
+	const idx_t d = kXyFeatures;
+	vector<double> fu, fv;
+	VectorFeatures(u, fu);
+	VectorFeatures(v, fv);
+	const idx_t k = d * d;
+	vector<double> mean(k, 0.0), W(m * k);
+	for (idx_t r = 0; r < m; r++) {
+		for (idx_t a = 0; a < d; a++) {
+			for (idx_t b = 0; b < d; b++) {
+				const double product = fu[r * d + a] * fv[r * d + b];
+				W[r * k + a * d + b] = product;
+				mean[a * d + b] += product;
+			}
+		}
+	}
+	for (auto &entry : mean) {
+		entry /= static_cast<double>(m);
+	}
+	double stat = 0.0;
+	for (auto entry : mean) {
+		stat += entry * entry;
+	}
+	stat *= static_cast<double>(m);
+	vector<double> C(k * k, 0.0);
+	for (idx_t a = 0; a < k; a++) {
+		for (idx_t b = a; b < k; b++) {
+			double sum = 0.0;
+			for (idx_t r = 0; r < m; r++) {
+				sum += (W[r * k + a] - mean[a]) * (W[r * k + b] - mean[b]);
+			}
+			C[a * k + b] = C[b * k + a] = sum / static_cast<double>(m);
+		}
+	}
+	return WeightedChiSquareUpper(stat, C, k);
+}
+
+//! Random Fourier features of one arbitrary vector, centred, with its own bandwidth.
+void KernelTest::VectorFeatures(const vector<double> &u, vector<double> &out) const {
+	const idx_t d = kXyFeatures;
+	const idx_t take = std::min(m, kBandwidthRows);
+	vector<double> spread;
+	spread.reserve(take * (take - 1) / 2);
+	for (idx_t a = 0; a < take; a++) {
+		for (idx_t b = a + 1; b < take; b++) {
+			const idx_t ra = take == m ? a : a * (m - 1) / (take - 1);
+			const idx_t rb = take == m ? b : b * (m - 1) / (take - 1);
+			const double delta = u[ra] - u[rb];
+			spread.push_back(delta * delta);
+		}
+	}
+	double bandwidth = 1.0;
+	if (!spread.empty()) {
+		const idx_t middle = spread.size() / 2;
+		std::nth_element(spread.begin(), spread.begin() + middle, spread.end());
+		bandwidth = std::sqrt(spread[middle]);
+		if (!(bandwidth > 1e-12)) {
+			bandwidth = 1.0;
+		}
+	}
+	out.assign(m * d, 0.0);
+	const double scale = std::sqrt(2.0 / static_cast<double>(d));
+	for (idx_t c = 0; c < d; c++) {
+		const double w = weight[c * p] / bandwidth;
+		const double b = phase[c];
+		for (idx_t r = 0; r < m; r++) {
+			out[r * d + c] = scale * std::cos(w * u[r] + b);
+		}
+	}
+	CentreColumns(out, m, d);
+}
+
+//! Residual of a column on a set of other columns under an ordinary linear fit. RCD is a
+//! linear method, so its regressions are linear; only its independence tests are not.
+void KernelTest::LinearResidual(idx_t target, const vector<idx_t> &S, vector<double> &out) const {
+	out = value[target];
+	const idx_t k = S.size();
+	if (k == 0) {
+		return;
+	}
+	vector<double> M(k * k), rhs(k), inverse;
+	for (idx_t a = 0; a < k; a++) {
+		double cross = 0.0;
+		for (idx_t r = 0; r < m; r++) {
+			cross += value[S[a]][r] * value[target][r];
+		}
+		rhs[a] = cross / static_cast<double>(m);
+		for (idx_t b = 0; b < k; b++) {
+			double sum = 0.0;
+			for (idx_t r = 0; r < m; r++) {
+				sum += value[S[a]][r] * value[S[b]][r];
+			}
+			M[a * k + b] = sum / static_cast<double>(m);
+		}
+	}
+	if (!SmallInverse(M, k, inverse)) {
+		return;
+	}
+	for (idx_t a = 0; a < k; a++) {
+		double coefficient = 0.0;
+		for (idx_t b = 0; b < k; b++) {
+			coefficient += inverse[a * k + b] * rhs[b];
+		}
+		for (idx_t r = 0; r < m; r++) {
+			out[r] -= coefficient * value[S[a]][r];
+		}
+	}
+}
+
 double KernelTest::LinearResidualVariance(idx_t target, const vector<idx_t> &S) const {
 	const idx_t k = S.size();
 	if (k == 0) {
@@ -2901,6 +3023,169 @@ Resit RunResit(const KernelTest &k, const DiscoverSpec &spec, const Knowledge &k
 	return out;
 }
 
+// --- RCD -------------------------------------------------------------------------
+//
+// Every method above assumes nothing unmeasured causes two of the measured
+// variables, and that is the assumption most likely to be false. PC and FCI differ
+// on it, and 'pc+lingam' exposes it indirectly - where a hidden cause is at work the
+// two methods disagree, and the disagreement is reported as a conflict without
+// saying what is wrong. RCD (Maeda and Shimizu, AISTATS 2020) says what is wrong.
+//
+// It rests on one clean fact about linear non-Gaussian models. If i causes j and
+// nothing hidden links them, regressing j on i leaves a residual independent of i.
+// So test both directions of every dependent pair:
+//
+//   exactly one direction independent  ->  that is the cause, and the pair is clean
+//   neither direction independent      ->  no unconfounded model fits: a hidden
+//                                          common cause, reported as <->
+//   both directions independent        ->  the data admits either, reported o-o
+//
+// The repetition in the name is the outer loop: once i is known to be an ancestor of
+// j, later tests regress it out first, which uncovers relations that were masked.
+//
+// This needs no refusal of its own, which is the nice property. On Gaussian
+// disturbances both directions come back independent and everything is reported
+// o-o - the method says it cannot tell, rather than guessing, and LiNGAM's and
+// RESIT's refusals exist precisely because they cannot say that.
+
+struct Rcd {
+	Pag graph;
+	idx_t confounded = 0;
+	idx_t undecided = 0;
+	idx_t directed = 0;
+	idx_t rounds = 0;
+	idx_t rows = 0;
+};
+
+Rcd RunRcd(const KernelTest &k, const DiscoverSpec &spec, const Knowledge &knowledge) {
+	const idx_t p = k.p;
+	Rcd out;
+	out.rows = k.m;
+	out.graph.p = p;
+	out.graph.mark.assign(p * p, kNone);
+
+	// Which pairs are related at all. A pair that is independent needs no explanation.
+	vector<uint8_t> dependent(p * p, 0);
+	const vector<idx_t> nothing;
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = i + 1; j < p; j++) {
+			const bool linked = k.PValue(i, j, nothing) < spec.alpha;
+			dependent[i * p + j] = dependent[j * p + i] = linked ? 1 : 0;
+		}
+	}
+
+	// ancestor[i * p + j]: i is a cause of j, with nothing hidden between them.
+	vector<uint8_t> ancestor(p * p, 0);
+	vector<double> residual_effect, residual_cause;
+	bool changed = true;
+	while (changed && out.rounds < p + 2) {
+		changed = false;
+		out.rounds++;
+		for (idx_t i = 0; i < p; i++) {
+			for (idx_t j = i + 1; j < p; j++) {
+				if (!dependent[i * p + j] || ancestor[i * p + j] || ancestor[j * p + i]) {
+					continue;
+				}
+				double best[2] = {0.0, 0.0};
+				for (int side = 0; side < 2; side++) {
+					const idx_t cause = side == 0 ? i : j;
+					const idx_t effect = side == 0 ? j : i;
+					if (knowledge.Forbidden(cause, effect)) {
+						best[side] = 0.0;
+						continue;
+					}
+					// Regress what is already known out of both, then ask whether what
+					// is left of the effect still knows anything about the cause.
+					vector<idx_t> above_effect, above_cause;
+					for (idx_t a = 0; a < p; a++) {
+						if (a != cause && ancestor[a * p + effect]) {
+							above_effect.push_back(a);
+						}
+						if (ancestor[a * p + cause]) {
+							above_cause.push_back(a);
+						}
+					}
+					above_effect.push_back(cause);
+					k.LinearResidual(effect, above_effect, residual_effect);
+					k.LinearResidual(cause, above_cause, residual_cause);
+					best[side] = k.IndependenceP(residual_effect, residual_cause);
+				}
+				const bool forward = best[0] > spec.alpha, backward = best[1] > spec.alpha;
+				if (forward && !backward) {
+					ancestor[i * p + j] = 1;
+					changed = true;
+				} else if (backward && !forward) {
+					ancestor[j * p + i] = 1;
+					changed = true;
+				}
+			}
+		}
+	}
+
+	// The ancestor relation includes i -> k -> j as i -> j, because once k is regressed
+	// out the coefficient on i is zero either way. Its transitive reduction is the part
+	// worth drawing.
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = 0; j < p; j++) {
+			if (i == j || !ancestor[i * p + j]) {
+				continue;
+			}
+			bool through = false;
+			for (idx_t middle = 0; middle < p && !through; middle++) {
+				through = middle != i && middle != j && ancestor[i * p + middle] && ancestor[middle * p + j];
+			}
+			if (through) {
+				continue;
+			}
+			out.graph.Set(i, j, kArrow);
+			out.graph.Set(j, i, kTail);
+			out.directed++;
+		}
+	}
+
+	// Whatever is left dependent and unexplained. Neither direction leaves an
+	// independent residual, so no model without a hidden common cause fits the pair.
+	for (idx_t i = 0; i < p; i++) {
+		for (idx_t j = i + 1; j < p; j++) {
+			if (!dependent[i * p + j] || out.graph.Adjacent(i, j)) {
+				continue;
+			}
+			if (ancestor[i * p + j] || ancestor[j * p + i]) {
+				continue; // an indirect path already drawn through its middle
+			}
+			double best[2] = {0.0, 0.0};
+			for (int side = 0; side < 2; side++) {
+				const idx_t cause = side == 0 ? i : j;
+				const idx_t effect = side == 0 ? j : i;
+				vector<idx_t> above_effect, above_cause;
+				for (idx_t a = 0; a < p; a++) {
+					if (a != cause && ancestor[a * p + effect]) {
+						above_effect.push_back(a);
+					}
+					if (ancestor[a * p + cause]) {
+						above_cause.push_back(a);
+					}
+				}
+				above_effect.push_back(cause);
+				k.LinearResidual(effect, above_effect, residual_effect);
+				k.LinearResidual(cause, above_cause, residual_cause);
+				best[side] = k.IndependenceP(residual_effect, residual_cause);
+			}
+			if (best[0] > spec.alpha && best[1] > spec.alpha) {
+				// Either direction fits. This is what Gaussian disturbances look like.
+				out.graph.Set(i, j, kCircle);
+				out.graph.Set(j, i, kCircle);
+				out.undecided++;
+			} else {
+				out.graph.Set(i, j, kArrow);
+				out.graph.Set(j, i, kArrow);
+				out.confounded++;
+			}
+		}
+	}
+	return out;
+}
+
 // --- one run: point graph plus bootstrap ------------------------------------------
 
 struct Discovery {
@@ -2915,8 +3200,11 @@ struct Discovery {
 	vector<double> oriented;   // fraction with i -> j
 	vector<double> undirected; // fraction with i - j left unoriented
 	vector<string> warnings;
-	//! Set by algorithm := 'fci', which fills `pag` and `same_marks` instead.
+	//! Set by algorithm := 'fci' and 'rcd', which fill `pag` and `same_marks` instead
+	//! of `graph`: both can say that a pair has a hidden common cause, which a CPDAG
+	//! has no way to write down.
 	bool fci = false;
+	bool rcd = false;
 	Pag pag;
 	vector<double> same_marks; // fraction of resamples giving the pair the same two marks
 	//! tiers := [...], resolved against the loaded columns.
@@ -3490,6 +3778,78 @@ void RunLingamDiscovery(Discovery &out, const char *fn) {
 	                       "its review marker is deleted and every undirected edge is given a direction");
 }
 
+//! The RCD path. Its output is a partial ancestral graph, so it reuses FCI's rows and
+//! its proposal, down to turning <-> into a latent node do_identify already understands.
+void RunRcdDiscovery(Discovery &out) {
+	const auto &t = out.table;
+	const idx_t p = t.p;
+	out.fci = true;
+	out.rcd = true;
+
+	const auto order = ContentOrder(t);
+	const auto fit = RunRcd(MakeKernelTest(t, order, out.spec.seed), out.spec, out.knowledge);
+	out.pag = fit.graph;
+
+	out.adjacent.assign(p * p, 0.0);
+	out.same_marks.assign(p * p, 0.0);
+	const idx_t reps = out.spec.bootstrap;
+	if (reps > 0) {
+		vector<Pag> draws(reps);
+		ParallelJobs(reps, [&](idx_t rep) {
+			std::mt19937_64 rng(static_cast<uint64_t>(out.spec.seed) ^ 0xD15C0DE5ULL ^ (rep * 0x9E3779B97F4A7C15ULL));
+			std::uniform_int_distribution<idx_t> pick(0, t.n - 1);
+			vector<idx_t> rows(t.n);
+			for (auto &r : rows) {
+				r = order[pick(rng)];
+			}
+			draws[rep] = RunRcd(MakeKernelTest(t, rows, out.spec.seed), out.spec, out.knowledge).graph;
+		});
+		for (auto &g : draws) {
+			for (idx_t i = 0; i < p; i++) {
+				for (idx_t j = 0; j < p; j++) {
+					if (i == j || !g.Adjacent(i, j)) {
+						continue;
+					}
+					out.adjacent[i * p + j] += 1.0;
+					if (out.pag.Adjacent(i, j) && PagEdge(g, i, j) == PagEdge(out.pag, i, j)) {
+						out.same_marks[i * p + j] += 1.0;
+					}
+				}
+			}
+		}
+		for (idx_t k = 0; k < p * p; k++) {
+			out.adjacent[k] /= static_cast<double>(reps);
+			out.same_marks[k] /= static_cast<double>(reps);
+		}
+	}
+
+	out.warnings.push_back(StringUtil::Format(
+	    "RCD (Maeda and Shimizu 2020) on %llu complete rows, %llu of them read. It assumes linear effects, no cycles "
+	    "and non-Gaussian disturbances - but not that the measured variables are unconfounded, which is what "
+	    "separates it from LiNGAM. For every related pair it asks whether regressing either one on the other leaves "
+	    "an independent residual",
+	    static_cast<unsigned long long>(t.n), static_cast<unsigned long long>(fit.rows)));
+	out.warnings.push_back(StringUtil::Format(
+	    "%llu pair(s) had a direction, %llu had a hidden common cause and are written <->, and %llu admitted either "
+	    "direction and are written o-o. Settled in %llu round(s): once a cause is known it is regressed out before "
+	    "the later tests, which is what the repetition in the name is for",
+	    static_cast<unsigned long long>(fit.directed), static_cast<unsigned long long>(fit.confounded),
+	    static_cast<unsigned long long>(fit.undecided), static_cast<unsigned long long>(fit.rounds)));
+	out.warnings.push_back("RCD needs no refusal of its own: where the disturbances are Gaussian both directions "
+	                       "leave an independent residual and every pair comes back o-o, so it says it cannot tell "
+	                       "rather than guessing. A run that is mostly o-o is that, not a finding");
+	if (t.dropped > 0) {
+		out.warnings.push_back(StringUtil::Format("%llu rows with a NULL in a selected column were dropped",
+		                                          static_cast<unsigned long long>(t.dropped)));
+	}
+	if (reps == 0) {
+		out.warnings.push_back("bootstrap := 0, so nothing here says how fragile these edges are");
+	}
+	out.warnings.push_back("this is a proposal, not a graph: do_graph_create refuses do_discover_dot's output until "
+	                       "its review marker is deleted and every edge RCD could not settle is given a direction "
+	                       "or a hidden common cause");
+}
+
 //! What the tiers asserted, what they settled, and where the data disagreed.
 void NoteTiers(Discovery &out) {
 	if (!out.knowledge.any) {
@@ -3618,6 +3978,11 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 	if (out.spec.algorithm == "lingam" || out.spec.algorithm == "pc+lingam") {
 		RunLingamDiscovery(out, fn);
 		NoteTest(out, coarse);
+		NoteTiers(out);
+		return out;
+	}
+	if (out.spec.algorithm == "rcd") {
+		RunRcdDiscovery(out);
 		NoteTiers(out);
 		return out;
 	}

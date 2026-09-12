@@ -2,8 +2,8 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase is implemented, built and tested, Phase 10 included.** 831 assertions
-> in 30 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 854 assertions
+> in 31 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
 > at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
 > gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
 > Section 9 lists what each Phase 10 item still leaves open.
@@ -913,6 +913,16 @@ Roughly in order of value per unit of effort:
    LayeredLiNGAM's peel (Suzuki, ECML-PKDD 2024) was built and measured against plain DirectLiNGAM rather than assumed: it cut the iteration count by a third and cost recall (0.933 against 1.000) and orders (33/40 against 40/40). Its speedup is for variable counts far above the 30 `do_discover` allows, so it is not what ships. `min_effect` defaults to 0.05 as a standardised coefficient; over 40 six-variable graphs the edge set was fully recovered at every setting to 0.10, with the false positive rate falling from 0.007 to 0.000.
 
    `algorithm := 'both'` runs PC and LiNGAM over the same rows and unions them, with an `agreement` column per pair: `both`, `oriented by lingam`, `conflict`, `pc only`, `lingam only`. PC's orientation wins where it has one, because it rests on weaker assumptions; LiNGAM fills in what PC left undirected; a contradiction goes back to `--` and to review. The conflicts are the useful part — both methods assume nothing unmeasured causes two variables, and a hidden common cause breaks them differently, so the disagreement is where that assumption shows.
+   Discovery that does not assume causal sufficiency is **DONE**, as `algorithm := 'rcd'` (Maeda and Shimizu, AISTATS 2020). Every functional method above assumes nothing unmeasured causes two of the measured variables, which is the assumption most likely to be false, and `'pc+lingam'` could only surface it indirectly as a conflict. RCD tests both directions of every dependent pair: exactly one leaving an independent residual is a cause, neither is a hidden common cause written `<->`, both is undecided written `o-o`. Its output is a PAG, so it reuses FCI's rows and FCI's proposal, and a `<->` becomes the `[latent]` node `do_identify` already understands.
+
+   On a and c sharing a hidden cause with b also causing c: LiNGAM returns `b -> a`, `b -> c`, `c -> a`, wrong throughout; FCI returns `a o-> c`, which still allows a to cause c; RCD returns `a <-> c` and `b --> c`.
+
+   It needs no refusal, which is the nicest property in the set: on Gaussian disturbances every pair comes back `o-o`, so it says it cannot tell in its own vocabulary rather than guessing. LiNGAM and RESIT refuse precisely because they have no way to write that down.
+
+   Limits, measured rather than asserted. It does not invent hidden causes: 0.00 `<->` per run over 40 runs on a world with none, with the exact true graph 19/20 at 2,000 rows and 20/20 at 6,000, fully oriented. Detection is a band rather than a threshold - over 20 runs, named 0/20 and 1/20 when the hidden cause is 30% of each variable, 3/20 and 6/20 at 50%, 12/20 and 15/20 at 70%, and 0/20 at 90%. The fall-off at the top is real: when the hidden cause is nearly all of what a variable is, that variable stands in for it and `a --> c` is close to right for the wrong reason. The rest of the graph survives either way, `b --> c` found 18-20 of 20 across the whole sweep.
+
+   A tier that contradicts the data surfaces here as a `<->` rather than quietly winning, since neither allowed direction then leaves an independent residual. That is the honest answer to RCD's own question and a useful signal that the tier is wrong.
+
    Sharing a causal order across datasets is **DONE**, as `groups := 'site'` on `algorithm := 'lingam'` - MultiGroupDirectLiNGAM (Shimizu 2012). The groups are peeled together, each weighted by its own row count, which is what constrains them to one order; coefficients are fitted inside each group, and an edge needs at least half of them.
 
    It is not the same as pooling the rows, which is the comparison that matters since pooling is what a user would otherwise do. A chain x -> y -> z observed at four sites with the sign of every effect flipped at two of them has a pooled correlation under 0.1: ignoring the labels recovers the chain 3 times in 40, `groups :=` recovers it 40 times in 40. On a denser five-variable world with independently drawn per-group coefficients, the joint order was exactly right 25/25 at 120, 200 and 400 rows per group against 13/25, 11/25 and 18/25 for ignoring the labels.
