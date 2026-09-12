@@ -48,12 +48,26 @@ also asserts things a release build allows. Test files are formatted by DuckDB's
 which wants each file's group to be its directory: call `format_file_content` from
 `duckdb/scripts/format_test_benchmark.py`.
 
-CI also runs DuckDB's `format` and `tidy` checks. Note that `.clang-format` and `.clang-tidy` in
-this repo are symlinks into `duckdb/`; git checks them out as plain text files on Windows, where
-`clang-format --style=file` then silently reads the *path* as if it were the config and reports
-every file as needing reformatting. Point it at `duckdb/.clang-format` directly there. The pinned
-version is `clang_format==11.0.1` — later versions disagree about line breaks and will produce a
-diff CI rejects.
+CI also runs DuckDB's `format` and `tidy` checks, as
+`python3 duckdb/scripts/format.py --all --check --directories src test`. Run **that**, not
+clang-format by hand: a hand-run `clang-format --style=file` on a copy of the file is a weaker
+check that accepts things CI rejects, which has cost a red build — it tolerated a short lambda on
+one line where `AllowShortFunctionsOnASingleLine: false` requires three.
+
+On Windows `format.py` needs a detour. `.clang-format` and `.clang-tidy` in this repo are symlinks
+into `duckdb/`, and git checks them out as plain text files there, so clang-format reads the
+*path* as if it were the config and fails with "YAML:1:1: error: not a mapping". Copy
+`duckdb/.clang-format` over the root stub, run the check, and put the stub back:
+
+```sh
+pip install cmake-format "black==24.*"     # format.py wants both
+cp .clang-format /tmp/stub && cp duckdb/.clang-format .clang-format
+python duckdb/scripts/format.py --check --directories src test
+cp /tmp/stub .clang-format
+```
+
+The pinned clang-format is `clang_format==11.0.1` — later versions disagree about line breaks and
+will produce a diff CI rejects.
 
 ## Submitting to community extensions
 

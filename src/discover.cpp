@@ -1073,7 +1073,9 @@ KernelTest MakeKernelTest(const NumericTable &t, const vector<idx_t> &rows, int6
 		// 53 bits, the most a double holds exactly, mapped to [0, 1).
 		return static_cast<double>(rng() >> 11) * (1.0 / 9007199254740992.0);
 	};
-	auto gaussian = [&unit]() { return NormalQuantile(std::min(1.0 - 1e-15, std::max(1e-15, unit()))); };
+	auto gaussian = [&unit]() {
+		return NormalQuantile(std::min(1.0 - 1e-15, std::max(1e-15, unit())));
+	};
 	k.weight.resize(kSetFeatures * t.p);
 	k.phase.resize(kSetFeatures);
 	for (idx_t c = 0; c < kSetFeatures; c++) {
