@@ -601,6 +601,48 @@ double NormalCdf(double x) {
 	return 0.5 * std::erfc(-x / std::sqrt(2.0));
 }
 
+//! Upper regularised incomplete gamma Q(a, x): the series below a + 1, Lentz's
+//! continued fraction above, each where it converges fast.
+double UpperGammaQ(double a, double x) {
+	if (!(x > 0.0)) {
+		return 1.0;
+	}
+	const double log_prefix = a * std::log(x) - x - std::lgamma(a);
+	if (x < a + 1.0) {
+		double ap = a, term = 1.0 / a, sum = term;
+		for (int i = 0; i < 10000; i++) {
+			ap += 1.0;
+			term *= x / ap;
+			sum += term;
+			if (std::fabs(term) < std::fabs(sum) * 1e-16) {
+				break;
+			}
+		}
+		return std::max(0.0, 1.0 - sum * std::exp(log_prefix));
+	}
+	const double tiny = 1e-300;
+	double b = x + 1.0 - a, c = 1.0 / tiny, d = 1.0 / b, h = d;
+	for (int i = 1; i < 10000; i++) {
+		const double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
+		b += 2.0;
+		d = an * d + b;
+		if (std::fabs(d) < tiny) {
+			d = tiny;
+		}
+		c = b + an / c;
+		if (std::fabs(c) < tiny) {
+			c = tiny;
+		}
+		d = 1.0 / d;
+		const double delta = d * c;
+		h *= delta;
+		if (std::fabs(delta - 1.0) < 1e-16) {
+			break;
+		}
+	}
+	return std::exp(log_prefix) * h;
+}
+
 //! P(X <= h, Y <= k) for a standard bivariate normal with correlation r:
 //! Genz's algorithm (Drezner-Wesolowsky with Gauss-Legendre quadrature, and a
 //! separate expansion for |r| >= 0.925), accurate to about 1e-15.

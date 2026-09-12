@@ -421,6 +421,14 @@ implies the same distribution in either direction. Also read `orientation_stabil
 and sometimes join a and b. At `alpha := 0.001` it is 0.98. Discovery assumes no hidden common
 causes, and real data usually has them.
 
+**Every test above reads dependence through a correlation, so none of them sees a bend.**
+`test := 'kernel'` does. On a true chain x -> y -> z with y = x², the correlation of x and y is
+0.009 while the correlation of |x| and y is 0.920 — `pearson`, `rank` and `mixed` all drop the
+x -- y edge, and the kernel test finds it. The reverse error is worse: where two variables are
+genuinely independent given a bent third, Fisher's z rejects that 100% of the time and invents an
+edge at full stability. It costs about 100x the time and gives the same graph when the dependence
+really is linear.
+
 **The `--` edges have two honest ways out, and a guess is not one of them.** `tiers :=
 [['age', 'sex'], ['discount'], ['revenue']]` says nothing in a later group causes anything in an
 earlier one, which settles every edge that crosses a tier before any test runs — that is how these

@@ -133,6 +133,9 @@ double NormalTwoSidedP(double z);
 double NormalQuantile(double p);
 //! Standard normal CDF.
 double NormalCdf(double x);
+//! Upper regularised incomplete gamma Q(a, x), to about 1e-15. The chi-square tail
+//! on `df` degrees of freedom is Q(df / 2, x / 2).
+double UpperGammaQ(double a, double x);
 //! P(X <= h, Y <= k) for a standard bivariate normal with correlation r: Genz's
 //! algorithm, accurate to about 1e-15.
 double BivariateNormalCdf(double h, double k, double r);

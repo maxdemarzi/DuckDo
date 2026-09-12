@@ -1,0 +1,157 @@
+# name: test/sql/discover_kernel.test
+# description: the kernel test sees a dependence that bends, which every correlation-based test here misses
+# group: [sql]
+
+require duckdo
+
+statement ok
+SELECT setseed(0.31);
+
+# A true chain x -> y -> z whose first link bends: y is a parabola in x. The
+# correlation of x and y is near zero while the correlation of |x| and y is near
+# one, so no test built on a correlation can see the edge, and no monotone
+# transform straightens a parabola either.
+statement ok
+CREATE TABLE bent AS
+WITH u AS (
+  SELECT (random() - 0.5) * 3.4641 AS x,
+         (random() - 0.5) * 3.4641 AS e1,
+         (random() - 0.5) * 3.4641 AS e2
+  FROM range(8000) t(i)),
+ s AS (SELECT x, x*x + 0.3*e1 AS y, e2 FROM u)
+SELECT x, y, 0.8*y + 0.6*e2 AS z FROM s;
+
+query II
+SELECT round(abs(corr(x, y)), 2) < 0.05, round(corr(abs(x), y), 2) > 0.85 FROM bent;
+----
+true	true
+
+# Every correlation-based test drops the x -- y edge entirely.
+query I
+SELECT coalesce(string_agg(source || edge || target, ' ' ORDER BY source, target), 'nothing')
+FROM do_discover('bent', bootstrap := 0) WHERE in_graph;
+----
+y--z
+
+query I
+SELECT coalesce(string_agg(source || edge || target, ' ' ORDER BY source, target), 'nothing')
+FROM do_discover('bent', test := 'rank', bootstrap := 0) WHERE in_graph;
+----
+y--z
+
+# The kernel test recovers the true skeleton. z deliberately takes only about 60%
+# of y rather than 90%: the bend in x -> y has to be found in what is left of y
+# after residualising on z, so the power falls away as z takes more. Measured over
+# 40 draws, recovery is 40/40 while z takes 81% or less and 38-40/40 at 90%, and
+# asserting the 90% case would be asserting a lucky seed.
+query I
+SELECT coalesce(string_agg(source || edge || target, ' ' ORDER BY source, target), 'nothing')
+FROM do_discover('bent', test := 'kernel', bootstrap := 0) WHERE in_graph;
+----
+x--y y--z
+
+# The other half of the same problem, and the more dangerous one: a true
+# conditional independence through a bent middle variable. x and y are both
+# parabolas in z and independent given it. Fisher's z rejects that every time,
+# which is a spurious edge at full stability; the kernel test does not.
+statement ok
+CREATE TABLE bent_fork AS
+WITH u AS (
+  SELECT (random() - 0.5) * 3.4641 AS z,
+         (random() - 0.5) * 3.4641 AS e1,
+         (random() - 0.5) * 3.4641 AS e2
+  FROM range(8000) t(i))
+SELECT z*z + 0.3*e1 AS x, z*z + 0.3*e2 AS y, z FROM u;
+
+query I
+SELECT count(*) FROM do_discover('bent_fork', bootstrap := 0)
+WHERE in_graph AND ((source = 'x' AND target = 'y') OR (source = 'y' AND target = 'x'));
+----
+1
+
+query I
+SELECT count(*) FROM do_discover('bent_fork', test := 'kernel', bootstrap := 0)
+WHERE in_graph AND ((source = 'x' AND target = 'y') OR (source = 'y' AND target = 'x'));
+----
+0
+
+# Where the dependence really is linear it gives the same answer as Fisher's z,
+# so choosing it is not a trade.
+statement ok
+SELECT setseed(0.77);
+
+statement ok
+CREATE TABLE causal_world AS
+WITH u AS (
+  SELECT (random() - 0.5) * 3.4641 AS a,
+         (random() - 0.5) * 3.4641 AS b,
+         (random() - 0.5) * 3.4641 AS e1,
+         (random() - 0.5) * 3.4641 AS e2,
+         (random() - 0.5) * 3.4641 AS e3,
+         (random() - 0.5) * 3.4641 AS g,
+         (random() - 0.5) * 3.4641 AS e4
+  FROM range(4000) t(i)),
+ s1 AS (SELECT *, 0.8*a + 0.8*b + 0.6*e1 AS c FROM u),
+ s2 AS (SELECT *, 0.9*c + 0.6*e2 AS d FROM s1)
+SELECT a, b, c, d, 0.8*d + 0.6*e3 AS f, g, 0.9*g + 0.6*e4 AS h FROM s2;
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', test := 'kernel', bootstrap := 0) WHERE in_graph;
+----
+a->c b->c c->d d->f g--h
+
+# It carries through FCI and through the union with LiNGAM, which reads the
+# columns as they are and so is not in conflict with it.
+query I
+SELECT count(*) FROM do_discover('causal_world', test := 'kernel', algorithm := 'fci', bootstrap := 0)
+WHERE in_graph;
+----
+5
+
+query I
+SELECT string_agg(source || edge || target, ' ' ORDER BY source, target)
+FROM do_discover('causal_world', test := 'kernel', algorithm := 'both', bootstrap := 0) WHERE in_graph;
+----
+a->c b->c c->d d->f g->h
+
+# The warnings say what was read and what the features were drawn from.
+query I
+SELECT count(*) FROM (
+  SELECT DISTINCT unnest(warnings) AS w
+  FROM do_discover('causal_world', test := 'kernel', bootstrap := 0)
+) WHERE w LIKE '%kernel tests of conditional independence%'
+   OR w LIKE 'the random features are drawn once from duckdo_seed%';
+----
+2
+
+# Resampling does not depend on the thread budget.
+statement ok
+CREATE TABLE one_thread AS SELECT source, target, edge, stability
+FROM do_discover('causal_world', test := 'kernel', bootstrap := 8);
+
+statement ok
+SET threads = 1;
+
+query I
+SELECT count(*) FROM (
+  SELECT source, target, edge, stability
+  FROM do_discover('causal_world', test := 'kernel', bootstrap := 8)
+  EXCEPT SELECT * FROM one_thread);
+----
+0
+
+statement ok
+RESET threads;
+
+# LiNGAM runs no independence tests, so a test it would ignore is refused rather
+# than accepted and dropped.
+statement error
+SELECT * FROM do_discover('causal_world', algorithm := 'lingam', test := 'kernel');
+----
+runs no independence tests
+
+statement error
+SELECT * FROM do_discover('causal_world', test := 'kendall');
+----
+test must be 'pearson', 'rank', 'mixed' or 'kernel'

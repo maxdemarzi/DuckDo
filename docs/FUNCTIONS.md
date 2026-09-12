@@ -669,9 +669,42 @@ the skeleton while LiNGAM puts the confounded pair in an order of its own, and `
   `warnings` names the columns read as binary and as ordinal. The
   row influences cost memory, one number per pair of columns per row, so more than 2^24 of them is
   refused with a suggestion to test a sample. Both algorithms take every test.
+- **`test := 'kernel'`** assumes nothing about the shape of the dependence, and is the one to
+  reach for when an effect might bend. Every other test here reads dependence through a
+  correlation, and `'rank'` widens that only to *monotone* transforms — no monotone transform
+  straightens a parabola. Take a true chain x -> y -> z with y = x², measured on 8,000 rows: the
+  correlation of x and y is 0.009 while the correlation of |x| and y is 0.920, and `'pearson'`,
+  `'rank'` and `'mixed'` all return `y -- z` alone, dropping the strongest dependence in the data.
+  The reverse error is worse, because it invents rather than omits: where x and y are both
+  parabolas in z and genuinely independent given it, Fisher's z rejects that true conditional
+  independence **100% of the time**, so the spurious edge arrives at full stability.
+
+  The method is RCoT (Strobl, Zhang and Visweswaran 2019), which approximates the kernel test
+  KCIT (Zhang, Peters, Janzing and Schölkopf 2011) with random Fourier features: a few hundred
+  numbers per row stand in for an n × n kernel matrix, which is what makes it linear in the rows
+  rather than quadratic. The features of x and y are residualised on the features of the
+  conditioning set, and the statistic is the squared cross-covariance of what is left. Its null is
+  a weighted sum of chi-squares, approximated by the three-moment method of Liu, Tang and Zhang
+  (2009); the obvious two-moment gamma is anticonservative in exactly the tail that decides edges,
+  rejecting true independences 3–10% of the time at a nominal 1%.
+
+  Measured end to end, as how often PC joins a pair it should not: 0.00–0.04 across four null
+  cases at 1,000 to 8,000 rows, against 1.00 for both `'pearson'` and `'rank'` on the bent one.
+  Power on a bent dependence is 1.00 where they manage 0.04–0.06. On data that really is linear it
+  returns the same graph as `'pearson'`, so choosing it is not a trade.
+
+  Two costs, both real. It is **about 100× slower**: on seven variables and 20,000 rows, 1.3 s
+  against 0.012 s without resampling, and 13.6 s against 0.012 s with the default 50 resamples.
+  Lower `bootstrap` if that matters. And its power falls away when the conditioning set nearly
+  determines one of the pair, because the bend then has to be found in a small remainder: on the
+  chain above, recovery of x -- y over 40 draws was 40/40 while z took 81% or less of y, and
+  38–40/40 at 90%. It reads at most 2,000 rows, taken by stride in content order, and the random
+  features are drawn once from `duckdo_seed` and reused by every resample, so the stabilities
+  measure the sample rather than the draw.
 - **Assumptions**, restated in `warnings`: no hidden common cause of any two variables (PC only),
   faithfulness, and linear-Gaussian dependence, or a Gaussian copula with `test := 'rank'`, or a
-  latent Gaussian copula with `test := 'mixed'`. Real
+  latent Gaussian copula with `test := 'mixed'`, or nothing about the shape of the dependence at
+  all with `test := 'kernel'`. Real
   data usually breaks the first. When it does, the orientations can be wrong even where every edge
   is right.
 - **The stabilities lean pessimistic.** A resample carries the sample's own error on top of its

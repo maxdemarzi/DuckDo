@@ -2,8 +2,8 @@
 
 **An implementation roadmap, v1 (2026-09-08)**
 
-> **Progress: every phase is implemented, built and tested, Phase 10 included.** 753 assertions
-> in 27 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
+> **Progress: every phase is implemented, built and tested, Phase 10 included.** 775 assertions
+> in 28 test files pass against DuckDB v1.5.4. Three more files run when `DUCKDO_MODEL_DIR` points
 > at exported model weights. There is also an EconML/DoWhy cross-check on IHDP, and PyTorch parity
 > gates on the exported ONNX graphs. **CausalPFN and Do-PFN both run end to end inside DuckDB.**
 > Section 9 lists what each Phase 10 item still leaves open.
@@ -895,6 +895,12 @@ Roughly in order of value per unit of effort:
    Tests for binary and mixed data are **DONE**, as `test := 'mixed'`: the latent Gaussian copula for mixed data (Fan, Liu, Ning and Zou 2017), with latent correlations from Kendall's tau. The obvious version, Fisher's z on those correlations, is wrong: in simulation a nominal 1% test rejected true independences between binary columns 9-29% of the time. So each partial correlation gets its own variance from every row's influence on the correlations under it, and a Wald test, which held 0-2% at 1% across the same cases. The C++ estimator matches an independent Python version to 1e-14 on the correlations and 3e-11 on every p-value. On a chain observed partly as yes/no columns, Pearson returns nine edges, five spurious at stability 1.0; the mixed test returns the true four. Pearson and rank output is byte-identical to before.
 
    Ordinal columns are **DONE**. A column with 3 to 9 levels is read as a latent Gaussian variable cut at thresholds, with two-step polychoric and polyserial correlations and their influence functions, including the part the estimated thresholds contribute. Reading such a column as continuous, as the mixed test did before, rejected a true independence given an ordinal variable 94–98% of the time at a nominal 1%. Read as ordinal, every case held 0.5–1.0% at 1% over 600 draws. The C++ matches an independent Python version to 3e-8 on every latent correlation. Output with no ordinal column is byte-identical to before.
+
+   A test that does not read dependence through a correlation is **DONE**, as `test := 'kernel'`. Every other test here, `'rank'` included, misses a bend: no monotone transform straightens a parabola. On a true chain x -> y -> z with y = x^2 over 8,000 rows, corr(x, y) is 0.009 while corr(|x|, y) is 0.920, and `'pearson'`, `'rank'` and `'mixed'` all return `y -- z` alone. The reverse error is worse because it invents rather than omits: where two variables are parabolas in a third and independent given it, Fisher's z rejects that true conditional independence 100% of the time, at full stability.
+
+   The method is RCoT (Strobl, Zhang and Visweswaran 2019), approximating KCIT with random Fourier features so the cost is linear in the rows rather than quadratic. Getting it right was the null, not the statistic. A two-moment gamma is the obvious approximation to a weighted sum of chi-squares and it is anticonservative in exactly the tail that decides edges, rejecting true independences 3-10% of the time at a nominal 1%; the three-moment method of Liu, Tang and Zhang (2009) holds it. 25 features for the conditioning set were not enough either - what they could not absorb came back as dependence between x and y, at 10% - and neither was a real ridge on the Gram matrix, which under-residualises: at 1e-6 relative the level went from 0.005 to 0.21. With 100 features and a 1e-8 nudge, the measured level end to end, as how often PC joins a truly independent pair, is 0.00-0.04 across four null cases at 1,000 to 8,000 rows against 1.00 for `'pearson'` and `'rank'` on the bent one, and the power on a bent dependence is 1.00 against their 0.04-0.06. On linear data it returns the same graph as `'pearson'`.
+
+   Two costs, both measured and both documented rather than discovered by a reader. It is about 100x slower: seven variables and 20,000 rows take 1.3 s without resampling and 13.6 s with the default 50, against 0.012 s. Caching the Gram factor per conditioning set, which PC asks about once per pair that could use it, took that from 29.6 s. And its power falls away when the conditioning set nearly determines one of the pair, since the bend is then in a small remainder: recovery of the bent edge over 40 draws was 40/40 while the third variable took 81% or less of the middle one, and 38-40/40 at 90%.
 
    Orienting the edges PC cannot is **DONE**, in two ways, because the `--` edges were the part of discovery that pushed the most work back onto the person reading it.
 

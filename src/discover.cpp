@@ -187,18 +187,24 @@ DiscoverSpec ParseDiscover(ClientContext &context, TableFunctionBindInput &input
 	if (entry != named.end() && !entry->second.IsNull()) {
 		spec.test = StringUtil::Lower(entry->second.ToString());
 	}
-	if (spec.test != "pearson" && spec.test != "rank" && spec.test != "mixed") {
-		throw BinderException("duckdo: test must be 'pearson', 'rank' or 'mixed', not '%s'. 'rank' tests on normal "
-		                      "scores, which only assumes that monotone transforms of the variables are jointly "
+	if (spec.test != "pearson" && spec.test != "rank" && spec.test != "mixed" && spec.test != "kernel") {
+		throw BinderException("duckdo: test must be 'pearson', 'rank', 'mixed' or 'kernel', not '%s'. 'rank' tests on "
+		                      "normal scores, which only assumes that monotone transforms of the variables are jointly "
 		                      "Gaussian; 'mixed' also reads each two-valued column as the threshold of a latent "
-		                      "Gaussian variable",
+		                      "Gaussian variable; 'kernel' assumes nothing about the shape of the dependence at all",
 		                      spec.test);
 	}
-	if (lingam && spec.test != "pearson") {
+	if (lingam && (spec.test == "rank" || spec.test == "mixed")) {
 		throw BinderException("duckdo: algorithm := '%s' cannot run with test := '%s'. LiNGAM reads direction from "
 		                      "the shape of each variable's disturbance, and '%s' replaces every column with scores "
 		                      "that are Gaussian by construction - exactly the case LiNGAM cannot read",
 		                      spec.algorithm, spec.test, spec.test);
+	}
+	if (spec.algorithm == "lingam" && spec.test != "pearson") {
+		throw BinderException("duckdo: algorithm := 'lingam' runs no independence tests, so test := '%s' would do "
+		                      "nothing. It is accepted with algorithm := 'both', where PC runs the tests and LiNGAM "
+		                      "reads the columns as they are",
+		                      spec.test);
 	}
 	return spec;
 }
@@ -437,6 +443,408 @@ double IndependencePValue(double r, double n, idx_t conditioning) {
 	return NormalTwoSidedP(z);
 }
 
+//! Centre and scale in place. A column with no spread is left alone; LoadNumeric
+//! has already refused a constant one, but a residual can still collapse.
+void Standardise(vector<double> &x) {
+	const double m = static_cast<double>(x.size());
+	double mean = 0.0;
+	for (auto value : x) {
+		mean += value;
+	}
+	mean /= m;
+	double ss = 0.0;
+	for (auto &value : x) {
+		value -= mean;
+		ss += value * value;
+	}
+	const double sd = std::sqrt(ss / m);
+	if (sd > 1e-12) {
+		for (auto &value : x) {
+			value /= sd;
+		}
+	}
+}
+
+// --- the kernel test -------------------------------------------------------------
+//
+// Every test above reads dependence through a correlation, which is why they all
+// miss a bend. Take a true chain x -> y -> z with y = x^2: the correlation of x and
+// y is 0.009 while the correlation of |x| and y is 0.92, so 'pearson' finds no edge
+// at all, and neither does 'rank', because no monotone transform straightens a
+// parabola. Worse, Fisher's z then rejects a true conditional independence through
+// a bent middle variable 100% of the time.
+//
+// RCoT (Strobl, Zhang and Visweswaran, Journal of Causal Inference 2019) tests
+// x _||_ y | S with no such assumption. It approximates the kernel test KCIT (Zhang,
+// Peters, Janzing and Scholkopf 2011) with random Fourier features: by Bochner's
+// theorem, sqrt(2/D) cos(w'x + b) with w drawn Gaussian and b uniform has an inner
+// product that estimates the Gaussian kernel, so a few hundred numbers per row stand
+// in for an n by n kernel matrix. That is what makes it affordable - KCIT is at least
+// quadratic in the rows, this is linear.
+//
+// The features of x and y are residualised on the features of S, and the statistic is
+// the squared cross-covariance of what is left. Its null is a weighted sum of
+// chi-squares. The obvious approximation, a gamma matched on two moments, is
+// anticonservative in the tail, which is the half that decides edges: it rejected true
+// independences 3-10% of the time at a nominal 1%. Liu, Tang and Zhang (2009) matches
+// three moments instead, by choosing a non-central chi-square with the right skewness,
+// and that holds the level at 0.0-2.5% across every null case measured.
+
+//! Rows the kernel test reads. It is linear in them, but it is run once per candidate
+//! conditioning set, and a kernel test does not need the rows a correlation does.
+constexpr idx_t kKernelRows = 2000;
+//! Features standing in for the kernel on a single column, and on a conditioning set.
+//! 25 for the set was not enough: what the features could not absorb of S came back as
+//! dependence between x and y, and the level went to 10%.
+constexpr idx_t kXyFeatures = 5;
+constexpr idx_t kSetFeatures = 100;
+//! Rows the median-distance bandwidth heuristic looks at.
+constexpr idx_t kBandwidthRows = 500;
+//! Conditioning sets whose Gram factor is kept. Each is D by D, so 64 of them is a few
+//! megabytes against the m by D features they save rebuilding.
+constexpr idx_t kGramCacheSets = 64;
+
+//! P(sum_i lambda_i chi2_1 > stat), for lambda the eigenvalues of the symmetric C, by
+//! Liu, Tang and Zhang (2009). Its cumulants are traces of powers of C, so this needs
+//! no eigenvalues.
+double WeightedChiSquareUpper(double stat, const vector<double> &C, idx_t k) {
+	vector<double> C2(k * k, 0.0);
+	for (idx_t a = 0; a < k; a++) {
+		for (idx_t b = 0; b < k; b++) {
+			double sum = 0.0;
+			for (idx_t c = 0; c < k; c++) {
+				sum += C[a * k + c] * C[c * k + b];
+			}
+			C2[a * k + b] = sum;
+		}
+	}
+	double c1 = 0.0, c2 = 0.0, c3 = 0.0, c4 = 0.0;
+	for (idx_t a = 0; a < k; a++) {
+		c1 += C[a * k + a];
+		c2 += C2[a * k + a];
+		for (idx_t b = 0; b < k; b++) {
+			c3 += C2[a * k + b] * C[b * k + a];
+			c4 += C2[a * k + b] * C2[b * k + a];
+		}
+	}
+	if (!(c2 > 0.0) || !(c3 > 0.0)) {
+		return 1.0;
+	}
+	const double s1 = c3 / std::pow(c2, 1.5);
+	const double s2 = c4 / (c2 * c2);
+	double a, delta, dof;
+	if (s1 * s1 > s2) {
+		a = 1.0 / (s1 - std::sqrt(s1 * s1 - s2));
+		delta = s1 * a * a * a - a * a;
+		dof = a * a - 2.0 * delta;
+	} else {
+		a = 1.0 / s1;
+		delta = 0.0;
+		dof = 1.0 / (s1 * s1);
+	}
+	const double q = (stat - c1) / std::sqrt(2.0 * c2) * (std::sqrt(2.0) * a) + dof + delta;
+	if (!(q > 0.0) || !(dof > 0.0)) {
+		return 1.0;
+	}
+	if (delta <= 0.0) {
+		return UpperGammaQ(dof / 2.0, q / 2.0);
+	}
+	// A non-central chi-square tail is a Poisson mixture of central ones.
+	double total = 0.0, weight = std::exp(-0.5 * delta);
+	for (idx_t term = 0; term < 400; term++) {
+		total += weight * UpperGammaQ(dof / 2.0 + static_cast<double>(term), q / 2.0);
+		weight *= 0.5 * delta / static_cast<double>(term + 1);
+		if (weight < 1e-15) {
+			break;
+		}
+	}
+	return std::min(1.0, std::max(0.0, total));
+}
+
+//! One column's standardised values over the sample, and the random Fourier features
+//! that stand in for a kernel on it.
+struct KernelTest {
+	idx_t m = 0;
+	idx_t p = 0;
+	//! [j] is column j over the sampled rows, standardised.
+	vector<vector<double>> value;
+	//! [j] is m x kXyFeatures for column j, already centred.
+	vector<vector<double>> feature;
+	//! kSetFeatures random directions in p dimensions, and their phases. They are drawn
+	//! once from duckdo_seed and reused by every resample, so the stability a bootstrap
+	//! reports is the sample's, not the features'.
+	vector<double> weight;
+	vector<double> phase;
+	//! The Cholesky factor of the set features' Gram matrix depends only on which columns
+	//! are being conditioned on, and building it is most of the cost of a test. PC asks
+	//! about the same conditioning set once per pair that could use it, so a handful of
+	//! them kept by hand turns that back into once per set. Only the factor is kept, not
+	//! the features themselves: D by D against m by D is 5% of the memory for most of the
+	//! saving. One test object per bootstrap replicate, so no two threads share this.
+	mutable vector<std::pair<vector<idx_t>, vector<double>>> gram_cache;
+
+	double PValue(idx_t i, idx_t j, const vector<idx_t> &S) const;
+};
+
+//! Cholesky factor L with A = L L', lower triangular, in place over the lower half.
+bool CholeskyFactorise(vector<double> &A, idx_t n) {
+	for (idx_t i = 0; i < n; i++) {
+		for (idx_t j = 0; j <= i; j++) {
+			double sum = A[i * n + j];
+			for (idx_t k = 0; k < j; k++) {
+				sum -= A[i * n + k] * A[j * n + k];
+			}
+			if (i == j) {
+				if (!(sum > 0.0)) {
+					return false;
+				}
+				A[i * n + i] = std::sqrt(sum);
+			} else {
+				A[i * n + j] = sum / A[j * n + j];
+			}
+		}
+	}
+	return true;
+}
+
+//! Solve A x = b from the factor CholeskyFactorise left behind.
+void CholeskySolveFactored(const vector<double> &L, idx_t n, const vector<double> &b, vector<double> &x) {
+	x.assign(n, 0.0);
+	for (idx_t i = 0; i < n; i++) {
+		double sum = b[i];
+		for (idx_t k = 0; k < i; k++) {
+			sum -= L[i * n + k] * x[k];
+		}
+		x[i] = sum / L[i * n + i];
+	}
+	for (idx_t i = n; i-- > 0;) {
+		double sum = x[i];
+		for (idx_t k = i + 1; k < n; k++) {
+			sum -= L[k * n + i] * x[k];
+		}
+		x[i] = sum / L[i * n + i];
+	}
+}
+
+//! Median pairwise distance over a strided subsample - the usual kernel bandwidth.
+double MedianDistance(const KernelTest &k, const vector<idx_t> &columns) {
+	const idx_t m = k.m;
+	const idx_t take = std::min(m, kBandwidthRows);
+	vector<idx_t> pick(take);
+	for (idx_t a = 0; a < take; a++) {
+		pick[a] = take == m ? a : a * (m - 1) / (take - 1);
+	}
+	vector<double> distances;
+	distances.reserve(take * (take - 1) / 2);
+	for (idx_t a = 0; a < take; a++) {
+		for (idx_t b = a + 1; b < take; b++) {
+			double sum = 0.0;
+			for (auto column : columns) {
+				const double d = k.value[column][pick[a]] - k.value[column][pick[b]];
+				sum += d * d;
+			}
+			distances.push_back(sum);
+		}
+	}
+	if (distances.empty()) {
+		return 1.0;
+	}
+	const idx_t middle = distances.size() / 2;
+	std::nth_element(distances.begin(), distances.begin() + middle, distances.end());
+	const double median = std::sqrt(distances[middle]);
+	return median > 1e-12 ? median : 1.0;
+}
+
+//! Centre each column of an m x d block in place.
+void CentreColumns(vector<double> &block, idx_t m, idx_t d) {
+	for (idx_t c = 0; c < d; c++) {
+		double mean = 0.0;
+		for (idx_t r = 0; r < m; r++) {
+			mean += block[r * d + c];
+		}
+		mean /= static_cast<double>(m);
+		for (idx_t r = 0; r < m; r++) {
+			block[r * d + c] -= mean;
+		}
+	}
+}
+
+double KernelTest::PValue(idx_t i, idx_t j, const vector<idx_t> &S) const {
+	const idx_t d = kXyFeatures;
+	vector<double> fx = feature[i], fy = feature[j];
+	if (!S.empty()) {
+		const idx_t D = kSetFeatures;
+		const double bandwidth = MedianDistance(*this, S);
+		vector<double> fz(m * D, 0.0);
+		for (idx_t r = 0; r < m; r++) {
+			for (idx_t c = 0; c < D; c++) {
+				fz[r * D + c] = phase[c];
+			}
+		}
+		for (auto column : S) {
+			const auto &values = value[column];
+			for (idx_t c = 0; c < D; c++) {
+				const double w = weight[c * p + column] / bandwidth;
+				for (idx_t r = 0; r < m; r++) {
+					fz[r * D + c] += w * values[r];
+				}
+			}
+		}
+		const double scale = std::sqrt(2.0 / static_cast<double>(D));
+		for (auto &entry : fz) {
+			entry = scale * std::cos(entry);
+		}
+		CentreColumns(fz, m, D);
+
+		// Regress the x and y features on the set's features and keep the residual.
+		// The nudge on the diagonal is only enough to make the solve safe: a real ridge
+		// leaves part of S unabsorbed, and that reads as dependence between x and y. At
+		// 1e-6 relative the level went from 0.005 to 0.21.
+		const vector<double> *factor = nullptr;
+		for (auto &entry : gram_cache) {
+			if (entry.first == S) {
+				factor = &entry.second;
+				break;
+			}
+		}
+		vector<double> built;
+		if (!factor) {
+			built.assign(D * D, 0.0);
+			for (idx_t a = 0; a < D; a++) {
+				for (idx_t b = a; b < D; b++) {
+					double sum = 0.0;
+					for (idx_t r = 0; r < m; r++) {
+						sum += fz[r * D + a] * fz[r * D + b];
+					}
+					built[a * D + b] = built[b * D + a] = sum / static_cast<double>(m);
+				}
+			}
+			double trace = 0.0;
+			for (idx_t a = 0; a < D; a++) {
+				trace += built[a * D + a];
+			}
+			for (idx_t a = 0; a < D; a++) {
+				built[a * D + a] += 1e-8 * trace / static_cast<double>(D);
+			}
+			if (!CholeskyFactorise(built, D)) {
+				return 1.0;
+			}
+			if (gram_cache.size() >= kGramCacheSets) {
+				gram_cache.erase(gram_cache.begin());
+			}
+			gram_cache.push_back(std::make_pair(S, built));
+			factor = &gram_cache.back().second;
+		}
+		vector<double> rhs(D), solution;
+		for (int side = 0; side < 2; side++) {
+			vector<double> &f = side == 0 ? fx : fy;
+			for (idx_t c = 0; c < d; c++) {
+				for (idx_t a = 0; a < D; a++) {
+					double sum = 0.0;
+					for (idx_t r = 0; r < m; r++) {
+						sum += fz[r * D + a] * f[r * d + c];
+					}
+					rhs[a] = sum / static_cast<double>(m);
+				}
+				CholeskySolveFactored(*factor, D, rhs, solution);
+				for (idx_t r = 0; r < m; r++) {
+					double fitted = 0.0;
+					for (idx_t a = 0; a < D; a++) {
+						fitted += fz[r * D + a] * solution[a];
+					}
+					f[r * d + c] -= fitted;
+				}
+			}
+		}
+		CentreColumns(fx, m, d);
+		CentreColumns(fy, m, d);
+	}
+
+	// The statistic is m times the squared norm of the mean of the outer products, and
+	// its null weights are the eigenvalues of their covariance.
+	const idx_t k = d * d;
+	vector<double> mean(k, 0.0);
+	vector<double> W(m * k);
+	for (idx_t r = 0; r < m; r++) {
+		for (idx_t a = 0; a < d; a++) {
+			for (idx_t b = 0; b < d; b++) {
+				const double product = fx[r * d + a] * fy[r * d + b];
+				W[r * k + a * d + b] = product;
+				mean[a * d + b] += product;
+			}
+		}
+	}
+	for (auto &entry : mean) {
+		entry /= static_cast<double>(m);
+	}
+	double stat = 0.0;
+	for (auto entry : mean) {
+		stat += entry * entry;
+	}
+	stat *= static_cast<double>(m);
+	vector<double> C(k * k, 0.0);
+	for (idx_t a = 0; a < k; a++) {
+		for (idx_t b = a; b < k; b++) {
+			double sum = 0.0;
+			for (idx_t r = 0; r < m; r++) {
+				sum += (W[r * k + a] - mean[a]) * (W[r * k + b] - mean[b]);
+			}
+			C[a * k + b] = C[b * k + a] = sum / static_cast<double>(m);
+		}
+	}
+	return WeightedChiSquareUpper(stat, C, k);
+}
+
+//! Build the kernel test for one sample of rows. The features of each column are
+//! computed once here rather than per test, because they do not depend on what the
+//! column is being tested against.
+KernelTest MakeKernelTest(const NumericTable &t, const vector<idx_t> &rows, int64_t seed) {
+	KernelTest k;
+	k.p = t.p;
+	const idx_t stride = std::max<idx_t>(1, (rows.size() + kKernelRows - 1) / kKernelRows);
+	vector<idx_t> sample;
+	for (idx_t r = 0; r < rows.size(); r += stride) {
+		sample.push_back(rows[r]);
+	}
+	k.m = sample.size();
+	k.value.assign(t.p, vector<double>(k.m));
+	for (idx_t j = 0; j < t.p; j++) {
+		for (idx_t r = 0; r < k.m; r++) {
+			k.value[j][r] = t.data[sample[r] * t.p + j];
+		}
+		Standardise(k.value[j]);
+	}
+
+	std::mt19937_64 rng(static_cast<uint64_t>(seed) ^ 0x9E3779B97F4A7C15ULL);
+	std::normal_distribution<double> gaussian(0.0, 1.0);
+	std::uniform_real_distribution<double> uniform(0.0, 2.0 * 3.14159265358979323846);
+	k.weight.resize(kSetFeatures * t.p);
+	k.phase.resize(kSetFeatures);
+	for (idx_t c = 0; c < kSetFeatures; c++) {
+		for (idx_t j = 0; j < t.p; j++) {
+			k.weight[c * t.p + j] = gaussian(rng);
+		}
+		k.phase[c] = uniform(rng);
+	}
+
+	k.feature.assign(t.p, vector<double>(k.m * kXyFeatures));
+	const double scale = std::sqrt(2.0 / static_cast<double>(kXyFeatures));
+	vector<idx_t> one(1);
+	for (idx_t j = 0; j < t.p; j++) {
+		one[0] = j;
+		const double bandwidth = MedianDistance(k, one);
+		for (idx_t c = 0; c < kXyFeatures; c++) {
+			const double w = gaussian(rng) / bandwidth;
+			const double b = uniform(rng);
+			for (idx_t r = 0; r < k.m; r++) {
+				k.feature[j][r * kXyFeatures + c] = scale * std::cos(w * k.value[j][r] + b);
+			}
+		}
+		CentreColumns(k.feature[j], k.m, kXyFeatures);
+	}
+	return k;
+}
+
 // --- the test object: Fisher's z, or the mixed-data Wald test --------------------
 
 //! One conditional-independence test over one sample of rows. Pearson and rank
@@ -455,6 +863,10 @@ struct CiTest {
 	idx_t rows = 0;
 	//! [a * p + b] for a < b: each row's influence on C[a][b]. Mixed only.
 	vector<vector<float>> psi;
+	//! test := 'kernel': the features, held by value because each resample has its own
+	//! sample of rows and the bootstrap runs the replicates in parallel.
+	bool kernel = false;
+	KernelTest features;
 
 	double PValue(idx_t i, idx_t j, const vector<idx_t> &S) const;
 };
@@ -977,6 +1389,9 @@ double MixedPValue(const CiTest &test, idx_t i, idx_t j, const vector<idx_t> &S)
 }
 
 double CiTest::PValue(idx_t i, idx_t j, const vector<idx_t> &S) const {
+	if (kernel) {
+		return features.PValue(i, j, S);
+	}
 	if (mixed) {
 		return MixedPValue(*this, i, j, S);
 	}
@@ -1723,28 +2138,6 @@ double EntropyApprox(const vector<double> &u) {
 	return base - kK1 * (log_cosh - kGamma) * (log_cosh - kGamma) - kK2 * gauss * gauss;
 }
 
-//! Centre and scale in place. A column with no spread is left alone; LoadNumeric
-//! has already refused a constant one, but a residual can still collapse.
-void Standardise(vector<double> &x) {
-	const double m = static_cast<double>(x.size());
-	double mean = 0.0;
-	for (auto value : x) {
-		mean += value;
-	}
-	mean /= m;
-	double ss = 0.0;
-	for (auto &value : x) {
-		value -= mean;
-		ss += value * value;
-	}
-	const double sd = std::sqrt(ss / m);
-	if (sd > 1e-12) {
-		for (auto &value : x) {
-			value /= sd;
-		}
-	}
-}
-
 //! The residual of xi on xj, both standardised, standardised again. With unit
 //! variances the slope is just their correlation.
 void UniResidual(const vector<double> &xi, const vector<double> &xj, vector<double> &out) {
@@ -2154,6 +2547,9 @@ CiTest MakeTest(const Discovery &out, const vector<idx_t> &rows, bool *repaired 
 	test.n = static_cast<double>(t.n);
 	if (out.spec.test == "mixed") {
 		MixedLatent(t, rows, out.binary, test, repaired);
+	} else if (out.spec.test == "kernel") {
+		test.kernel = true;
+		test.features = MakeKernelTest(t, rows, out.spec.seed);
 	} else {
 		test.C = Correlation(t, rows);
 	}
@@ -2327,11 +2723,16 @@ void RunLingamDiscovery(Discovery &out, const char *fn) {
 				draws[rep] = draw.graph;
 				return;
 			}
-			// The same correlations PC would have built for itself on these rows.
+			// The same test PC would have built for itself on these rows. For 'pearson'
+			// that is the correlation matrix LiNGAM has already computed.
 			CiTest test;
-			test.p = p;
-			test.n = static_cast<double>(t.n);
-			test.C = resampled;
+			if (out.spec.test == "kernel") {
+				test = MakeTest(out, rows);
+			} else {
+				test.p = p;
+				test.n = static_cast<double>(t.n);
+				test.C = resampled;
+			}
 			draws[rep] =
 			    MergeGraphs(RunPc(test, out.spec.alpha, out.spec.max_conditioning, out.knowledge), draw.graph, nullptr);
 		});
@@ -2453,6 +2854,23 @@ void NoteTiers(Discovery &out) {
 //! With test := 'rank' or 'mixed', say what the tests assume in place of
 //! linear-Gaussian dependence, and name the columns each reads specially.
 void NoteTest(Discovery &out, const vector<string> &coarse) {
+	if (out.spec.test == "kernel") {
+		for (auto &warning : out.warnings) {
+			warning = StringUtil::Replace(warning, "Fisher-z tests",
+			                              "kernel tests of conditional independence (RCoT, random Fourier features)");
+			warning =
+			    StringUtil::Replace(warning, "linear-Gaussian dependence", "no particular shape of dependence at all");
+		}
+		out.warnings.push_back(StringUtil::Format(
+		    "the kernel test read %llu of the %llu rows, taken by stride in content order. It sees a dependence that "
+		    "bends, which every other test here misses: on a true chain with a squared middle variable, Fisher's z "
+		    "rejects the true conditional independence every time and this holds its level",
+		    static_cast<unsigned long long>(std::min(out.table.n, kKernelRows)),
+		    static_cast<unsigned long long>(out.table.n)));
+		out.warnings.push_back("the random features are drawn once from duckdo_seed and reused by every resample, so "
+		                       "what the stabilities measure is the sample rather than the draw");
+		return;
+	}
 	if (out.spec.test == "rank") {
 		for (auto &warning : out.warnings) {
 			warning = StringUtil::Replace(warning, "Fisher-z tests", "rank-based Fisher-z tests (normal scores)");
@@ -2524,6 +2942,7 @@ Discovery RunDiscovery(ClientContext &context, TableFunctionBindInput &input, co
 	}
 	if (out.spec.algorithm == "lingam" || out.spec.algorithm == "both") {
 		RunLingamDiscovery(out, fn);
+		NoteTest(out, coarse);
 		NoteTiers(out);
 		return out;
 	}
