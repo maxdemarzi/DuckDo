@@ -178,6 +178,29 @@ NOT_RUN = {
 }
 REFERENCE = re.compile(r"`(do_[a-z_]+)`")
 
+# Parameters whose value is one of a fixed set of words. The set is not kept here but read
+# from the extension's own refusal - call it with a value it cannot accept and it lists the
+# ones it can - so it cannot drift from the code the way a hand-kept list would. Checking
+# names alone let the `agreement` column gain "oriented by resit" while the reference still
+# showed only "oriented by lingam".
+ENUMERATED = {
+    "do_discover": ["algorithm", "test"],
+}
+ACCEPTED = re.compile(r"must be ((?:'[^']+'(?:, | or )?)+)")
+
+# Values a function puts in a column. No signature reveals these, so they are kept by hand.
+EMITTED = {
+    "agreement": [
+        "both",
+        "conflict",
+        "pc only",
+        "oriented by lingam",
+        "oriented by resit",
+        "lingam only",
+        "resit only",
+    ],
+}
+
 
 def run(duckdb, sql):
     process = subprocess.run([duckdb, "-batch", "-list", "-noheader"], input=sql, capture_output=True, text=True)
@@ -252,7 +275,29 @@ def main():
             failures.append("parameter %s is registered on %s and documented nowhere"
                             % (name, ", ".join(holders[:4]) + (" ..." if len(holders) > 4 else "")))
 
-    print("%d functions registered, %d documented, %d exercised" % (len(registered), len(entries), len(columns)))
+    # Enumerated parameter values, read back from the extension's own refusal.
+    checked_values = 0
+    for fn, params in sorted(ENUMERATED.items()):
+        for param in params:
+            probe = "SELECT * FROM %s('demo', %s := 'no_such_value');" % (fn, param)
+            _, message = run(duckdb, FIXTURES + probe)
+            listed = ACCEPTED.search(message)
+            if not listed:
+                failures.append("could not read the accepted values of %s's %s from its refusal" % (fn, param))
+                continue
+            for value in re.findall(r"'([^']+)'", listed.group(1)):
+                checked_values += 1
+                if ("`%s`" % value) not in doc and ("'%s'" % value) not in doc:
+                    failures.append("%s := '%s' is accepted and never appears in the reference" % (param, value))
+
+    for column, values in sorted(EMITTED.items()):
+        for value in values:
+            checked_values += 1
+            if ("`%s`" % value) not in doc:
+                failures.append("the %s column can say '%s', which the reference never shows" % (column, value))
+
+    print("%d functions registered, %d documented, %d exercised, %d accepted values checked"
+          % (len(registered), len(entries), len(columns), checked_values))
     for fn, why in sorted(NOT_RUN.items()):
         print("  %s not run: %s" % (fn, why))
     print()
@@ -262,7 +307,8 @@ def main():
         print("\n%d problem(s) in %s" % (len(failures), args.docs))
         return 1
     print("The function reference matches the extension: every function documented, every column\n"
-          "named in its entry, every parameter documented somewhere.")
+          "named in its entry, every parameter documented somewhere, and every value those\n"
+          "parameters accept shown at least once.")
     return 0
 
 

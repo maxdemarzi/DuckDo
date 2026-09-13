@@ -663,13 +663,16 @@ less of the target's variance than a straight line does, and `warnings` reports 
 **`algorithm := 'pc+resit'`** run PC-stable over the same rows and report the union, with an extra
 `agreement` column saying how the two landed on each pair:
 
+The value names whichever method was paired with PC, so `'pc+lingam'` reports
+`oriented by lingam` and `'pc+resit'` reports `oriented by resit`:
+
 | `agreement` | meaning |
 |---|---|
 | `both` | both found the edge and gave it the same direction |
-| `oriented by lingam` | both found it; PC could not orient it, the functional method did |
+| `oriented by lingam` / `oriented by resit` | both found it; PC could not orient it, the other did |
 | `conflict` | both found it and oriented it opposite ways, so `edge` is `--` |
 | `pc only` | only PC's skeleton had it |
-| `lingam only` | only the functional method had it |
+| `lingam only` / `resit only` | only the functional method had it |
 
 Where PC oriented an edge its orientation stands, because it rests on the weaker assumptions.
 Where PC left one undirected, the functional method's direction fills it in. Where the two point opposite ways the
@@ -677,7 +680,7 @@ edge goes back to `--` and to review, because two methods contradicting each oth
 for either answer. A `conflict` is worth reading closely rather than resolving: both methods assume
 nothing unmeasured causes two variables, so a hidden common cause breaks both, and it breaks them
 differently. On a -> c <- b with a and c also sharing a hidden cause, PC reads the v-structure off
-the skeleton while LiNGAM puts the confounded pair in an order of its own, and `both` returns
+the skeleton while LiNGAM puts the confounded pair in an order of its own, and `'pc+lingam'` returns
 `a -- c  conflict` alongside an edge `b -> a` that LiNGAM invented and PC never saw.
 
 - **Columns.** The default is every numeric or boolean column. Use `columns := [...]` to choose, or
